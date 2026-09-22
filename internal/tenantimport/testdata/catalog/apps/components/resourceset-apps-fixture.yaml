@@ -1,0 +1,126 @@
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: apps-fixture
+  namespace: flux-system
+spec:
+  resourcesTemplate: |
+    <<- $components := get inputs "components" | default dict >>
+    <<- $pgbackuprepository := get $components "pgbackuprepository" | default list >>
+    <<- range $component := $pgbackuprepository >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/pgbackuprepository/app/overlays/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+    <<- end >>
+    <<- $postgres := get $components "postgres" | default list >>
+    <<- range $component := $postgres >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    <<- $dependencies := get $componentConfig "dependencies" | default dict >>
+    <<- $pgbackuprepositoryDependency := get $dependencies "pgbackuprepository" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/postgres/app/overlays/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+      healthCheckExprs:
+        - apiVersion: postgres.stratio.com/v1
+          kind: PgCluster
+          failed: status.phase == 'Failed'
+    <<- $agentConfig := get $componentConfig "agent" | default dict >>
+    <<- $agentName := printf "%s-gosec-agent" (get $component "name") >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< $agentName >>
+    spec:
+      dependsOn:
+        - name: apps-<< get $component "name" >>
+      path: ./components/gosec-agent/app/overlays/postgres/<< $componentSize >>
+      patches: << get $agentConfig "patches" | default list | toJson >>
+    <<- end >>
+    <<- $pgbouncer := get $components "pgbouncer" | default list >>
+    <<- range $component := $pgbouncer >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    <<- $dependencies := get $componentConfig "dependencies" | default dict >>
+    <<- $postgresDependency := get $dependencies "postgres" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/pgbouncer/app/overlays/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+      healthCheckExprs:
+        - apiVersion: postgres.stratio.com/v1
+          kind: PGBouncer
+          failed: status.phase == 'Failed'
+    <<- end >>
+    <<- $virtualizer := get $components "virtualizer" | default list >>
+    <<- range $component := $virtualizer >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    <<- $dependencies := get $componentConfig "dependencies" | default dict >>
+    <<- $postgresDependency := get $dependencies "postgres" | default dict >>
+    <<- $pgbouncerDependency := get $dependencies "pgbouncer" | default dict >>
+    <<- $connectorsDependency := get $dependencies "connectors" | default dict >>
+    <<- $hdfsDependency := get $dependencies "hdfs" | default dict >>
+    <<- $storageType := get $componentConfig "type" | default "s3" >>
+    <<- if eq $storageType "hdfs" >>
+    connectors: << get $connectorsDependency "name" >>
+    hdfs: << get $hdfsDependency "name" >>
+    <<- end >>
+    UI_ENABLED: << get $componentConfig "uiEnabled" | default "false" >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/virtualizer/app/overlays/<< $storageType >>/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+    <<- end >>
+    <<- $hdfs := get $components "hdfs" | default list >>
+    <<- range $component := $hdfs >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/hdfs/app/overlays/default/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+    <<- end >>
+    <<- $connectors := get $components "connectors" | default list >>
+    <<- range $component := $connectors >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/connectors/app/overlays/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+    <<- end >>
+    <<- $kafka := get $components "kafka" | default list >>
+    <<- range $component := $kafka >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/kafka/app/overlays/default/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+    KAFKA_EXPOSED: << get $componentConfig "kafkaClusterExposed" | default "false" >>
+    <<- end >>

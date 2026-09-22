@@ -1,0 +1,81 @@
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: apps-fixture
+  namespace: flux-system
+spec:
+  resourcesTemplate: |
+    <<- $components := get inputs "components" | default dict >>
+    <<- $postgres := get $components "postgres" | default list >>
+    <<- range $component := $postgres >>
+    <<- $componentSize := get (get $component "config" | default dict) "size" | default "S" >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    <<- $dependencies := get $componentConfig "dependencies" | default dict >>
+    <<- $pgbackuprepositoryDependency := get $dependencies "pgbackuprepository" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+      namespace: << inputs.tenantName >>-datastores
+    spec:
+      path: components/postgres/app/overlays/<< $componentSize >>
+      sourceRef:
+        kind: GitRepository
+        name: keos-apps
+        namespace: flux-system
+      patches: << get $component "patches" | default list | toJson >>
+      healthCheckExprs:
+        - apiVersion: postgres.stratio.com/v1
+          kind: PgCluster
+          failed: status.phase == 'Failed'
+          current: status.phase == 'Running'
+    <<- $agentConfig := get $componentConfig "agent" | default dict >>
+    <<- $agentName := printf "%s-gosec-agent" (get $component "name") >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< $agentName >>
+      namespace: << inputs.tenantName >>-datastores
+    spec:
+      dependsOn:
+        - name: apps-<< get $component "name" >>
+      path: ./components/gosec-agent/app/overlays/postgres/<< $componentSize >>
+      sourceRef:
+        kind: GitRepository
+        name: keos-apps
+        namespace: flux-system
+      patches: << get $agentConfig "patches" | default list | toJson >>
+    <<- end >>
+    <<- $rocket := get $components "rocket" | default list >>
+    <<- range $component := $rocket >>
+    <<- $componentSize := get (get $component "config" | default dict) "size" | default "S" >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+      namespace: << inputs.tenantName >>-apps
+    spec:
+      path: components/rocket/app/overlays/<< $componentSize >>
+      sourceRef:
+        kind: GitRepository
+        name: keos-apps
+        namespace: flux-system
+      patches: << get $component "patches" | default list | toJson >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>-postrequisites
+      namespace: << inputs.tenantName >>-apps
+    spec:
+      path: components/rocket/config/talk-to-your-data/postrequisites
+      sourceRef:
+        kind: GitRepository
+        name: keos-apps
+        namespace: flux-system
+      patches: []
+    <<- end >>

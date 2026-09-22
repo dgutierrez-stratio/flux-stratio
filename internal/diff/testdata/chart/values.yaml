@@ -1,0 +1,4 @@
+genaiDeveloperProxy:
+  general:
+    log:
+      apiLogLevel: INFO
