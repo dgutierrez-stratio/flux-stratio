@@ -2,7 +2,7 @@ PLUGIN_DIR := $(HOME)/.fluxcd/plugins
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/Stratio/flux-stratio/internal/cli.version=$(VERSION)
 
-.PHONY: build install vet lint fmt-check test clean package deploy change-version
+.PHONY: build install vet lint fmt-check test clean package install-package deploy change-version
 
 build:
 	GOWORK=off go build -ldflags "$(LDFLAGS)" -o bin/flux-stratio ./cmd/flux-stratio
@@ -27,10 +27,13 @@ test:
 	GOWORK=off go test ./...
 
 clean:
-	rm -rf bin
+	rm -rf bin/flux-stratio bin/flux-stratio-*.tar.gz
 
 package:
 	make build && bin/package.sh $(version)
+
+install-package: package
+	bin/install-package.sh $(version)
 
 deploy:
 	bin/deploy.sh $(version)

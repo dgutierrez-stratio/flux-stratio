@@ -24,6 +24,24 @@ func TestRender_CorrectLabel(t *testing.T) {
 	}
 }
 
+func TestRender_UsesTwoSpaceIndent(t *testing.T) {
+	// gopkg.in/yaml.v3's default Marshal indents 4 spaces; this plugin's
+	// convention (internal/tenantfile.Doc.Bytes) is 2, everywhere it
+	// writes YAML.
+	components := Components{"postgres": {{Name: "psql"}}}
+	out, err := Render("stratio", "S", components)
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "\n  name: stratio") {
+		t.Errorf("output not indented 2 spaces under metadata; got:\n%s", s)
+	}
+	if strings.Contains(s, "\n    name:") || strings.Contains(s, "\n    namespace:") {
+		t.Errorf("output is 4-space indented, want 2; got:\n%s", s)
+	}
+}
+
 func TestRender_ValidYAMLStructure(t *testing.T) {
 	components := Components{
 		"postgres": {{

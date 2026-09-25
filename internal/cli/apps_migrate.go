@@ -84,12 +84,22 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 
 	var failed []string
 	for _, app := range apps {
-		if err := migrateOne(cmd, app, base, cluster, tenant, cat, c, logger, dryRun, yes); err != nil {
-			logger.Failuref("%q: %v", app.Name, err)
-			failed = append(failed, app.ID)
-			if !continueOnError {
-				break
-			}
+		err := migrateOne(cmd, app, base, cluster, tenant, cfg.ChartsBase, cat, c, logger, dryRun, yes)
+		if err == nil {
+			continue
+		}
+		// A single requested app just returns its own error as-is —
+		// narrating it here too would only repeat the same text a second
+		// time as the final aggregated "Error: ...". With more than one
+		// app, the per-app ✗ line and the aggregate list of failed IDs
+		// genuinely say different things, so both stay.
+		if len(apps) == 1 {
+			return err
+		}
+		logger.Failuref("%q: %v", app.Name, err)
+		failed = append(failed, app.ID)
+		if !continueOnError {
+			break
 		}
 	}
 	if len(failed) > 0 {
@@ -98,7 +108,7 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 	return nil
 }
 
-func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant string, cat *catalog.Catalog, c client.Client, logger *log.Logger, dryRun, yes bool) error {
+func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chartsBase string, cat *catalog.Catalog, c client.Client, logger *log.Logger, dryRun, yes bool) error {
 	if app.Prepare != "" {
 		if err := ensurePrepared(cmd, app, tenant, c, logger, dryRun, yes); err != nil {
 			return err
@@ -106,7 +116,7 @@ func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant string
 	}
 
 	opts := appmigrate.Options{
-		Base: base, Cluster: cluster, Tenant: tenant, App: app, Catalog: cat,
+		Base: base, Cluster: cluster, Tenant: tenant, ChartsBase: chartsBase, App: app, Catalog: cat,
 		Runner: runner.Exec{}, Client: c, Log: logger,
 	}
 

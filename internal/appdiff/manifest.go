@@ -40,7 +40,7 @@ func manifestDiff(ctx context.Context, opts Options, rendered *render.Result) (*
 // fetchLiveManifestObject fetches the live cluster object at gvk/namespace,
 // falling back to App.PreviousNamespace if it isn't found there.
 func fetchLiveManifestObject(ctx context.Context, opts Options, gvk schema.GroupVersionKind, namespace string) (*unstructured.Unstructured, error) {
-	name := liveObjectName(opts.App)
+	name := opts.App.LiveName()
 	live, err := kubeclient.GetUnstructured(ctx, opts.Client, gvk, namespace, name)
 	if err != nil && kubeclient.IsNotFound(err) && opts.App.PreviousNamespace != "" {
 		live, err = kubeclient.GetUnstructured(ctx, opts.Client, gvk, opts.App.PreviousNamespace, name)

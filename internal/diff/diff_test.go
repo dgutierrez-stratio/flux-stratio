@@ -29,6 +29,38 @@ func TestMarshalPatchYAML_StrategicMerge(t *testing.T) {
 	}
 }
 
+func TestMarshalPatchYAML_UsesTwoSpaceIndent(t *testing.T) {
+	// gopkg.in/yaml.v3's default Marshal would indent "values:" 4 spaces
+	// deeper than "spec:" (and so on up the tree); this plugin's
+	// convention (internal/tenantfile.Doc.Bytes) is 2 spaces per level
+	// everywhere it writes YAML — including a generated patch's literal
+	// `patch: |` block body, which isn't re-flowed once it's spliced into
+	// the tenant file (it's a pre-rendered string embedded verbatim).
+	doc := PatchDoc{
+		TargetKind: "HelmRelease",
+		Patch: map[string]any{
+			"spec": map[string]any{"values": map[string]any{"foo": "bar"}},
+		},
+	}
+	out, err := MarshalPatchYAML(doc)
+	if err != nil {
+		t.Fatalf("MarshalPatchYAML returned error: %v", err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		"\n  - patch: |",
+		"\n      spec:",
+		"\n        values:",
+		"\n          foo: bar",
+		"\n    target:",
+		"\n      kind: HelmRelease",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q (want 2-space indent throughout); got:\n%s", want, s)
+		}
+	}
+}
+
 func TestMarshalPatchYAML_JSON6902(t *testing.T) {
 	doc := PatchDoc{
 		TargetKind: "PgCluster",
@@ -89,6 +121,34 @@ func TestPatchEntryNode_LiteralBlockAndShape(t *testing.T) {
 	}
 	if strings.HasPrefix(strings.TrimSpace(s), "patches:") {
 		t.Error("PatchEntryNode must not include the outer 'patches:' wrapper key — that's MarshalPatchYAML's job")
+	}
+}
+
+func TestPatchEntryNode_LiteralBlockBodyUsesTwoSpaceIndent(t *testing.T) {
+	// PatchEntryNode is what internal/tenantfile.Splice embeds into the
+	// tenant file — its literal `patch: |` block body must already be
+	// 2-space indented, since splicing doesn't re-flow a literal
+	// scalar's text, only the document structure around it.
+	doc := PatchDoc{
+		TargetKind: "HelmRelease",
+		Patch: map[string]any{
+			"spec": map[string]any{"values": map[string]any{"foo": "bar"}},
+		},
+	}
+	node, err := PatchEntryNode(doc)
+	if err != nil {
+		t.Fatalf("PatchEntryNode returned error: %v", err)
+	}
+
+	patchField := node.Content[0] // the "patch" key's value scalar
+	for i, c := range node.Content {
+		if c.Value == "patch" {
+			patchField = node.Content[i+1]
+			break
+		}
+	}
+	if !strings.Contains(patchField.Value, "\n  values:") || !strings.Contains(patchField.Value, "\n    foo: bar") {
+		t.Errorf("literal patch body not 2-space indented; got:\n%s", patchField.Value)
 	}
 }
 

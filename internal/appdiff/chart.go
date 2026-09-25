@@ -30,7 +30,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 	if opts.Baseline != "" {
 		liveEnv, err = readBaselineEnvFile(opts.Baseline, "env-vars.env")
 	} else {
-		liveWorkloads := fetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
+		liveWorkloads := FetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
 		if len(liveWorkloads) == 0 {
 			return nil, fmt.Errorf("no live workload found for chart %q among %v", opts.App.ChartPath, workloadKinds)
 		}
@@ -71,12 +71,16 @@ func renderChart(ctx context.Context, opts Options, rendered *render.Result) ([]
 	return docs, namespace, nil
 }
 
-// fetchLiveWorkloads fetches every Deployment/StatefulSet/DaemonSet
+// FetchLiveWorkloads fetches every Deployment/StatefulSet/DaemonSet
 // renderedDocs declares from the live cluster, applying App.Renamed and
 // App.PreviousNamespace. A workload the chart renders but that never
 // existed live is skipped, not an error — the caller decides whether
-// finding none of them is a failure.
-func fetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []*unstructured.Unstructured {
+// finding none of them is a failure. Exported for internal/backup, which
+// runs the same chart-templating pipeline against a live (not
+// flux-rendered) HelmRelease's own values to capture every sibling
+// workload a multi-workload chart declares, not just the one named after
+// the app itself.
+func FetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []*unstructured.Unstructured {
 	var workloadDocs []*unstructured.Unstructured
 	for _, kind := range workloadKinds {
 		workloadDocs = append(workloadDocs, yamldocs.FindByKind(renderedDocs, kind)...)
@@ -164,7 +168,7 @@ func LiveChartWorkloads(ctx context.Context, opts Options) ([]*unstructured.Unst
 	if err != nil {
 		return nil, err
 	}
-	live := fetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
+	live := FetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
 	if len(live) == 0 {
 		return nil, fmt.Errorf("no live workload found for chart %q among %v", opts.App.ChartPath, workloadKinds)
 	}

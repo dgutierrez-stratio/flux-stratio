@@ -1,6 +1,6 @@
 /dist/
 /bin/flux-stratio
-/bin/flux-stratio_*.tar.gz
+/bin/flux-stratio-*.tar.gz
 *.exe
 *.test
 *.out

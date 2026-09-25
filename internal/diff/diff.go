@@ -15,6 +15,7 @@
 package diff
 
 import (
+	"bytes"
 	"fmt"
 
 	"gopkg.in/yaml.v3"
@@ -67,11 +68,31 @@ func MarshalPatchYAML(doc PatchDoc) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := yaml.Marshal(patchWrapper{Patches: []patchEntry{entry}})
+	out, err := marshalIndent2(patchWrapper{Patches: []patchEntry{entry}})
 	if err != nil {
 		return nil, fmt.Errorf("marshaling patches wrapper: %w", err)
 	}
 	return out, nil
+}
+
+// marshalIndent2 is yaml.Marshal at 2-space indent — matching every other
+// YAML file this plugin writes (see internal/tenantfile.Doc.Bytes)
+// instead of yaml.v3's own 4-space default, which is what every reader of
+// a generated patch actually sees: this is what ends up embedded verbatim
+// inside the tenant file's literal `patch: |` block (via newPatchEntry,
+// shared by MarshalPatchYAML and PatchEntryNode below), so its indent
+// isn't re-flowed by whatever encodes the surrounding document later.
+func marshalIndent2(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // PatchEntryNode builds the single {patch: |, target: {kind}} node this
@@ -93,7 +114,7 @@ func PatchEntryNode(doc PatchDoc) (*yaml.Node, error) {
 }
 
 func newPatchEntry(doc PatchDoc) (patchEntry, error) {
-	inner, err := yaml.Marshal(doc.Patch)
+	inner, err := marshalIndent2(doc.Patch)
 	if err != nil {
 		return patchEntry{}, fmt.Errorf("marshaling patch body: %w", err)
 	}

@@ -1,6 +1,11 @@
 package tenantimport
 
-import "gopkg.in/yaml.v3"
+import (
+	"bytes"
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
 
 // Render builds the ResourceSetInputProvider YAML for tenantName from the
 // enriched components, with the label current keos-use-cases templates
@@ -46,7 +51,16 @@ func Render(tenantName, size string, components Components) ([]byte, error) {
 		},
 	}
 
-	return yaml.Marshal(doc)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		return nil, fmt.Errorf("encoding tenant file: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return nil, fmt.Errorf("closing tenant file encoder: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 func renderEntries(entries []*Entry) []map[string]any {

@@ -36,8 +36,10 @@ func buildKustomization(ctx context.Context, opts Options) (*unstructured.Unstru
 		for _, k := range kustomizations {
 			available = append(available, k.GetName())
 		}
-		return nil, fmt.Errorf("kustomization %q not found among the %d rendered by rset %q; available: %v",
-			opts.Kustomization, len(kustomizations), opts.Rset, available)
+		return nil, fmt.Errorf(
+			"kustomization %q not found among the %d rendered by rset %q; available: %v "+
+				"(if this app's component is missing or commented out under `components:` in %s, add or uncomment it there and re-run)",
+			opts.Kustomization, len(kustomizations), opts.Rset, available, tenantFilePath(opts))
 	}
 	return ks, nil
 }

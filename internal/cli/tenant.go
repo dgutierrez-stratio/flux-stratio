@@ -78,7 +78,6 @@ func runTenantImport(cmd *cobra.Command, size, output string, force bool) error 
 		Log:        logger,
 	})
 	if err != nil {
-		logger.Failuref("%v", err)
 		return err
 	}
 	logger.Successf("scan complete")

@@ -203,6 +203,44 @@ func deploymentWithEnv(t *testing.T, name, namespace, logLevel string) *appsv1.D
 	}
 }
 
+// TestDiff_ChartMode_ChartsBaseOverridesBase asserts a chart-mode app
+// resolves its chart under Options.ChartsBase, not Options.Base, when
+// ChartsBase is set — the chart deliberately doesn't exist anywhere under
+// base, so this fails loudly (a "no such file" error from `helm`) if
+// chartPath ever regresses to preferring Base again.
+func TestDiff_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
+	base := fixtureBase(t)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "gosec-agent", "app", "overlays", "postgres", "S"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chartsRoot := t.TempDir() // the chart lives only here, never under base
+
+	opts := Options{
+		Base: base, ChartsBase: chartsRoot, Cluster: "eosdev", Tenant: "stratio",
+		App: config.App{
+			ID: "psql-gosec-agent", Rset: "apps/components/resourceset-apps-datastores.yaml",
+			Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent",
+			ChartPath: fixtureChart(t, chartsRoot),
+		},
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			"flux-operator": {Stdout: []byte(rsetOutputHelmRelease)},
+			"flux":          {Stdout: []byte(kustomizationBuildOutputHelmRelease)},
+			"helm":          {Stdout: []byte(helmTemplateOutputGosec)},
+		}},
+		Log: log.New(io.Discard, false),
+	}
+	liveDeployment := deploymentWithEnv(t, "psql-gosec-agent", "stratio-datastores", "DEBUG")
+	opts.Client = fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(liveDeployment).Build()
+
+	result, err := Diff(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Diff returned error (chart should resolve under ChartsBase, not Base): %v", err)
+	}
+	if result.Patch == nil {
+		t.Fatal("Patch = nil, want a patch for the changed LOG_LEVEL")
+	}
+}
+
 func TestLiveChartWorkloads_Success(t *testing.T) {
 	base := fixtureBase(t)
 	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "gosec-agent", "app", "overlays", "postgres", "S"), 0o755); err != nil {

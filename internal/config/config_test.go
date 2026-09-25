@@ -59,6 +59,23 @@ func TestLoad_ValidConfig(t *testing.T) {
 	}
 }
 
+func TestLoad_ChartsBaseParsed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flux-stratio.yaml")
+	body := validYAML + "chartsBase: /stratio/charts/charts\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ChartsBase != "/stratio/charts/charts" {
+		t.Errorf("ChartsBase = %q, want %q", cfg.ChartsBase, "/stratio/charts/charts")
+	}
+}
+
 func TestLoad_UnknownTopLevelKeyRejected(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "flux-stratio.yaml")
@@ -170,7 +187,7 @@ func TestResolve_EnvVarUsedWhenNoFlag(t *testing.T) {
 func TestResolve_FallsBackToCwdFileWhenItExists(t *testing.T) {
 	t.Setenv(EnvConfigFile, "")
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "no-user-config-here"))
+	t.Setenv("HOME", filepath.Join(dir, "no-fluxcd-home-here"))
 	cwdConfig := filepath.Join(dir, "flux-stratio.yaml")
 	if err := os.WriteFile(cwdConfig, []byte("base: /x\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -186,10 +203,37 @@ func TestResolve_FallsBackToCwdFileWhenItExists(t *testing.T) {
 	}
 }
 
+func TestResolve_PrefersFluxcdHomeOverCwd(t *testing.T) {
+	t.Setenv(EnvConfigFile, "")
+	home := t.TempDir()
+	userConfig := filepath.Join(home, ".fluxcd", "flux-stratio", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userConfig, []byte("base: /x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "flux-stratio.yaml"), []byte("base: /y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	got, err := Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != userConfig {
+		t.Errorf("Resolve = %q, want %q (should prefer ~/.fluxcd/flux-stratio/config.yaml over ./flux-stratio.yaml)", got, userConfig)
+	}
+}
+
 func TestResolve_NoCandidateExistsReturnsActionableError(t *testing.T) {
 	t.Setenv(EnvConfigFile, "")
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "no-user-config-here"))
+	t.Setenv("HOME", filepath.Join(dir, "no-fluxcd-home-here"))
 	t.Chdir(dir) // empty dir: no ./flux-stratio.yaml here
 
 	_, err := Resolve("")
@@ -198,6 +242,37 @@ func TestResolve_NoCandidateExistsReturnsActionableError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--config") || !strings.Contains(err.Error(), EnvConfigFile) {
 		t.Errorf("error %q should name --config and %s as remedies", err, EnvConfigFile)
+	}
+}
+
+func TestMarshal_UsesTwoSpaceIndent(t *testing.T) {
+	// gopkg.in/yaml.v3's default Marshal would indent "name:" 4 spaces
+	// deeper than the "- id:" it belongs under; this plugin's convention
+	// (internal/tenantfile.Doc.Bytes, and now every other generated YAML
+	// file) is 2, including `flux stratio config init`'s own output.
+	cfg := Config{
+		Base: "/stratio/gitops", Cluster: "eosdev", Tenant: "stratio",
+		Apps: []App{{ID: "psql", Name: "Postgres psql", Rset: "r.yaml", Kustomization: "apps-psql", Object: "psql"}},
+	}
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "\n  - id: psql") || !strings.Contains(s, "\n    name: Postgres psql") {
+		t.Errorf("output missing 2-space-indented apps list; got:\n%s", s)
+	}
+	if strings.Contains(s, "\n    id: psql") || strings.Contains(s, "\n      name:") {
+		t.Errorf("output is 4-space indented, want 2; got:\n%s", s)
+	}
+}
+
+func TestApp_LiveName(t *testing.T) {
+	if got := (App{Object: "psql-gosec-agent"}).LiveName(); got != "psql-gosec-agent" {
+		t.Errorf("LiveName (no rename) = %q", got)
+	}
+	if got := (App{Object: "psql-gosec-agent", Renamed: "psql-agent"}).LiveName(); got != "psql-agent" {
+		t.Errorf("LiveName (renamed) = %q, want %q", got, "psql-agent")
 	}
 }
 

@@ -29,6 +29,12 @@ type Config struct {
 	Cluster string `yaml:"cluster"`
 	// Tenant is the tenant name to operate on.
 	Tenant string `yaml:"tenant"`
+	// ChartsBase, if set, overrides Base for resolving a chart-mode app's
+	// on-disk Helm chart directory (App.ChartPath) — for the case where
+	// the chart-source repo isn't checked out as a sibling of
+	// keos-apps/keos-use-cases/keos-fleet/keos-system-services under
+	// Base. Leave unset to resolve ChartPath relative to Base, as before.
+	ChartsBase string `yaml:"chartsBase,omitempty"`
 	// Apps is the catalog of migratable applications, in no particular
 	// order — `apps migrate --all` orders them topologically at runtime
 	// from their dependency schemas, not from this list's order.
@@ -64,10 +70,10 @@ type App struct {
 	// against what the catalog independently derives and fails loudly on
 	// a mismatch rather than writing to the wrong place.
 	Anchor string `yaml:"anchor,omitempty"`
-	// ChartPath, relative to Base, selects env-var/chart diff mode
-	// (internal/diff's Helm-values comparison) instead of manifest diff
-	// mode. Empty means this app is a CRD/manifest object compared
-	// directly against the live resource.
+	// ChartPath, relative to Base (or ChartsBase, when set), selects
+	// env-var/chart diff mode (internal/diff's Helm-values comparison)
+	// instead of manifest diff mode. Empty means this app is a
+	// CRD/manifest object compared directly against the live resource.
 	ChartPath string `yaml:"chartPath,omitempty"`
 	// ValuesRoot pins which .Values root to prefer when a chart mixes more
 	// than one flavor's values under the same directory tree (e.g.
@@ -94,10 +100,18 @@ type App struct {
 }
 
 // Resolve determines which config file path to load, in priority order:
-// the --config flag, $FLUX_STRATIO_CONFIG, ~/.config/flux-stratio/config.yaml
+// the --config flag, $FLUX_STRATIO_CONFIG, ~/.fluxcd/flux-stratio/config.yaml
 // (if it exists), ./flux-stratio.yaml (if it exists). An explicit flag or
 // env var is used as given, even if the file doesn't exist yet, so the
 // resulting error names the exact path the operator asked for.
+//
+// ~/.fluxcd/flux-stratio/ is a sibling of ~/.fluxcd/plugins/ (where the
+// plugin binary itself lives, per RFC 0013), not a subdirectory of it —
+// plugins/ is reserved for binaries, never data. Placing a config here
+// (and, since apps backup's default --dir is always "next to the
+// resolved config file," backups too) keeps both permanently outside any
+// flux-stratio source checkout, safe from `make clean`, `git clean`, or a
+// fresh clone.
 func Resolve(flagValue string) (string, error) {
 	if flagValue != "" {
 		return filepath.Abs(flagValue)
@@ -130,11 +144,11 @@ func Resolve(flagValue string) (string, error) {
 }
 
 func userConfigPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("resolving user config dir: %w", err)
+		return "", fmt.Errorf("resolving home directory: %w", err)
 	}
-	return filepath.Join(dir, "flux-stratio", "config.yaml"), nil
+	return filepath.Join(home, ".fluxcd", "flux-stratio", "config.yaml"), nil
 }
 
 // Load resolves and parses the config file, rejecting unknown top-level or
@@ -162,6 +176,22 @@ func Load(flagValue string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// Marshal renders cfg as 2-space-indented YAML — matching every other
+// YAML file this plugin writes — instead of yaml.v3's own 4-space
+// Marshal default. It's what `flux stratio config init` writes to disk.
+func Marshal(cfg Config) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(cfg); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (c Config) validate() error {
@@ -237,4 +267,17 @@ func (c Config) Find(id string) *App {
 		}
 	}
 	return nil
+}
+
+// LiveName is the name to look this app up as on the live cluster:
+// Renamed when the GitOps redesign renamed the object, otherwise Object
+// itself. internal/appdiff and internal/backup both need this exact same
+// fallback to agree on which live object an app maps to — kept here as
+// the one shared definition instead of duplicated copies that could
+// silently drift apart.
+func (a App) LiveName() string {
+	if a.Renamed != "" {
+		return a.Renamed
+	}
+	return a.Object
 }

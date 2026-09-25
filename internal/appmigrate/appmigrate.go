@@ -25,11 +25,14 @@ import (
 // Options configures migrating one app.
 type Options struct {
 	Base, Cluster, Tenant string
-	App                   config.App
-	Catalog               *catalog.Catalog
-	Runner                runner.Runner
-	Client                client.Client
-	Log                   *log.Logger
+	// ChartsBase, if set, overrides Base for resolving a chart-mode app's
+	// on-disk chart directory (see config.Config.ChartsBase).
+	ChartsBase string
+	App        config.App
+	Catalog    *catalog.Catalog
+	Runner     runner.Runner
+	Client     client.Client
+	Log        *log.Logger
 }
 
 // Result reports what a migrate run found and (for Apply) did.
@@ -79,7 +82,7 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	}
 
 	diffResult, err := appdiff.Diff(ctx, appdiff.Options{
-		Base: opts.Base, Cluster: opts.Cluster, Tenant: opts.Tenant,
+		Base: opts.Base, Cluster: opts.Cluster, Tenant: opts.Tenant, ChartsBase: opts.ChartsBase,
 		App: opts.App, Runner: opts.Runner, Client: opts.Client, Log: opts.Log,
 	})
 	if err != nil {

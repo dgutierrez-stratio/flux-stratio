@@ -29,8 +29,11 @@ import (
 // Options configures diffing one app.
 type Options struct {
 	Base, Cluster, Tenant string
-	App                   config.App
-	Runner                runner.Runner
+	// ChartsBase, if set, overrides Base for resolving a chart-mode app's
+	// on-disk chart directory (see config.Config.ChartsBase).
+	ChartsBase string
+	App        config.App
+	Runner     runner.Runner
 	// Client talks to the live cluster: used by internal/render to
 	// resolve postBuild.substituteFrom, and — in both diff modes — to
 	// fetch the app's live state to compare against (unless Baseline is
@@ -94,17 +97,11 @@ func renderApp(ctx context.Context, opts Options) (*render.Result, error) {
 }
 
 func chartPath(opts Options) string {
-	return filepath.Join(opts.Base, opts.App.ChartPath)
-}
-
-// liveObjectName is the name to look the app up as on the live cluster:
-// App.Renamed when the GitOps redesign renamed the object, otherwise
-// App.Object itself.
-func liveObjectName(app config.App) string {
-	if app.Renamed != "" {
-		return app.Renamed
+	root := opts.Base
+	if opts.ChartsBase != "" {
+		root = opts.ChartsBase
 	}
-	return app.Object
+	return filepath.Join(root, opts.App.ChartPath)
 }
 
 func fmtNotFound(kind, namespace, name string, err error) error {

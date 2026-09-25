@@ -8,16 +8,26 @@ file itself is located.
 It's plain YAML; unknown top-level or per-app keys are rejected at load time (a typo fails loudly
 instead of being silently ignored).
 
+`flux stratio config init --base <path> --cluster <name> --tenant <name>` writes a starting file
+seeded with the known 16-application Stratio catalog (see [`internal/config/seed.go`](../internal/config/seed.go))
+instead of an empty one — review and prune it for your environment rather than authoring the whole
+`apps:` list by hand. It refuses to overwrite an existing file without `--force`. Pass `--charts
+<path>` too if the chart-mode apps' Helm chart sources aren't checked out as a sibling of `--base`
+(see `chartsBase` below).
+
 ## Top level
 
 ```yaml
 base: /path/to/gitops   # required: parent of keos-apps, keos-use-cases, keos-fleet, keos-system-services
 cluster: eosdev          # required: the cluster name (used to locate the tenant file)
 tenant: stratio           # required: the tenant name (used to locate the tenant file and to scope tenant import)
+chartsBase: /path/to/charts  # optional: overrides base for chartPath resolution (see below)
 apps: [ ... ]              # the app catalog, see below
 ```
 
 `--base`, `--cluster` and `--tenant` on the command line override these for a single invocation.
+`chartsBase` has no such per-invocation flag — it's set once, either by `config init --charts` or
+by hand-editing the config file.
 
 ## `apps[]`
 
@@ -30,7 +40,7 @@ Each entry describes one application.
 | `rset` | yes | Path, relative to `keos-use-cases`, of the ResourceSet template declaring this app's Kustomization |
 | `kustomization` | yes | The exact rendered Kustomization name to select |
 | `object` | yes | The exact HelmRelease or custom resource name, inside that Kustomization, to diff against the live cluster |
-| `chartPath` | no | Path, relative to `base`, to a Helm chart — set this to switch the app into **chart mode**: comparison happens via the chart's rendered env vars against the live workload's resolved environment, instead of a direct manifest/CR diff. Leave unset for a CRD/manifest-backed app |
+| `chartPath` | no | Path, relative to `base` (or `chartsBase`, if set), to a Helm chart — set this to switch the app into **chart mode**: comparison happens via the chart's rendered env vars against the live workload's resolved environment, instead of a direct manifest/CR diff. Leave unset for a CRD/manifest-backed app |
 | `valuesRoot` | no | Chart mode only. When a chart mixes more than one flavor's `.Values` root in the same directory tree (e.g. a chart with `pgmd5`/`pgtls`/`pginternal` variants sharing one `config/` directory), pins which root wins when a key is ambiguous |
 | `renamed` | no | The live cluster object's name, when the GitOps redesign renamed it (the object was called something else before migration) |
 | `previousNamespace` | no | Fallback namespace to look for the live object in, if it isn't found in the namespace the current convention implies |
@@ -38,6 +48,13 @@ Each entry describes one application.
 | `prepare` | no | Names a one-time precondition this app requires before migration — see [Prepare](#prepare) below |
 | `exclude` | no | A list of dot-paths to drop from the computed diff/patch — see [Exclude](#exclude) below |
 | `notes` | no | Free-text hint shown to the operator, e.g. alongside a prepare step that blocks migration |
+
+`chartsBase` (top-level, optional) exists for the case where the Helm chart sources
+`chartPath` points into aren't checked out as a sibling of `keos-apps`/`keos-use-cases`/
+`keos-fleet`/`keos-system-services` under `base` — e.g. a separate `charts` repo checked out
+somewhere else entirely. When set, every `chartPath` resolves relative to `chartsBase`
+instead of `base`; leave it unset (the common case) and `chartPath` keeps resolving relative
+to `base` as before.
 
 ### A manifest-mode example
 

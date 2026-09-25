@@ -11,7 +11,19 @@ Ansible-based cluster onto Flux/GitOps with flux-stratio. It assumes:
   parent).
 - `flux-operator`, `flux` and `helm` are on `PATH` (see the [README](../README.md#install)).
 
-## 1. Preflight
+## 1. Get a config file
+
+If this is the first run against a given `base`/`cluster`/`tenant`, seed one from the known Stratio
+application catalog instead of authoring `apps:` from scratch:
+
+```shell
+flux stratio config init --base /path/to/gitops --cluster eosdev --tenant stratio
+```
+
+Review the result — an environment may run a subset of the seeded applications, or ones the catalog
+doesn't know about yet — then continue below.
+
+## 2. Preflight
 
 ```shell
 flux stratio doctor
@@ -22,11 +34,11 @@ tenant's `ResourceSetInputProvider` file exists — in that order, reporting eve
 rather than stopping at the first one. Fix everything `doctor` reports before continuing; a
 migration command surfacing the same class of problem mid-run is a worse time to discover it.
 
-## 2. Get (or generate) the tenant file
+## 3. Get (or generate) the tenant file
 
 If the tenant already has a `ResourceSetInputProvider` in `keos-fleet` (the common case for a
 tenant that's partway through migration already), `doctor` above confirms it exists and you can
-skip to step 3.
+skip to step 4.
 
 For a tenant with no GitOps presence yet, scan the live, not-yet-migrated cluster for one:
 
@@ -51,7 +63,7 @@ review it before committing:
 
 Commit the reviewed file to `keos-fleet` before continuing.
 
-## 3. Survey what needs migrating
+## 4. Survey what needs migrating
 
 The config file's `apps:` list (see [`config-reference.md`](config-reference.md)) is the catalog of
 migratable applications — there is no live discovery of "what apps exist" the way `tenant import`
@@ -64,10 +76,10 @@ against production — `flux stratio apps migrate` runs it automatically, but a 
 even though it's exactly what needs to happen before cutover. See
 [`config-reference.md`](config-reference.md#prepare) for what each of the four steps does.
 
-## 4. Back up before touching anything
+## 5. Back up before touching anything
 
 ```shell
-flux stratio apps backup --all
+flux stratio apps backup --catalog
 ```
 
 Captures every app's live state to `backups/<app-id>/<UTC-timestamp>/` next to the config file (or
@@ -76,16 +88,25 @@ and a fixed comparison point for `apps diff --baseline` — useful when the live
 about to change (e.g. right before running a `prepare` step) and you want to diff against what it
 looked like a moment ago, not whatever it looks like when you happen to run the diff.
 
-## 5. Diff, review, then migrate — one app at a time first
+`--catalog` only backs up what's in the config file — the apps this run is actually going to
+migrate. Pass `--all` instead for a broader, unscoped capture of everything the cluster scan finds
+(system services, CCT, anything else still live) — useful as a one-off safety net before a bigger
+cutover, but not something `apps diff --baseline` needs for the apps this plugin migrates.
+
+Unlike `apps diff`/`apps migrate`, backup finds the live object by scanning the cluster directly —
+it never needs the tenant file to already declare the app's component. It's safe (and useful) to
+run this step well before step 3 gets a tenant file in place at all.
+
+## 6. Diff, review, then migrate — one app at a time first
 
 For at least the first app of each *kind* (a manifest/CRD app like `psql`, and a chart-mode app
 like a gosec agent), go through the full cycle by hand before trusting `--all`:
 
 ```shell
-flux stratio apps diff psql                # see what would change
-flux stratio apps diff psql --patch        # see the exact patch YAML, if you want it
-flux stratio apps migrate psql --dry-run   # preview the tenant-file edit itself
-flux stratio apps migrate psql             # apply it (prompts for confirmation)
+flux stratio apps diff psql                    # see what would change
+flux stratio apps diff psql --view patch       # see the exact patch YAML, if you want it
+flux stratio apps migrate psql --dry-run       # preview the tenant-file edit itself
+flux stratio apps migrate psql                 # apply it (prompts for confirmation)
 ```
 
 `apps migrate` is idempotent: running it again against an already-migrated app recomputes the diff
@@ -93,7 +114,7 @@ fresh from live state and finds nothing to change, rather than trusting a prior 
 it after live state drifts (say, someone hand-edited a value on the old cluster) picks up the new
 difference and re-patches — it never silently skips based on "already done."
 
-## 6. Migrate the rest
+## 7. Migrate the rest
 
 ```shell
 flux stratio apps migrate --all
@@ -105,7 +126,7 @@ first app that fails, so a real problem doesn't get masked by nine "successful" 
 it; pass `--continue-on-error` once you're confident enough failures are isolated per-app to be
 worth pushing through.
 
-## 7. Verify
+## 8. Verify
 
 After migrating an app, confirm Flux actually reconciles the patch you just wrote — flux-stratio
 edits the tenant file; it doesn't reconcile it:
@@ -125,3 +146,25 @@ Commit the tenant file, let Flux reconcile it against the real cluster, and conf
 now matches — at which point the legacy, pre-migration copy can be decommissioned per your own
 cutover process (flux-stratio doesn't do that part; it only migrates the GitOps side into existence
 next to what's still live).
+
+## 9. Check for drift, after the fact
+
+Once Flux is reconciling an app, `apps diff psql`'s default comparison stops being useful for
+day-to-day checks — it renders the desired state and compares it against live every time, the
+question `apps migrate` needed, not "has anything changed since I last looked." `apps diff --drift`
+answers that instead: the live cluster right now, compared directly against a stored backup, with
+no GitOps rendering at all.
+
+```shell
+flux stratio apps backup psql              # capture a fresh reference point, any time
+flux stratio apps diff psql --drift latest # has anything changed live since that capture?
+```
+
+`--drift` (like `--baseline`) resolves `latest`, an app's own backup directory, or the overall
+`backups/` root automatically — see [`README.md`](../README.md#commands). Pass `--view meld` on
+either comparison to open it in [meld](https://meldmerge.org/) instead of a terminal diff.
+
+`--baseline` and `--drift` answer different questions and are never interchangeable: `--baseline`
+still needs a working GitOps render (the tenant file must declare the component), because it's
+comparing against the *desired* state; `--drift` never renders anything, so it works before or
+after migration, any time you have a backup to compare against.

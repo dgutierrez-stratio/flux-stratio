@@ -49,10 +49,15 @@ func rootLogger(cmd *cobra.Command) *log.Logger {
 // application backup/diff/migrate, and preflight diagnostics.
 func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "stratio",
-		Short:         "Migrate Stratio applications from Ansible-based clusters onto Flux/GitOps tenants",
-		SilenceUsage:  true,
-		SilenceErrors: false,
+		Use:          "stratio",
+		Short:        "Migrate Stratio applications from Ansible-based clusters onto Flux/GitOps tenants",
+		SilenceUsage: true,
+		// SilenceErrors: cmd/flux-stratio/main.go already prints "Error:
+		// <err>" once itself after Execute returns — leaving cobra's own
+		// default error-printing on would print the same line a second
+		// time, on top of whatever a command already narrated via its
+		// own logger.Failuref.
+		SilenceErrors: true,
 	}
 
 	root.PersistentFlags().StringVar(&configFlag, "config", "", "path to the flux-stratio config file (default: $FLUX_STRATIO_CONFIG, persisted default, or ./flux-stratio.yaml)")
@@ -65,6 +70,7 @@ func NewRootCommand() *cobra.Command {
 
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newDoctorCommand())
+	root.AddCommand(newConfigCommand())
 	root.AddCommand(newAppsCommand())
 	root.AddCommand(newTenantCommand())
 

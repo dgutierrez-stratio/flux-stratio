@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -13,12 +14,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/discovery"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
-	"github.com/Stratio/flux-stratio/internal/runner"
 )
 
 var fixedClock = func() time.Time { return time.Date(2026, 3, 4, 10, 30, 0, 0, time.UTC) }
@@ -45,52 +47,48 @@ func mustScheme(t *testing.T) *apiruntime.Scheme {
 	return s
 }
 
-const rsetOutputPgCluster = `
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: apps-psql
-  namespace: stratio-datastores
-spec:
-  path: components/postgres/app/overlays/S
-`
+func obj(apiVersion, kind, namespace, name string, extra map[string]any) *unstructured.Unstructured {
+	m := map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return &unstructured.Unstructured{Object: m}
+}
 
-const kustomizationBuildOutputPgCluster = `
----
-apiVersion: postgres.stratio.com/v1
-kind: PgCluster
-metadata:
-  name: psql
-  namespace: stratio-datastores
-spec:
-  instances: 1
-`
+func scan(t *testing.T, l *log.Logger, objs ...*unstructured.Unstructured) *discovery.Index {
+	t.Helper()
+	anys := make([]client.Object, len(objs))
+	for i, o := range objs {
+		anys[i] = o
+	}
+	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(anys...).Build()
+	idx, err := discovery.Scan(context.Background(), c, l)
+	if err != nil {
+		t.Fatalf("discovery.Scan returned error: %v", err)
+	}
+	return idx
+}
 
 func TestRun_ManifestMode_WritesCRYAML(t *testing.T) {
 	base := fixtureBase(t)
-	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	backupsDir := t.TempDir()
+	logger := log.New(io.Discard, false)
 
-	liveObj := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
-		"metadata": map[string]any{"name": "psql", "namespace": "stratio-datastores"},
-		"spec":     map[string]any{"instances": int64(3)},
-	}}
+	live := obj("postgres.stratio.com/v1", "PgCluster", "stratio-datastores", "psql", map[string]any{
+		"spec": map[string]any{"instances": int64(3)},
+	})
 
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
-		App:   config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
+		Base:  base,
+		App:   config.App{ID: "psql", Object: "psql"},
+		Index: scan(t, logger, live),
 		Dir:   backupsDir,
 		Clock: fixedClock,
-		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
-			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
-			"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
-		}},
-		Client: fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(liveObj).Build(),
-		Log:    log.New(io.Discard, false),
+		Log:   logger,
 	}
 
 	result, err := Run(context.Background(), opts)
@@ -115,30 +113,22 @@ func TestRun_ManifestMode_WritesCRYAML(t *testing.T) {
 	}
 }
 
-func TestRun_ManifestMode_LiveObjectNotFoundWritesNothing(t *testing.T) {
-	base := fixtureBase(t)
-	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+func TestRun_ManifestMode_LiveObjectNotFoundErrors(t *testing.T) {
 	backupsDir := t.TempDir()
+	logger := log.New(io.Discard, false)
 
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
-		App:   config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
+		Base:  fixtureBase(t),
+		App:   config.App{ID: "psql", Object: "psql"},
+		Index: scan(t, logger),
 		Dir:   backupsDir,
 		Clock: fixedClock,
-		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
-			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
-			"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
-		}},
-		Client: fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).Build(),
-		Log:    log.New(io.Discard, false),
+		Log:   logger,
 	}
 
 	if _, err := Run(context.Background(), opts); err == nil {
 		t.Fatal("Run with no live object present: got nil error, want non-nil")
 	}
-
 	entries, err := os.ReadDir(backupsDir)
 	if err != nil {
 		t.Fatal(err)
@@ -148,28 +138,113 @@ func TestRun_ManifestMode_LiveObjectNotFoundWritesNothing(t *testing.T) {
 	}
 }
 
-func TestRun_UsesRealClockByDefault(t *testing.T) {
-	base := fixtureBase(t)
-	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {
+func TestRun_ManifestMode_NoTenantFileDeclarationNeeded(t *testing.T) {
+	// The regression this whole redesign fixes: a live object is found
+	// purely by cluster-wide discovery, with no rset/Kustomization/tenant
+	// file ever consulted — App carries only ID/Object, nothing else.
+	backupsDir := t.TempDir()
+	logger := log.New(io.Discard, false)
+	live := obj("hdfs.stratio.com/v1", "HDFSCluster", "stratio-datastores", "hdfs1", nil)
+
+	opts := Options{
+		Base:  fixtureBase(t),
+		App:   config.App{ID: "hdfs1", Object: "hdfs1"},
+		Index: scan(t, logger, live),
+		Dir:   backupsDir,
+		Clock: fixedClock,
+		Log:   logger,
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(result.Files) != 1 || result.Files[0] != "cr.yaml" {
+		t.Errorf("Files = %v, want [cr.yaml]", result.Files)
+	}
+}
+
+func TestRun_ManifestMode_FoundOnlyAsWorkloadWarnsAndCaptures(t *testing.T) {
+	backupsDir := t.TempDir()
+	var logbuf bytes.Buffer
+	logger := log.New(&logbuf, false)
+	live := deploymentWithEnv("psql", "stratio-datastores", "DEBUG")
+
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(live).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
 		t.Fatal(err)
 	}
-	backupsDir := t.TempDir()
-	liveObj := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
-		"metadata": map[string]any{"name": "psql", "namespace": "stratio-datastores"},
-		"spec":     map[string]any{},
-	}}
+
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
-		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
-		Dir: backupsDir,
+		Base: fixtureBase(t),
+		App: config.App{
+			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
+			Kustomization: "apps-psql", Object: "psql",
+		},
+		Index: idx,
+		Dir:   backupsDir,
+		Clock: fixedClock,
+		Log:   logger,
+	}
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	wantFiles := map[string]bool{"deployment.yaml": true, "env-vars.env": true}
+	if len(result.Files) != 2 || !wantFiles[result.Files[0]] || !wantFiles[result.Files[1]] {
+		t.Errorf("Files = %v, want [deployment.yaml env-vars.env] in some order", result.Files)
+	}
+	if !strings.Contains(logbuf.String(), "manifest-mode but was only found live as a workload") {
+		t.Errorf("expected a mismatch warning, got: %s", logbuf.String())
+	}
+}
+
+func TestRun_KustomizationOnly_SkipsWithoutError(t *testing.T) {
+	backupsDir := t.TempDir()
+	var logbuf bytes.Buffer
+	logger := log.New(&logbuf, false)
+	live := obj("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "psql", nil)
+
+	opts := Options{
+		Base:  fixtureBase(t),
+		App:   config.App{ID: "psql", Object: "psql"},
+		Index: scan(t, logger, live),
+		Dir:   backupsDir,
+		Clock: fixedClock,
+		Log:   logger,
+	}
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run returned error: %v, want nil (Kustomization-only is a skip, not a failure)", err)
+	}
+	if result.Dir != "" || len(result.Files) != 0 {
+		t.Errorf("Result = %+v, want empty", result)
+	}
+	if !strings.Contains(logbuf.String(), "nothing to back up") {
+		t.Errorf("expected a skip warning, got: %s", logbuf.String())
+	}
+	entries, err := os.ReadDir(backupsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("backupsDir has %d entries, want 0", len(entries))
+	}
+}
+
+func TestRun_UsesRealClockByDefault(t *testing.T) {
+	backupsDir := t.TempDir()
+	logger := log.New(io.Discard, false)
+	live := obj("postgres.stratio.com/v1", "PgCluster", "stratio-datastores", "psql", nil)
+
+	opts := Options{
+		Base:  fixtureBase(t),
+		App:   config.App{ID: "psql", Object: "psql"},
+		Index: scan(t, logger, live),
+		Dir:   backupsDir,
 		// Clock deliberately left nil.
-		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
-			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
-			"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
-		}},
-		Client: fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(liveObj).Build(),
-		Log:    log.New(io.Discard, false),
+		Log: logger,
 	}
 	result, err := Run(context.Background(), opts)
 	if err != nil {

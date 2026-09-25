@@ -87,8 +87,8 @@ func TestRun_AllChecksPass(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("report.OK() = false, want true; error: %v", report.Err())
 	}
-	if len(report.Checks) != 5 {
-		t.Errorf("len(Checks) = %d, want 5", len(report.Checks))
+	if len(report.Checks) != 7 {
+		t.Errorf("len(Checks) = %d, want 7", len(report.Checks))
 	}
 }
 
@@ -103,14 +103,14 @@ func TestRun_MissingBinaries_OtherChecksStillRun(t *testing.T) {
 	if report.OK() {
 		t.Fatal("report.OK() = true, want false")
 	}
-	if len(report.Checks) != 5 {
-		t.Fatalf("len(Checks) = %d, want 5 (downstream checks must still run)", len(report.Checks))
+	if len(report.Checks) != 7 {
+		t.Fatalf("len(Checks) = %d, want 7 (downstream checks must still run)", len(report.Checks))
 	}
 	if report.Checks[0].Name != CheckBinaries || report.Checks[0].OK {
 		t.Errorf("Checks[0] = %+v, want a failing binaries check", report.Checks[0])
 	}
 	for _, c := range report.Checks[1:] {
-		if !c.OK {
+		if !c.OK && !c.Optional {
 			t.Errorf("%s: OK = false, want true (only binaries should fail here); detail: %s", c.Name, c.Detail)
 		}
 	}
@@ -125,11 +125,11 @@ func TestRun_InvalidConfig_SkipsDownstreamChecks(t *testing.T) {
 	if report.OK() {
 		t.Fatal("report.OK() = true, want false")
 	}
-	if len(report.Checks) != 2 {
-		t.Fatalf("len(Checks) = %d, want 2 (binaries + config only, no cfg to check further)", len(report.Checks))
+	if len(report.Checks) != 3 {
+		t.Fatalf("len(Checks) = %d, want 3 (binaries + meld + config only, no cfg to check further)", len(report.Checks))
 	}
-	if report.Checks[1].Name != CheckConfig || report.Checks[1].OK {
-		t.Errorf("Checks[1] = %+v, want a failing config check", report.Checks[1])
+	if report.Checks[2].Name != CheckConfig || report.Checks[2].OK {
+		t.Errorf("Checks[2] = %+v, want a failing config check", report.Checks[2])
 	}
 }
 
@@ -156,6 +156,72 @@ func TestRun_RepoLayoutMissingDirs(t *testing.T) {
 		if !strings.Contains(repoCheck.Detail, want) {
 			t.Errorf("repo layout detail %q should mention missing dir %q", repoCheck.Detail, want)
 		}
+	}
+}
+
+// writeConfigWithChartApp writes a config declaring one chart-mode app
+// (chartPath), optionally with a chartsBase override.
+func writeConfigWithChartApp(t *testing.T, base, cluster, tenant, chartsBase, chartPath string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flux-stratio.yaml")
+	body := "base: " + base + "\ncluster: " + cluster + "\ntenant: " + tenant + "\n"
+	if chartsBase != "" {
+		body += "chartsBase: " + chartsBase + "\n"
+	}
+	body += "apps:\n" +
+		"  - id: virtualizer\n" +
+		"    name: Virtualizer\n" +
+		"    rset: apps/components/resourceset-apps-apps.yaml\n" +
+		"    kustomization: apps-virtualizer\n" +
+		"    object: virtualizer\n" +
+		"    chartPath: " + chartPath + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRun_ChartPathMissing(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	opts := baseOptions()
+	// No charts/virtualizer directory created under base.
+	opts.ConfigFlag = writeConfigWithChartApp(t, base, "eosdev", "stratio", "", "charts/virtualizer")
+
+	report := Run(context.Background(), opts)
+
+	if report.OK() {
+		t.Fatal("report.OK() = true, want false")
+	}
+	var chartCheck Check
+	for _, c := range report.Checks {
+		if c.Name == CheckChartPaths {
+			chartCheck = c
+		}
+	}
+	if chartCheck.OK {
+		t.Error("chart paths check passed, want it to fail")
+	}
+	if !strings.Contains(chartCheck.Detail, "virtualizer") {
+		t.Errorf("chart paths detail %q should mention the app missing its chart", chartCheck.Detail)
+	}
+}
+
+func TestRun_ChartPathsUsesChartsBaseOverride(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	chartsRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(chartsRoot, "charts", "virtualizer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := baseOptions()
+	// The chart lives only under chartsRoot, never under base — the check
+	// must resolve against chartsBase, not base, once it's set.
+	opts.ConfigFlag = writeConfigWithChartApp(t, base, "eosdev", "stratio", chartsRoot, "charts/virtualizer")
+
+	report := Run(context.Background(), opts)
+
+	if !report.OK() {
+		t.Fatalf("report.OK() = false, want true; error: %v", report.Err())
 	}
 }
 
@@ -245,6 +311,19 @@ func TestReport_OK_NoChecksIsVacuouslyOK(t *testing.T) {
 	var r Report
 	if !r.OK() || r.Err() != nil {
 		t.Error("an empty Report should be OK with a nil Err")
+	}
+}
+
+func TestReport_OptionalFailure_NeverFailsTheReport(t *testing.T) {
+	r := Report{Checks: []Check{
+		{Name: CheckBinaries, OK: true},
+		{Name: CheckMeld, OK: false, Optional: true, Detail: "not found"},
+	}}
+	if !r.OK() {
+		t.Error("OK() = false, want true (an Optional failure must not fail the report)")
+	}
+	if err := r.Err(); err != nil {
+		t.Errorf("Err() = %v, want nil", err)
 	}
 }
 

@@ -168,12 +168,45 @@ func TestDiff_RenderFailurePropagates(t *testing.T) {
 	}
 }
 
-func TestLiveObjectName(t *testing.T) {
-	if got := liveObjectName(config.App{Object: "psql-gosec-agent"}); got != "psql-gosec-agent" {
-		t.Errorf("liveObjectName (no rename) = %q", got)
+// TestDiff_ManifestMode_AppliesRenameForLiveLookup mirrors chart_test.go's
+// TestDiff_ChartMode_AppliesRenameForLiveLookup for manifest mode — the
+// Renamed/Object fallback itself is now config.App.LiveName's own tested
+// responsibility (see internal/config), so this exercises the real
+// behavior through Diff rather than re-testing the fallback in isolation.
+func TestDiff_ManifestMode_AppliesRenameForLiveLookup(t *testing.T) {
+	base := fixtureBase(t)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if got := liveObjectName(config.App{Object: "psql-gosec-agent", Renamed: "psql-agent"}); got != "psql-agent" {
-		t.Errorf("liveObjectName (renamed) = %q, want %q", got, "psql-agent")
+
+	opts := Options{
+		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		App: config.App{
+			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
+			Kustomization: "apps-psql", Object: "psql", Renamed: "psql-legacy",
+		},
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
+			"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
+		}},
+		Log: log.New(io.Discard, false),
+	}
+
+	// The live object exists only under the old, pre-rename name — Renamed
+	// must be what fetchLiveManifestObject looks it up as, not Object.
+	liveObj := map[string]any{
+		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
+		"metadata": map[string]any{"name": "psql-legacy", "namespace": "stratio-datastores"},
+		"spec":     map[string]any{"instances": int64(3)},
+	}
+	opts.Client = fakeClientWithUnstructured(t, liveObj)
+
+	result, err := Diff(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Diff returned error: %v", err)
+	}
+	if result.Patch == nil {
+		t.Fatal("Patch = nil, want the renamed live object to have been found and diffed")
 	}
 }
 

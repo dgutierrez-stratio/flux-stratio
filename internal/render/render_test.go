@@ -150,6 +150,17 @@ func TestRender_KustomizationNotFound(t *testing.T) {
 	if err != nil && !strings.Contains(err.Error(), "apps-psql") {
 		t.Errorf("Render error = %v, want it to list the available kustomizations", err)
 	}
+	// The most common real-world cause is the app's component being
+	// missing/commented out in the tenant file, not a genuine rendering
+	// failure — the error should point a less experienced operator there
+	// instead of leaving them to puzzle out what "not found among the
+	// rendered" implies.
+	if err != nil && !strings.Contains(err.Error(), tenantFilePath(opts)) {
+		t.Errorf("Render error = %v, want it to name the tenant file to check", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "commented out") {
+		t.Errorf("Render error = %v, want it to explain the likely cause", err)
+	}
 }
 
 func TestRender_ObjectNotFound(t *testing.T) {
