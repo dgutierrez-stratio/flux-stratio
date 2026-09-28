@@ -32,14 +32,24 @@ type Options struct {
 	Catalog    *catalog.Catalog
 	Runner     runner.Runner
 	Client     client.Client
-	Log        *log.Logger
+	// Baseline, if set, is a backup directory to compute the patch against
+	// instead of the live cluster (see appdiff.Options.Baseline) — for when
+	// live state no longer reflects the legacy installation, e.g. after
+	// Flux already reconciled the component unpatched.
+	Baseline string
+	Log      *log.Logger
 }
 
 // Result reports what a migrate run found and (for Apply) did.
 type Result struct {
-	// Migrated is true if a patch was found — for Plan, this means Apply
-	// would write something; for Apply, that it did.
+	// Migrated is true if the tenant file needs (Plan) or got (Apply) a
+	// new or changed patch — false both when there's no difference at all
+	// and when the tenant file already carries exactly the needed patch.
 	Migrated bool
+	// UpToDate, ObsoletePatches and FluxManagedBy — see appdiff.Result.
+	UpToDate        bool
+	ObsoletePatches int
+	FluxManagedBy   string
 	// Before and After are the tenant file's content before and after the
 	// edit, for a diff preview (apps migrate --dry-run) via
 	// internal/ui.FileDiff. Equal when Migrated is false.
@@ -83,13 +93,17 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 
 	diffResult, err := appdiff.Diff(ctx, appdiff.Options{
 		Base: opts.Base, Cluster: opts.Cluster, Tenant: opts.Tenant, ChartsBase: opts.ChartsBase,
-		App: opts.App, Runner: opts.Runner, Client: opts.Client, Log: opts.Log,
+		App: opts.App, Runner: opts.Runner, Client: opts.Client, Baseline: opts.Baseline, Log: opts.Log,
 	})
 	if err != nil {
 		return nil, nil, "", err
 	}
-	if diffResult.Patch == nil {
-		return &Result{Migrated: false, Before: string(before), After: string(before)}, doc, tenantPath, nil
+	if diffResult.Patch == nil || diffResult.UpToDate {
+		return &Result{
+			Migrated: false, UpToDate: diffResult.UpToDate, ObsoletePatches: diffResult.ObsoletePatches,
+			FluxManagedBy: diffResult.FluxManagedBy,
+			Before:        string(before), After: string(before),
+		}, doc, tenantPath, nil
 	}
 
 	if err := tenantfile.Splice(doc, opts.Catalog, opts.App, *diffResult.Patch); err != nil {
@@ -99,5 +113,5 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return &Result{Migrated: true, Before: string(before), After: string(after)}, doc, tenantPath, nil
+	return &Result{Migrated: true, FluxManagedBy: diffResult.FluxManagedBy, Before: string(before), After: string(after)}, doc, tenantPath, nil
 }

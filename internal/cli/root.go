@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/log"
 )
 
@@ -16,12 +17,17 @@ import (
 var version = "dev"
 
 // configFlag holds the --config value shared by all subcommands that read
-// the app catalog. It is resolved through internal/config.Resolve.
+// the component catalog. It is resolved through internal/config.Resolve.
 var configFlag string
 
-// baseFlag, clusterFlag and tenantFlag override the config file's base,
-// cluster and tenant fields, shared by all subcommands that operate on a
-// specific tenant.
+// envConfigFlag holds the --env-config value shared by all subcommands that
+// read the environment file. It is resolved through
+// internal/config.ResolveEnvironment.
+var envConfigFlag string
+
+// baseFlag, clusterFlag and tenantFlag override the environment file's
+// base, cluster and tenant fields, shared by all subcommands that operate
+// on a specific tenant.
 var (
 	baseFlag    string
 	clusterFlag string
@@ -38,6 +44,17 @@ var kubeconfigArgs = genericclioptions.NewConfigFlags(false)
 // verboseFlag holds the --verbose flag shared by all subcommands, gating
 // internal/log.Logger.Debugf output (e.g. external command chatter).
 var verboseFlag bool
+
+// envOverrides returns the --base/--cluster/--tenant flags as an
+// Environment to apply on top of the environment file.
+func envOverrides() config.Environment {
+	return config.Environment{Base: baseFlag, Cluster: clusterFlag, Tenant: tenantFlag}
+}
+
+// loadEnvironment loads the environment file with the root flags applied.
+func loadEnvironment() (config.Environment, error) {
+	return config.LoadEnvironment(envConfigFlag, envOverrides())
+}
 
 // rootLogger returns a Logger for cmd, writing to its stderr (so tests can
 // capture it via cmd.SetErr, and production defaults to os.Stderr).
@@ -60,10 +77,11 @@ func NewRootCommand() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.PersistentFlags().StringVar(&configFlag, "config", "", "path to the flux-stratio config file (default: $FLUX_STRATIO_CONFIG, persisted default, or ./flux-stratio.yaml)")
-	root.PersistentFlags().StringVar(&baseFlag, "base", "", "path to the parent directory holding keos-apps, keos-use-cases, keos-fleet and keos-system-services (overrides the config file's base)")
-	root.PersistentFlags().StringVar(&clusterFlag, "cluster", "", "the cluster name to operate on (overrides the config file's cluster)")
-	root.PersistentFlags().StringVar(&tenantFlag, "tenant", "", "the tenant name to operate on (overrides the config file's tenant)")
+	root.PersistentFlags().StringVar(&configFlag, "config", "", "path to the component catalog file (default: $FLUX_STRATIO_CONFIG, ~/.fluxcd/flux-stratio/catalog.yaml, or ./flux-stratio.yaml)")
+	root.PersistentFlags().StringVar(&envConfigFlag, "env-config", "", "path to the environment file (default: $FLUX_STRATIO_ENV, ~/.fluxcd/flux-stratio/environment.yaml, or ./flux-stratio-env.yaml)")
+	root.PersistentFlags().StringVar(&baseFlag, "base", "", "path to the parent directory holding keos-apps, keos-use-cases, keos-fleet and keos-system-services (overrides the environment file's base)")
+	root.PersistentFlags().StringVar(&clusterFlag, "cluster", "", "the cluster name to operate on (overrides the environment file's cluster)")
+	root.PersistentFlags().StringVar(&tenantFlag, "tenant", "", "the tenant name to operate on (overrides the environment file's tenant)")
 	root.PersistentFlags().StringVar(kubeconfigArgs.KubeConfig, "kubeconfig", "", "path to the kubeconfig file to use for cluster access")
 	root.PersistentFlags().StringVar(kubeconfigArgs.Context, "kube-context", "", "the name of the kubeconfig context to use")
 	root.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "print diagnostic detail (e.g. external command chatter)")

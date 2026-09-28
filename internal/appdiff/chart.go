@@ -11,7 +11,6 @@ import (
 
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/envvars"
-	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/render"
 	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
@@ -27,12 +26,18 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 	}
 
 	var liveEnv map[string]string
+	var managedBy string
 	if opts.Baseline != "" {
 		liveEnv, err = readBaselineEnvFile(opts.Baseline, "env-vars.env")
 	} else {
 		liveWorkloads := FetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
 		if len(liveWorkloads) == 0 {
 			return nil, fmt.Errorf("no live workload found for chart %q among %v", opts.App.ChartPath, workloadKinds)
+		}
+		for _, w := range liveWorkloads {
+			if managedBy = fluxManagedBy(w); managedBy != "" {
+				break
+			}
 		}
 		liveEnv, err = MergeLiveEnv(ctx, opts, liveWorkloads)
 	}
@@ -53,6 +58,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		UnmappedDiffs:     result.UnmappedDiffs,
 		LiveOnlyCount:     result.LiveOnlyCount,
 		RenderedOnlyCount: result.RenderedOnlyCount,
+		FluxManagedBy:     managedBy,
 	}, nil
 }
 
@@ -72,8 +78,9 @@ func renderChart(ctx context.Context, opts Options, rendered *render.Result) ([]
 }
 
 // FetchLiveWorkloads fetches every Deployment/StatefulSet/DaemonSet
-// renderedDocs declares from the live cluster, applying App.Renamed and
-// App.PreviousNamespace. A workload the chart renders but that never
+// renderedDocs declares from the live cluster, translating the one named
+// App.Object to its live name (App.LiveName, when the redesign renamed it)
+// and falling back to App.LiveNamespace. A workload the chart renders but that never
 // existed live is skipped, not an error — the caller decides whether
 // finding none of them is a failure. Exported for internal/backup, which
 // runs the same chart-templating pipeline against a live (not
@@ -89,8 +96,8 @@ func FetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, r
 	var live []*unstructured.Unstructured
 	for _, doc := range workloadDocs {
 		name := doc.GetName()
-		if name == opts.App.Object && opts.App.Renamed != "" {
-			name = opts.App.Renamed
+		if name == opts.App.Object {
+			name = opts.App.LiveName()
 		}
 		namespace := doc.GetNamespace()
 		if namespace == "" {
@@ -106,11 +113,7 @@ func FetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, r
 }
 
 func fetchWorkload(ctx context.Context, opts Options, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error) {
-	live, err := kubeclient.GetUnstructured(ctx, opts.Client, gvk, namespace, name)
-	if err != nil && kubeclient.IsNotFound(err) && opts.App.PreviousNamespace != "" {
-		live, err = kubeclient.GetUnstructured(ctx, opts.Client, gvk, opts.App.PreviousNamespace, name)
-	}
-	return live, err
+	return getWithLiveNamespaceFallback(ctx, opts, gvk, namespace, name)
 }
 
 // MergeLiveEnv resolves and merges every live workload's env vars — a

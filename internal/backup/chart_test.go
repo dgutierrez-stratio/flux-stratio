@@ -267,11 +267,11 @@ func TestRun_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
 }
 
 // TestRun_ChartMode_TemplatesWithAppObjectNotLiveHelmReleaseName covers a
-// Renamed app: the live HelmRelease is found under its OLD/legacy name,
+// renamed app: the live HelmRelease is found under its OLD/legacy name,
 // but `helm template` must be invoked with App.Object (the NEW/GitOps
 // name) — the same release name internal/appdiff's own renderChart uses
 // — so a chart whose rendered resource names derive from .Release.Name
-// produces names FetchLiveWorkloads' Renamed-translation can actually
+// produces names FetchLiveWorkloads' live-name translation can actually
 // match, identically to how apps diff's own chart-mode render works.
 func TestRun_ChartMode_TemplatesWithAppObjectNotLiveHelmReleaseName(t *testing.T) {
 	base := fixtureBase(t)
@@ -279,7 +279,7 @@ func TestRun_ChartMode_TemplatesWithAppObjectNotLiveHelmReleaseName(t *testing.T
 	backupsDir := t.TempDir()
 	logger := log.New(io.Discard, false)
 
-	// Live under the OLD/Renamed name; App.Object is the NEW/GitOps name.
+	// Live under the OLD name; App.Object is the NEW/GitOps name.
 	hr := helmRelease("psql-agent", "stratio-datastores", map[string]any{})
 	dep := deploymentWithEnv("psql-agent", "stratio-datastores", "DEBUG")
 
@@ -295,7 +295,8 @@ func TestRun_ChartMode_TemplatesWithAppObjectNotLiveHelmReleaseName(t *testing.T
 	opts := Options{
 		Base: base,
 		App: config.App{
-			ID: "psql-gosec-agent", Object: "psql-gosec-agent", Renamed: "psql-agent", ChartPath: chartPath,
+			ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
+			Live: []config.ObjectRef{{Namespace: "stratio-datastores", Name: "psql-agent"}},
 		},
 		Index:  idx,
 		Runner: fakeRunner,

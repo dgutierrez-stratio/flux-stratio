@@ -195,3 +195,53 @@ func TestIndex_Names_UnionAcrossBucketsSorted(t *testing.T) {
 		}
 	}
 }
+
+func TestScan_ExtraKindsIndexedAndDeduplicated(t *testing.T) {
+	logger := log.New(&bytes.Buffer{}, false)
+	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(
+		obj("apps/v1", "Deployment", "stratio-genai", "genai-api"),
+		obj("example.stratio.com/v1", "Widget", "stratio-apps", "w1"),
+	).Build()
+
+	extra := []schema.GroupVersionKind{
+		{Group: "apps", Version: "v1", Kind: "Deployment"}, // already a workload kind: listed once
+		{Group: "example.stratio.com", Version: "v1", Kind: "Widget"},
+	}
+	idx, err := Scan(context.Background(), c, logger, extra...)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	objs := idx.Objects()
+	var got []string
+	for _, o := range objs {
+		got = append(got, o.GetKind()+"/"+o.GetName())
+	}
+	if strings.Join(got, ",") != "Deployment/genai-api,Widget/w1" {
+		t.Errorf("Objects() = %v, want each object exactly once, sorted by kind", got)
+	}
+}
+
+func TestIndex_GetMatchesKindAndNamespace(t *testing.T) {
+	logger := log.New(&bytes.Buffer{}, false)
+	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(
+		obj("apps/v1", "Deployment", "stratio-genai", "genai"),
+		obj("postgres.stratio.com/v1", "PgDatabase", "stratio-datastores", "genai"),
+	).Build()
+	idx, err := Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deploy := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
+	if got, ok := idx.Get(deploy, "stratio-genai", "genai"); !ok || got.GetKind() != "Deployment" {
+		t.Errorf("Get(Deployment stratio-genai/genai) = %v, %v", got, ok)
+	}
+	if _, ok := idx.Get(deploy, "stratio-datastores", "genai"); ok {
+		t.Error("Get matched the wrong namespace")
+	}
+	pgdb := schema.GroupVersionKind{Group: "postgres.stratio.com", Version: "v1", Kind: "PgDatabase"}
+	if got, ok := idx.Get(pgdb, "stratio-datastores", "genai"); !ok || got.GetKind() != "PgDatabase" {
+		t.Errorf("Get(PgDatabase) = %v, %v", got, ok)
+	}
+}

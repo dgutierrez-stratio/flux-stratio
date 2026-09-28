@@ -51,7 +51,7 @@ type Options struct {
 	// — only used to resolve a chart-mode app's on-disk chart path.
 	Base string
 	// ChartsBase, if set, overrides Base for resolving a chart-mode app's
-	// on-disk chart directory (see config.Config.ChartsBase).
+	// on-disk chart directory (see config.Environment.ChartsBase).
 	ChartsBase string
 	App        config.App
 	// Runner runs `helm template`/`helm dependency build` for a
@@ -106,46 +106,43 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	return &Result{Dir: dir, Files: files}, nil
 }
 
-// DiscoveredApps returns one config.App per distinct live identity idx
-// found — for `apps backup --all`, "everything, no filters applied". A
-// name idx found that also matches a catalog app's own live name (see
-// config.App.LiveName) resolves to that real config.App, so it's
-// captured exactly the same way `apps backup --catalog` would capture it
-// (same directory, same ChartPath-driven dispatch, same shape `apps diff
-// --baseline` expects) — the same app must come out identical whichever
-// flag reached it. Everything else gets a minimal synthetic App (ID and
-// Object both the discovered name, no ChartPath), which still goes
-// through the exact same Run dispatch — it just can't run
-// chart-templating without a catalog entry's ChartPath to locate the
-// chart on disk, so it falls back to whatever Run's manifest-mode cascade
-// finds.
+// DiscoveredApps returns catalogApps (the instances internal/components
+// classified, captured exactly as `apps backup --catalog` would capture
+// them) plus one minimal synthetic App per remaining live name idx found —
+// for `apps backup --all`, "everything, no filters applied". A name is
+// covered, and gets no synthetic App of its own, when it's the name of any
+// live object a catalog app was classified from: so the "genai-api"
+// Deployment the genai chart app anchors on isn't captured twice, while
+// the same-named-but-unrelated "genai" PgDatabase still is, on its own.
+//
+// A synthetic App (ID and Object both the discovered name, no Type or
+// ChartPath) goes through the exact same Run dispatch — it just can't run
+// chart-templating without a catalog type's chart to locate on disk, so it
+// falls back to whatever Run's manifest-mode cascade finds.
 //
 // A synthetic App's ID is suffixed "-live" if it would otherwise collide
-// with a real catalog App's ID — the one real way this happens is a
-// Renamed app whose *new*, post-migration name is also live at once
-// (a legitimate mid-migration state, since the app's own catalog ID is
-// conventionally its new/Object name): without disambiguation, both the
-// pre- and post-migration live objects would be captured under the same
+// with a catalog App's ID — e.g. a renamed app's new, post-migration name
+// live alongside its legacy object (a legitimate mid-migration state):
+// without disambiguation, both would be captured under the same
 // <dir>/<App.ID>/<timestamp>/ directory, silently mixing two different
 // captures together and corrupting later --baseline/--drift resolution.
-func DiscoveredApps(cfg *config.Config, idx *discovery.Index) []config.App {
-	byLiveName := make(map[string]config.App, len(cfg.Apps))
-	catalogIDs := make(map[string]bool, len(cfg.Apps))
-	for _, app := range cfg.Apps {
-		byLiveName[app.LiveName()] = app
-		catalogIDs[app.ID] = true
+func DiscoveredApps(catalogApps []config.App, idx *discovery.Index) []config.App {
+	covered := map[string]bool{}
+	usedIDs := make(map[string]bool, len(catalogApps))
+	for _, app := range catalogApps {
+		usedIDs[app.ID] = true
+		for _, ref := range app.Live {
+			covered[ref.Name] = true
+		}
 	}
 
-	apps := make([]config.App, 0, len(idx.Names()))
-	usedIDs := make(map[string]bool, len(idx.Names()))
+	apps := append(make([]config.App, 0, len(catalogApps)+len(idx.Names())), catalogApps...)
 	for _, name := range idx.Names() {
-		if app, ok := byLiveName[name]; ok {
-			apps = append(apps, app)
-			usedIDs[app.ID] = true
+		if covered[name] {
 			continue
 		}
 		id := name
-		if catalogIDs[id] || usedIDs[id] {
+		if usedIDs[id] {
 			id = name + "-live"
 		}
 		apps = append(apps, config.App{ID: id, Name: name, Object: name})
@@ -167,6 +164,9 @@ func notFoundErr(name string) error {
 // a synthetic App has no "expected" shape apps diff --baseline could ever
 // compare against in the first place.
 func captureManifestMode(ctx context.Context, opts Options, dir, name string) ([]string, error) {
+	if live, ok := classifiedLive(opts); ok {
+		return captureClassified(ctx, opts, dir, live)
+	}
 	if cr, ok := opts.Index.FindCR(name, opts.Log); ok {
 		return writeCR(dir, cr)
 	}
@@ -193,12 +193,45 @@ func captureManifestMode(ctx context.Context, opts Options, dir, name string) ([
 	return nil, notFoundErr(name)
 }
 
-// isCatalogApp reports whether app is a real config catalog entry rather
-// than a synthetic one DiscoveredApps built for a live object the catalog
-// doesn't know about — Rset is required for every catalog entry
-// (config.Config.validate) and never set on a synthetic App.
+// isCatalogApp reports whether app is a classified catalog instance rather
+// than a synthetic one DiscoveredApps built for a live object no catalog
+// type selects.
 func isCatalogApp(app config.App) bool {
-	return app.Rset != ""
+	return app.Type != ""
+}
+
+// classifiedLive returns the exact live object opts.App was classified
+// from (its primary App.Live ref), when it has one and it's still in the
+// index — the precise lookup a catalog instance gets, instead of the
+// name-only cascade, which can't tell a chart's "genai" workload from a
+// "genai" PgDatabase.
+func classifiedLive(opts Options) (*unstructured.Unstructured, bool) {
+	if len(opts.App.Live) == 0 {
+		return nil, false
+	}
+	ref := opts.App.Live[0]
+	return opts.Index.Get(ref.GVK, ref.Namespace, ref.Name)
+}
+
+// captureClassified backs up a classified live object by its own kind.
+func captureClassified(ctx context.Context, opts Options, dir string, live *unstructured.Unstructured) ([]string, error) {
+	switch {
+	case isWorkload(live):
+		return writeWorkload(ctx, opts, dir, live)
+	case live.GroupVersionKind().Group == "helm.toolkit.fluxcd.io":
+		values, err := resolveHelmReleaseValues(ctx, opts, live)
+		if err != nil {
+			return nil, err
+		}
+		return writeHelmReleaseFiles(dir, live, values, opts.Log)
+	default:
+		return writeCR(dir, live)
+	}
+}
+
+func isWorkload(obj *unstructured.Unstructured) bool {
+	gvk := obj.GroupVersionKind()
+	return gvk.Group == "apps" && (gvk.Kind == "Deployment" || gvk.Kind == "StatefulSet" || gvk.Kind == "DaemonSet")
 }
 
 // captureChartMode backs up a chart-mode app (App.ChartPath != ""): every
@@ -208,6 +241,9 @@ func isCatalogApp(app config.App) bool {
 func captureChartMode(ctx context.Context, opts Options, dir, name string) ([]string, error) {
 	if hr, ok := opts.Index.FindHelmRelease(name, opts.Log); ok {
 		return captureChartFromHelmRelease(ctx, opts, dir, hr)
+	}
+	if live, ok := classifiedLive(opts); ok && isWorkload(live) {
+		return writeWorkload(ctx, opts, dir, live)
 	}
 	if wl, ok := opts.Index.FindWorkload(name, opts.Log); ok {
 		return writeWorkload(ctx, opts, dir, wl)
@@ -241,11 +277,11 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 		chartsBase = opts.ChartsBase
 	}
 	chartDir := filepath.Join(chartsBase, opts.App.ChartPath)
-	// opts.App.Object, not hr.GetName() (the live/Renamed name) — the
+	// opts.App.Object, not hr.GetName() (the live, maybe-renamed name) — the
 	// same release name internal/appdiff's own renderChart uses, so a
 	// chart whose rendered resource names derive from .Release.Name
 	// produces the same names here as it would for a desired-state
-	// render, letting FetchLiveWorkloads' Renamed-translation apply
+	// render, letting FetchLiveWorkloads' live-name translation apply
 	// identically in both places.
 	renderedDocs, err := diff.HelmTemplate(ctx, opts.Runner, chartDir, opts.App.Object, hr.GetNamespace(), values)
 	if err != nil {

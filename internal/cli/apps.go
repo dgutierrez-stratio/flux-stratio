@@ -10,11 +10,11 @@ import (
 
 	"github.com/Stratio/flux-stratio/internal/appdiff"
 	"github.com/Stratio/flux-stratio/internal/backup"
+	"github.com/Stratio/flux-stratio/internal/components"
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/discovery"
 	"github.com/Stratio/flux-stratio/internal/drift"
-	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/runner"
 	"github.com/Stratio/flux-stratio/internal/ui"
@@ -68,13 +68,103 @@ deliberately not supported: pflag would silently swallow the next token —
 even --help — as --baseline's value instead of parsing it as its own
 flag, which is far more confusing than requiring an explicit value.)
 
+The patch is always the whole one: the desired side is rendered without
+the tenant file's existing patch for the object's kind (the one apps
+migrate would replace), so --view patch shows exactly what apps migrate
+would write. When the tenant file already carries exactly that patch,
+there's nothing to show.
+
+When the live object is already reconciled by Flux (it carries Flux's
+kustomize.toolkit.fluxcd.io/name or helm.toolkit.fluxcd.io/name label),
+a warning says so: Flux has reset it to the GitOps defaults, so legacy
+values it overwrote no longer show up live. Compare against the backup
+you took before cutover instead, with --baseline latest.
+
+<name> is a live object's name (psql, psql-agent, kafka1) or its derived
+GitOps object name (psql-gosec-agent); the component type is detected
+from the live object's labels/annotations against the catalog. Use
+--as <type>[/<entry>] to answer any "which one?" question up front.
+
 Examples:
 
   flux stratio apps diff psql                            # desired state vs. live cluster
   flux stratio apps diff psql --baseline latest           # desired state vs. your last backup
   flux stratio apps diff psql --drift latest              # live now vs. your last backup
   flux stratio apps diff psql --view patch                # print the raw patch YAML instead
-  flux stratio apps diff psql --drift latest --view meld  # open the drift check in meld`
+  flux stratio apps diff psql --drift latest --view meld  # open the drift check in meld
+  flux stratio apps diff pool-psql --baseline latest --view patch
+                                                         # Flux already reset live: patch from the backup
+  flux stratio apps diff kafka1 --as kafka/kafka         # live kafka1 migrates into tenant entry "kafka"`
+
+const appsBackupLong = `Captures live legacy state to disk, under <dir>/<app-id>/<UTC-timestamp>/:
+cr.yaml for a CR-backed component; deployment.yaml + env-vars.env for a
+chart-backed one (or helmrelease.yaml + values.yaml when only a
+HelmRelease is live). It reads only the live cluster — never the tenant
+file — so it works before a component is declared there at all.
+
+Take the backup BEFORE pushing a component to the tenant file. Once Flux
+reconciles a component unpatched, it resets the live object to the GitOps
+defaults, and the legacy values it overwrote survive only in a backup —
+which is what apps diff/migrate --baseline compute the patch from.
+
+  <name>     one component, by live name (psql, psql-agent) or GitOps
+             object name (psql-gosec-agent)
+  --catalog  every live object a catalog type selects
+  --all      that, plus every other live object the cluster scan finds
+
+Examples:
+
+  flux stratio apps backup --catalog      # before touching anything
+  flux stratio apps backup pool-psql      # a fresh reference point for one component`
+
+const appsMigrateLong = `Computes a component's patch — the legacy values the GitOps render
+doesn't already produce — and splices it into its entry in the tenant
+file (components.<key>[name=<entry>].patches, or config.agent.patches for
+a gosec agent), preserving every comment. Runs the component's prepare
+step first, if its catalog type declares one.
+
+How the patch is computed:
+
+  - The desired side is rendered from the tenant file WITHOUT the
+    existing patch for the object's kind (the one this command replaces,
+    by target.kind), so the result is always the whole patch — never a
+    leftover delta that would drop what the existing patch already set.
+  - The legacy side is the live cluster, or a backup with --baseline.
+  - If the tenant file already carries exactly that patch, there's
+    nothing to do: running migrate twice converges.
+
+Migrate before Flux reconciles the component. If you push a component to
+the tenant file unpatched first, Flux resets the live object to the
+GitOps defaults, and a patch computed from live can no longer see the
+legacy values it overwrote (apps diff/migrate warn when the live object
+is already Flux-managed). Recover by computing the patch from the backup
+you took before cutover:
+
+  flux stratio apps migrate pool-psql --baseline latest --dry-run
+  flux stratio apps migrate pool-psql --baseline latest
+
+then commit and push the tenant file: Flux restores the legacy values.
+
+Resolving which component to migrate:
+
+  <name> is a live object's name or its derived GitOps object name; the
+  type is detected against the catalog's selectors. If the derived
+  tenant entry isn't declared (say live kafka1, tenant entry kafka), or a
+  name matches more than one instance, you're asked — or answer up front
+  with --as <type>[/<entry>]. Nothing you answer is stored.
+  --all migrates every classified instance whose component the tenant
+  file declares, in dependency order; types it doesn't declare (absent or
+  commented out) are skipped with a warning. With --yes, a question that
+  needs an answer isn't asked: that instance fails, naming --as.
+
+Examples:
+
+  flux stratio apps migrate psql --dry-run               # preview the tenant-file edit
+  flux stratio apps migrate psql                         # apply it (asks to confirm)
+  flux stratio apps migrate kafka1 --as kafka/kafka      # pin the tenant entry
+  flux stratio apps migrate pool-psql --baseline latest  # Flux already reset live: use the backup
+  flux stratio apps migrate --all --dry-run              # survey everything first
+  flux stratio apps migrate --all --continue-on-error    # then migrate what resolves`
 
 func newAppsCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -92,16 +182,18 @@ func newAppsDiffCommand() *cobra.Command {
 	var driftAgainst string
 	var view string
 	var dir string
+	var as string
 
 	cmd := &cobra.Command{
-		Use:   "diff <id>",
+		Use:   "diff <name>",
 		Short: "Compare an app's desired/live state pre-migration, or check its post-migration drift",
 		Long:  appsDiffLong,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAppsDiff(cmd, args[0], view, baseline, driftAgainst, dir)
+			return runAppsDiff(cmd, args[0], view, baseline, driftAgainst, dir, as)
 		},
 	}
+	addAsFlag(cmd, &as)
 	cmd.Flags().StringVar(&baseline, "baseline", "",
 		"pre-migration: diff the rendered desired state against a previously captured backup (see apps backup) "+
 			"instead of the live cluster — see the command's --help for the full baseline-vs-drift explanation")
@@ -118,7 +210,7 @@ func newAppsDiffCommand() *cobra.Command {
 	return cmd
 }
 
-func runAppsDiff(cmd *cobra.Command, appID, view, baseline, driftAgainst, dirFlag string) error {
+func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag, as string) error {
 	switch view {
 	case viewUnified, viewPatch, viewMeld:
 	default:
@@ -131,33 +223,33 @@ func runAppsDiff(cmd *cobra.Command, appID, view, baseline, driftAgainst, dirFla
 		return fmt.Errorf("--view patch has no meaning with --drift: there's no GitOps patch, only what changed live")
 	}
 
-	logger := rootLogger(cmd)
-
-	cfg, err := config.Load(configFlag)
+	s, err := openSession(cmd)
 	if err != nil {
 		return err
 	}
-	app := cfg.Find(appID)
-	if app == nil {
-		return fmt.Errorf("app %q not found in the config catalog", appID)
-	}
-	base, cluster, tenant := cfg.Effective(baseFlag, clusterFlag, tenantFlag)
-
-	c, err := kubeclient.New(kubeconfigArgs)
+	// --drift reads only the live cluster and a backup, never the tenant
+	// file; the desired-state comparisons render from it.
+	ropts, err := s.resolveOptions(cmd, driftAgainst == "", true, as)
 	if err != nil {
-		return fmt.Errorf("connecting to the cluster: %w", err)
+		return err
 	}
+	app, err := components.Resolve(ropts, name)
+	if err != nil {
+		return err
+	}
+	s.log.Debugf("%q resolved to %s (entry %q, kustomization %q, live %s/%s)",
+		name, app.Type, app.Entry, app.Kustomization, app.LiveNamespace(), app.LiveName())
 
 	if driftAgainst != "" {
-		return runAppsDriftDiff(cmd, *app, base, cfg.ChartsBase, c, driftAgainst, view, dirFlag, logger)
+		return runAppsDriftDiff(cmd, app, s, driftAgainst, view, dirFlag)
 	}
-	return runAppsDesiredDiff(cmd, *app, base, cluster, tenant, cfg.ChartsBase, c, baseline, view, dirFlag, logger)
+	return runAppsDesiredDiff(cmd, app, s.env, s.client, baseline, view, dirFlag, s.log)
 }
 
 // runAppsDesiredDiff is the default `apps diff` comparison: the rendered
 // GitOps desired state against the live cluster, or (--baseline) a
 // previously captured backup standing in for it.
-func runAppsDesiredDiff(cmd *cobra.Command, app config.App, base, cluster, tenant, chartsBase string, c client.Client, baseline, view, dirFlag string, logger *log.Logger) error {
+func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environment, c client.Client, baseline, view, dirFlag string, logger *log.Logger) error {
 	resolvedBaseline := ""
 	if baseline != "" {
 		var err error
@@ -167,9 +259,10 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, base, cluster, tenan
 		}
 	}
 
-	logger.Actionf("diffing %q against %s", app.Name, diffTargetLabel(resolvedBaseline))
+	comparison := desiredComparison(baseline, resolvedBaseline)
+	logger.Actionf("diffing %q: %s", app.Name, comparison)
 	result, err := appdiff.Diff(cmd.Context(), appdiff.Options{
-		Base: base, Cluster: cluster, Tenant: tenant, ChartsBase: chartsBase,
+		Base: env.Base, Cluster: env.Cluster, Tenant: env.Tenant, ChartsBase: env.ChartsBase,
 		App:      app,
 		Runner:   runner.Exec{},
 		Client:   c,
@@ -180,11 +273,12 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, base, cluster, tenan
 		return err
 	}
 
-	if result.Patch == nil {
-		logger.Successf("no differences")
+	warnFluxManaged(logger, app, result.FluxManagedBy)
+	if result.Patch == nil || result.UpToDate {
+		reportNoChange(logger, result.UpToDate, result.ObsoletePatches)
 		return nil
 	}
-	logger.Successf("found a difference")
+	logger.Successf("found a difference: %s", comparison)
 
 	switch view {
 	case viewPatch:
@@ -194,11 +288,11 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, base, cluster, tenan
 		}
 		return ui.Patch(cmd.OutOrStdout(), patchYAML)
 	case viewMeld:
-		liveLabel := "live"
+		liveLabel := "live cluster"
 		if resolvedBaseline != "" {
 			liveLabel = "backup"
 		}
-		return ui.Meld(cmd.Context(), runner.Exec{}, "rendered", result.Before, liveLabel, result.After)
+		return ui.Meld(cmd.Context(), runner.Exec{}, "desired state", result.Before, liveLabel, result.After)
 	default:
 		return ui.FileDiff(cmd.OutOrStdout(), result.Before, result.After)
 	}
@@ -208,22 +302,17 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, base, cluster, tenan
 // compared directly against a stored backup — no GitOps rendering, no
 // tenant file, no render at all. See internal/drift's package doc for why
 // this is a different question than the default comparison.
-func runAppsDriftDiff(cmd *cobra.Command, app config.App, base, chartsBase string, c client.Client, driftAgainst, view, dirFlag string, logger *log.Logger) error {
+func runAppsDriftDiff(cmd *cobra.Command, app config.App, s *session, driftAgainst, view, dirFlag string) error {
+	logger := s.log
 	resolved, err := resolveBackupArg(driftAgainst, app.ID, dirFlag)
 	if err != nil {
 		return err
 	}
 
-	logger.Actionf("scanning the live cluster")
-	idx, err := discovery.Scan(cmd.Context(), c, logger)
-	if err != nil {
-		return fmt.Errorf("scanning the live cluster: %w", err)
-	}
-	logger.Successf("scan complete")
-
-	logger.Actionf("checking %q for drift since %s", app.Name, resolved)
+	against := backupLabel(driftAgainst, resolved)
+	logger.Actionf("checking %q for drift: live now vs. %s", app.Name, against)
 	result, err := drift.Run(cmd.Context(), drift.Options{
-		App: app, Base: base, ChartsBase: chartsBase, Runner: runner.Exec{}, Client: c, Index: idx,
+		App: app, Base: s.env.Base, ChartsBase: s.env.ChartsBase, Runner: runner.Exec{}, Client: s.client, Index: s.index,
 		Against: resolved, Log: logger,
 	})
 	if err != nil {
@@ -231,13 +320,13 @@ func runAppsDriftDiff(cmd *cobra.Command, app config.App, base, chartsBase strin
 	}
 
 	if result.Before == result.After {
-		logger.Successf("no drift since %s", resolved)
+		logger.Successf("no drift: live now matches %s", against)
 		return nil
 	}
-	logger.Successf("found drift since %s", resolved)
+	logger.Successf("found drift: live now differs from %s", against)
 
 	if view == viewMeld {
-		return ui.Meld(cmd.Context(), runner.Exec{}, "backup", result.Before, "live", result.After)
+		return ui.Meld(cmd.Context(), runner.Exec{}, "backup", result.Before, "live now", result.After)
 	}
 	return ui.FileDiff(cmd.OutOrStdout(), result.Before, result.After)
 }
@@ -261,33 +350,80 @@ func resolveBackupArg(value, appID, dirFlag string) (string, error) {
 	return backup.ResolveBaseline(root, appID)
 }
 
-func diffTargetLabel(baseline string) string {
-	if baseline == "" {
-		return "the live cluster"
+// warnFluxManaged warns when the live object compared against is already
+// reconciled by Flux: its state is then the GitOps render's, not the
+// legacy installation's, so legacy values Flux reset are invisible to the
+// comparison — the patch should come from a backup taken before cutover.
+func warnFluxManaged(logger *log.Logger, app config.App, managedBy string) {
+	if managedBy == "" {
+		return
 	}
-	return "baseline " + baseline
+	logger.Warningf("live %s/%s is already managed by Flux (%s): it may no longer hold the legacy values — "+
+		"compare against a pre-cutover backup instead: --baseline latest (see apps backup)",
+		app.LiveNamespace(), app.LiveName(), managedBy)
+}
+
+// reportNoChange narrates a diff/migrate that found nothing to write:
+// either live already matches the base (warning when an existing patch
+// would now move it away), or the tenant file already carries exactly the
+// needed patch.
+func reportNoChange(logger *log.Logger, upToDate bool, obsoletePatches int) {
+	switch {
+	case upToDate:
+		logger.Successf("no differences: the tenant file already carries exactly the patch needed")
+	case obsoletePatches > 0:
+		logger.Warningf("no differences against the unpatched base, but the tenant file carries %d patch(es) for this object "+
+			"that Flux would apply on top — review or remove them", obsoletePatches)
+	default:
+		logger.Successf("no differences")
+	}
+}
+
+// desiredComparison names what a desired-state diff (apps diff without
+// --drift, and apps migrate's patch computation) compares, for the log:
+// the rendered GitOps desired state against the live cluster, or against
+// a backup when --baseline was given (arg is its raw flag value, resolved
+// the backup directory it resolved to).
+func desiredComparison(arg, resolved string) string {
+	if resolved == "" {
+		return "desired state vs. live cluster"
+	}
+	return "desired state vs. " + backupLabel(arg, resolved)
+}
+
+// backupLabel names a --baseline/--drift backup for the log: "your last
+// backup (<dir>)" when it was auto-located with "latest", "backup <dir>"
+// when the operator named it.
+func backupLabel(arg, resolved string) string {
+	if arg == autoLocateBackup {
+		return fmt.Sprintf("your last backup (%s)", resolved)
+	}
+	return "backup " + resolved
 }
 
 func newAppsBackupCommand() *cobra.Command {
 	var catalog bool
 	var all bool
 	var dir string
+	var as string
 
 	cmd := &cobra.Command{
-		Use:   "backup [id]",
+		Use:   "backup [name]",
 		Short: "Capture an app's live legacy state to disk",
+		Long:  appsBackupLong,
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAppsBackup(cmd, args, catalog, all, dir)
+			return runAppsBackup(cmd, args, catalog, all, dir, as)
 		},
 	}
-	cmd.Flags().BoolVar(&catalog, "catalog", false, "back up every app in the config catalog")
+	addAsFlag(cmd, &as)
+	cmd.Flags().BoolVar(&catalog, "catalog", false, "back up every live object a catalog type selects")
 	cmd.Flags().BoolVar(&all, "all", false, "back up every live object the cluster scan finds, not just the config catalog")
 	cmd.Flags().StringVar(&dir, "dir", "", "backups root directory (default: a backups/ directory next to the config file)")
 	return cmd
 }
 
-func runAppsBackup(cmd *cobra.Command, args []string, catalog, all bool, dirFlag string) error {
+func runAppsBackup(cmd *cobra.Command, args []string, catalog, all bool, dirFlag, as string) error {
 	selected := 0
 	for _, v := range []bool{len(args) > 0, catalog, all} {
 		if v {
@@ -295,53 +431,62 @@ func runAppsBackup(cmd *cobra.Command, args []string, catalog, all bool, dirFlag
 		}
 	}
 	if selected != 1 {
-		return fmt.Errorf("provide exactly one of an app id, --catalog or --all")
+		return fmt.Errorf("provide exactly one of an app name, --catalog or --all")
 	}
-
-	logger := rootLogger(cmd)
-	cfg, err := config.Load(configFlag)
-	if err != nil {
-		return err
+	if as != "" && len(args) == 0 {
+		return fmt.Errorf("--as only applies to a single named app")
 	}
-
-	base, _, _ := cfg.Effective(baseFlag, clusterFlag, tenantFlag)
 
 	backupsDir, err := resolveBackupsDir(dirFlag)
 	if err != nil {
 		return err
 	}
-
-	c, err := kubeclient.New(kubeconfigArgs)
+	s, err := openSession(cmd)
 	if err != nil {
-		return fmt.Errorf("connecting to the cluster: %w", err)
+		return err
 	}
-
-	logger.Actionf("scanning the live cluster")
-	idx, err := discovery.Scan(cmd.Context(), c, logger)
+	// A backup captures live state only: no tenant file involved.
+	ropts, err := s.resolveOptions(cmd, false, true, as)
 	if err != nil {
-		return fmt.Errorf("scanning the live cluster: %w", err)
+		return err
 	}
-	logger.Successf("scan complete")
 
 	var apps []config.App
+	var unresolved []error
 	switch {
 	case len(args) > 0:
-		app := cfg.Find(args[0])
-		if app == nil {
-			return fmt.Errorf("app %q not found in the config catalog", args[0])
+		app, err := components.Resolve(ropts, args[0])
+		if err != nil {
+			return err
 		}
-		apps = []config.App{*app}
+		apps = []config.App{app}
 	case catalog:
-		apps = cfg.Apps
+		if apps, unresolved, err = components.ResolveAll(ropts); err != nil {
+			return err
+		}
 	default: // all
-		apps = backup.DiscoveredApps(cfg, idx)
+		catalogApps, u, err := components.ResolveAll(ropts)
+		if err != nil {
+			return err
+		}
+		unresolved = u
+		apps = backup.DiscoveredApps(catalogApps, s.index)
+	}
+	// Like any other per-app backup failure, an unresolved instance never
+	// stops the rest from being captured.
+	for _, u := range unresolved {
+		s.log.Failuref("%v", u)
 	}
 
-	return backupAll(cmd, apps, backupsDir, base, cfg.ChartsBase, c, idx, logger)
+	err = backupAll(cmd, apps, backupsDir, s.env.Base, s.env.ChartsBase, s.client, s.index, s.log)
+	if err == nil && len(unresolved) > 0 {
+		err = fmt.Errorf("backup skipped %d unresolved instance(s)", len(unresolved))
+	}
+	return err
 }
 
 // resolveBackupsDir returns dirFlag if set, otherwise a backups/
-// directory next to the resolved config file — so backups land beside the
+// directory next to the resolved catalog file — so backups land beside the
 // catalog that describes them by default, with no extra flag needed.
 func resolveBackupsDir(dirFlag string) (string, error) {
 	if dirFlag != "" {

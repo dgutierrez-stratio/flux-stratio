@@ -7,21 +7,25 @@ Ansible-based cluster onto Flux/GitOps with flux-stratio. It assumes:
   have already been migrated with [flux-keos](https://github.com/Stratio/flux-keos)'s
   `cluster migrate` — flux-stratio only ever touches applications, never that layer.
 - You have a local checkout of `keos-apps`, `keos-use-cases`, `keos-fleet` and
-  `keos-system-services` as sibling directories (`--base`/the config file's `base` points at their
-  parent).
+  `keos-system-services` as sibling directories (`--base`/the environment file's `base` points at
+  their parent).
 - `flux-operator`, `flux` and `helm` are on `PATH` (see the [README](../README.md#install)).
 
-## 1. Get a config file
+## 1. Get a catalog and an environment file
 
-If this is the first run against a given `base`/`cluster`/`tenant`, seed one from the known Stratio
-application catalog instead of authoring `apps:` from scratch:
+On first use, seed both:
 
 ```shell
 flux stratio config init --base /path/to/gitops --cluster eosdev --tenant stratio
 ```
 
-Review the result — an environment may run a subset of the seeded applications, or ones the catalog
-doesn't know about yet — then continue below.
+This writes `~/.fluxcd/flux-stratio/catalog.yaml` — the known Stratio component types, each with
+the selectors that recognize its live legacy objects — and `environment.yaml` (`base`, `cluster`,
+`tenant`). The catalog is environment-independent: review it once (a component this catalog
+doesn't know about yet needs a type added — see
+[`config-reference.md`](config-reference.md#catalogyaml--the-component-catalog)), and reuse it
+against every cluster. Switching cluster or tenant later only means editing `environment.yaml`, or
+passing `--cluster`/`--tenant`.
 
 ## 2. Preflight
 
@@ -29,7 +33,9 @@ doesn't know about yet — then continue below.
 flux stratio doctor
 ```
 
-This checks binaries, the config file, the `--base` repo layout, cluster access, and that the
+This checks binaries, the catalog and environment files, the `--base` repo layout, every chart-mode
+type's chart directory, every type's component key and prepare step against the templates, cluster
+access, and that the
 tenant's `ResourceSetInputProvider` file exists — in that order, reporting every problem it finds
 rather than stopping at the first one. Fix everything `doctor` reports before continuing; a
 migration command surfacing the same class of problem mid-run is a worse time to discover it.
@@ -65,10 +71,19 @@ Commit the reviewed file to `keos-fleet` before continuing.
 
 ## 4. Survey what needs migrating
 
-The config file's `apps:` list (see [`config-reference.md`](config-reference.md)) is the catalog of
-migratable applications — there is no live discovery of "what apps exist" the way `tenant import`
-discovers components; each app is a deliberate entry an operator added once, reviewed, and expects
-to keep migrating the same way every time.
+The catalog's types (see [`config-reference.md`](config-reference.md)) decide what is migratable;
+the live cluster decides which instances exist. See what the catalog recognizes on this cluster
+with a dry run:
+
+```shell
+flux stratio apps migrate --all --dry-run
+```
+
+Every live object a type selects is resolved against the tenant file. Where the derived entry name
+isn't declared (say the live `KafkaCluster` is `kafka1` but the tenant declares `kafka`), you're
+asked which declared entry it migrates into; a type whose component the tenant doesn't declare at
+all is skipped with a warning. Nothing you answer is stored — pass `--as <type>/<entry>` to a
+single-app run to answer up front, e.g. `flux stratio apps migrate kafka1 --as kafka/kafka`.
 
 For an app with a declared `prepare` step, read what that step actually does before your first run
 against production — `flux stratio apps migrate` runs it automatically, but a step like
@@ -78,17 +93,22 @@ even though it's exactly what needs to happen before cutover. See
 
 ## 5. Back up before touching anything
 
+> Do this **before** any component is pushed to the tenant file. A component Flux reconciles
+> unpatched is reset to the GitOps defaults; from then on the backup is the only record of its
+> legacy values (see step 6).
+
 ```shell
 flux stratio apps backup --catalog
 ```
 
-Captures every app's live state to `backups/<app-id>/<UTC-timestamp>/` next to the config file (or
+Captures every catalog instance's live state to `backups/<app-id>/<UTC-timestamp>/` next to the
+catalog file (or
 wherever `--dir` points). This has two purposes: a record of exactly what was live before cutover,
 and a fixed comparison point for `apps diff --baseline` — useful when the live object itself is
 about to change (e.g. right before running a `prepare` step) and you want to diff against what it
 looked like a moment ago, not whatever it looks like when you happen to run the diff.
 
-`--catalog` only backs up what's in the config file — the apps this run is actually going to
+`--catalog` only backs up what a catalog type selects — the apps this run is actually going to
 migrate. Pass `--all` instead for a broader, unscoped capture of everything the cluster scan finds
 (system services, CCT, anything else still live) — useful as a one-off safety net before a bigger
 cutover, but not something `apps diff --baseline` needs for the apps this plugin migrates.
@@ -109,10 +129,29 @@ flux stratio apps migrate psql --dry-run       # preview the tenant-file edit it
 flux stratio apps migrate psql                 # apply it (prompts for confirmation)
 ```
 
-`apps migrate` is idempotent: running it again against an already-migrated app recomputes the diff
-fresh from live state and finds nothing to change, rather than trusting a prior result. Re-running
-it after live state drifts (say, someone hand-edited a value on the old cluster) picks up the new
-difference and re-patches — it never silently skips based on "already done."
+`apps migrate` is idempotent: every run renders the component's base *without* the tenant file's
+existing patch for that object and recomputes the whole patch against live state. If the tenant
+file already carries exactly that patch, it reports nothing to change; if live drifted (say, someone
+hand-edited a value on the old cluster), it rewrites the patch in full — never just the leftover
+delta, and never trusting "already done."
+
+> **Migrate before Flux reconciles the component.** Once a component is pushed to the tenant file
+> unpatched and Flux reconciles it, the live object is overwritten with the GitOps defaults, and
+> a patch computed from live can no longer see the legacy values Flux reset. `apps diff`/`migrate`
+> warn when the live object already carries Flux's `kustomize.toolkit.fluxcd.io/name` (or
+> `helm.toolkit.fluxcd.io/name`) label. Recover by computing the patch from the pre-cutover backup
+> (step 5) instead of live:
+>
+> ```shell
+> flux stratio apps diff pool-psql --baseline latest --view patch   # the whole patch, from the backup
+> flux stratio apps migrate pool-psql --baseline latest --dry-run   # preview the tenant-file edit
+> flux stratio apps migrate pool-psql --baseline latest             # write it
+> ```
+>
+> Then commit and push the tenant file: Flux re-applies the component with the patch, restoring the
+> legacy values (a changed replica count or resources roll the component's pods). Confirm with
+> `flux stratio apps diff pool-psql --baseline latest`, which should now report that the tenant file
+> already carries exactly the patch needed.
 
 ## 7. Migrate the rest
 
@@ -121,7 +160,9 @@ flux stratio apps migrate --all
 ```
 
 Apps are ordered by their dependencies as declared in the tenant file itself (a dependency migrates
-before its dependent), not by the order they appear in the config. By default, the run stops at the
+before its dependent), not by the order they appear in the catalog. `--yes` also turns off the
+type/entry questions: anything that would need one fails naming `--as` instead, so run once
+interactively (or `--dry-run`) first. By default, the run stops at the
 first app that fails, so a real problem doesn't get masked by nine "successful" migrations after
 it; pass `--continue-on-error` once you're confident enough failures are isolated per-app to be
 worth pushing through.

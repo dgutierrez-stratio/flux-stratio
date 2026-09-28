@@ -1,0 +1,26 @@
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+  namespace: flux-system
+spec:
+  type: Static
+  defaultValues:
+    tenantName: stratio
+    components:
+      postgres:
+      - name: psql
+        config:
+          agent:
+            enabled: true
+      pgbouncer:
+      - name: pool-psql
+      opensearch:
+      - name: opensearch1
+      # the live KafkaCluster is "kafka1"; the GitOps entry was renamed
+      kafka:
+      - name: kafka
+      dgAgent:
+      - name: dg-hdfs-agent
+      genai:
+      - name: genai

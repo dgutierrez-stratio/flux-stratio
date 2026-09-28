@@ -122,7 +122,7 @@ func TestDiff_ManifestMode_NoLiveObjectErrors(t *testing.T) {
 	}
 }
 
-func TestDiff_ManifestMode_PreviousNamespaceFallback(t *testing.T) {
+func TestDiff_ManifestMode_LiveNamespaceFallback(t *testing.T) {
 	base := fixtureBase(t)
 	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {
 		t.Fatal(err)
@@ -136,7 +136,8 @@ func TestDiff_ManifestMode_PreviousNamespaceFallback(t *testing.T) {
 		Base: base, Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{
 			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
-			Kustomization: "apps-psql", Object: "psql", PreviousNamespace: "old-namespace",
+			Kustomization: "apps-psql", Object: "psql",
+			Live: []config.ObjectRef{{Namespace: "old-namespace", Name: "psql"}},
 		},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
@@ -150,7 +151,7 @@ func TestDiff_ManifestMode_PreviousNamespaceFallback(t *testing.T) {
 		t.Fatalf("Diff returned error: %v", err)
 	}
 	if result.Patch == nil {
-		t.Fatal("Patch = nil, want the previous-namespace fallback to have found the object")
+		t.Fatal("Patch = nil, want the live-namespace fallback to have found the object")
 	}
 }
 
@@ -170,7 +171,7 @@ func TestDiff_RenderFailurePropagates(t *testing.T) {
 
 // TestDiff_ManifestMode_AppliesRenameForLiveLookup mirrors chart_test.go's
 // TestDiff_ChartMode_AppliesRenameForLiveLookup for manifest mode — the
-// Renamed/Object fallback itself is now config.App.LiveName's own tested
+// live-name/Object fallback itself is config.App.LiveName's own tested
 // responsibility (see internal/config), so this exercises the real
 // behavior through Diff rather than re-testing the fallback in isolation.
 func TestDiff_ManifestMode_AppliesRenameForLiveLookup(t *testing.T) {
@@ -183,7 +184,8 @@ func TestDiff_ManifestMode_AppliesRenameForLiveLookup(t *testing.T) {
 		Base: base, Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{
 			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
-			Kustomization: "apps-psql", Object: "psql", Renamed: "psql-legacy",
+			Kustomization: "apps-psql", Object: "psql",
+			Live: []config.ObjectRef{{Namespace: "stratio-datastores", Name: "psql-legacy"}},
 		},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
@@ -192,8 +194,9 @@ func TestDiff_ManifestMode_AppliesRenameForLiveLookup(t *testing.T) {
 		Log: log.New(io.Discard, false),
 	}
 
-	// The live object exists only under the old, pre-rename name — Renamed
-	// must be what fetchLiveManifestObject looks it up as, not Object.
+	// The live object exists only under the old, pre-rename name — its
+	// live name must be what fetchLiveManifestObject looks it up as, not
+	// Object.
 	liveObj := map[string]any{
 		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
 		"metadata": map[string]any{"name": "psql-legacy", "namespace": "stratio-datastores"},
@@ -262,5 +265,50 @@ func TestLiveChartWorkloads_RejectsManifestModeApp(t *testing.T) {
 	opts := Options{App: config.App{ID: "x"}}
 	if _, err := LiveChartWorkloads(context.Background(), opts); err == nil {
 		t.Fatal("LiveChartWorkloads on a manifest-mode app: got nil error, want non-nil")
+	}
+}
+
+// TestDiff_ManifestMode_ReportsFluxManagedLive: a live object Flux already
+// reconciles no longer holds the legacy values, so Diff says who manages it
+// (and apps diff/migrate warn to use --baseline instead).
+func TestDiff_ManifestMode_ReportsFluxManagedLive(t *testing.T) {
+	base := fixtureBase(t)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name   string
+		labels map[string]any
+		want   string
+	}{
+		{"legacy", nil, ""},
+		{"flux-managed", map[string]any{"kustomize.toolkit.fluxcd.io/name": "apps-psql"}, "Kustomization apps-psql"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			metadata := map[string]any{"name": "psql", "namespace": "stratio-datastores"}
+			if c.labels != nil {
+				metadata["labels"] = c.labels
+			}
+			opts := Options{
+				Base: base, Cluster: "eosdev", Tenant: "stratio",
+				App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
+				Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+					"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
+					"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
+				}},
+				Client: fakeClientWithUnstructured(t, map[string]any{
+					"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster", "metadata": metadata,
+					"spec": map[string]any{"instances": int64(1)},
+				}),
+				Log: log.New(io.Discard, false),
+			}
+			result, err := Diff(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Diff returned error: %v", err)
+			}
+			if result.FluxManagedBy != c.want {
+				t.Errorf("FluxManagedBy = %q, want %q", result.FluxManagedBy, c.want)
+			}
+		})
 	}
 }

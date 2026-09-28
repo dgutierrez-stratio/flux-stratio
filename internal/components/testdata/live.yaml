@@ -1,0 +1,485 @@
+# Metadata-only copies of real legacy objects, captured from eosdev (by `apps backup`, the legacy
+# Python client, and read directly off the live cluster) (spec/status stripped). Used to test the seeded
+# catalog's selectors against what CCT actually deploys.
+apiVersion: postgres.stratio.com/v1
+kind: PgCluster
+metadata:
+  name: psql
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: psql.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: psql.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: psql
+    cct.stratio.com/application_service: Postgres
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgBouncer
+metadata:
+  name: pool-psql
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: pool-psql.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: pool-psql.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: pool-psql
+    cct.stratio.com/application_service: PgBouncer
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pool-psql
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: pool-psql.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: pool-psql.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: pool-psql
+    cct.stratio.com/application_service: PgBouncer
+    cct.stratio.com/application_tenant: stratio
+  ownerReferences:
+  - apiVersion: postgres.stratio.com/v1
+    kind: PgBouncer
+    name: pool-psql
+    uid: 00000000-0000-0000-0000-000000000000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: psql-agent
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: psql-agent.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: psql-agent.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: psql-agent
+    cct.stratio.com/application_service: pg-gosec-agent
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: opensearch.stratio.com/v1
+kind: OsCluster
+metadata:
+  name: opensearch1
+  namespace: keos-core
+  labels:
+    cct.stratio.com/application_id: opensearch1.keos-core
+  annotations:
+    cct.stratio.com/application_id: opensearch1.keos-core
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: opensearch1
+    cct.stratio.com/application_service: Opensearch
+    cct.stratio.com/application_tenant: keos
+---
+apiVersion: opensearch.stratio.com/v1
+kind: OsCluster
+metadata:
+  name: opensearch1
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: opensearch1.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: opensearch1.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: opensearch1
+    cct.stratio.com/application_service: Opensearch
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: opensearch.stratio.com/v1
+kind: OsDashboards
+metadata:
+  name: opensearch1-dashboards
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: opensearch1-dashboards.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: opensearch1-dashboards.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: opensearch1-dashboards
+    cct.stratio.com/application_service: Dashboards-Opensearch
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch1-agent
+  namespace: keos-core
+  labels:
+    cct.stratio.com/application_id: opensearch1-agent.keos-core
+  annotations:
+    cct.stratio.com/application_id: opensearch1-agent.keos-core
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: opensearch1-agent
+    cct.stratio.com/application_service: os-gosec-agent
+    cct.stratio.com/application_tenant: keos
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch1-agent
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: opensearch1-agent.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: opensearch1-agent.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: opensearch1-agent
+    cct.stratio.com/application_service: os-gosec-agent
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: kafka.stratio.com/v1
+kind: KafkaCluster
+metadata:
+  name: kafka1
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: kafka1.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: kafka1.stratio-datastores
+    cct.stratio.com/application_model: kraft
+    cct.stratio.com/application_name: kafka1
+    cct.stratio.com/application_service: Kafka
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: hdfs.stratio.com/v1
+kind: HDFSCluster
+metadata:
+  name: hdfs1
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: hdfs1.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: hdfs1.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: hdfs1
+    cct.stratio.com/application_service: HDFS
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hdfs1-datanode
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: hdfs1.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: hdfs1.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: hdfs1
+    cct.stratio.com/application_service: HDFS
+    cct.stratio.com/application_tenant: stratio
+  ownerReferences:
+  - apiVersion: hdfs.stratio.com/v1
+    kind: HDFSCluster
+    name: hdfs1
+    uid: 00000000-0000-0000-0000-000000000000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: virtualizer
+  namespace: stratio-apps
+  labels:
+    app.kubernetes.io/component: virtualizer-server
+    cct.stratio.com/application_id: virtualizer.stratio-apps
+    cct.stratio.com/application_tenant: stratio
+    cct.stratio.com/monitoring_db_schema: virtualizer-monitor.virtualizer
+    cct.stratio.com/monitoring_enabled: 'true'
+  annotations:
+    cct.stratio.com/application_id: virtualizer.stratio-apps
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: virtualizer
+    cct.stratio.com/application_service: virtualizer
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: virtualizer
+  namespace: stratio-datastores
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: virtualizer-monitor
+  namespace: stratio-apps
+  labels:
+    app.kubernetes.io/component: virtualizer-monitor
+    cct.stratio.com/application_id: virtualizer-monitor.stratio-apps
+  annotations:
+    cct.stratio.com/application_id: virtualizer-monitor.stratio-apps
+    cct.stratio.com/application_model: virtualizer-monitor
+    cct.stratio.com/application_name: virtualizer-monitor
+    cct.stratio.com/application_service: virtualizer
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: virtualizer-monitor
+  namespace: stratio-datastores
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eureka-agent
+  namespace: stratio-datastores
+  labels:
+    app.kubernetes.io/component: dg-agent
+    cct.stratio.com/application_id: eureka-agent.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: eureka-agent.stratio-datastores
+    cct.stratio.com/application_model: agent-bdl-default
+    cct.stratio.com/application_name: eureka-agent
+    cct.stratio.com/application_service: bdl
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dg-hdfs-agent
+  namespace: stratio-datastores
+  labels:
+    app.kubernetes.io/component: dg-agent
+    cct.stratio.com/application_id: dg-hdfs-agent.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: dg-hdfs-agent.stratio-datastores
+    cct.stratio.com/application_model: agent-dfs-hdfs-internal
+    cct.stratio.com/application_name: dg-hdfs-agent
+    cct.stratio.com/application_service: connectors-dfs
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dg-postgresql-internal-agent
+  namespace: stratio-datastores
+  labels:
+    app.kubernetes.io/component: dg-agent
+    cct.stratio.com/application_id: dg-postgresql-internal-agent.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: dg-postgresql-internal-agent.stratio-datastores
+    cct.stratio.com/application_model: agent-rdbms-postgresql-internal
+    cct.stratio.com/application_name: dg-postgresql-internal-agent
+    cct.stratio.com/application_service: connectors-rdbms
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-api
+  namespace: stratio-genai
+  labels:
+    cct.stratio.com/application_id: genai-api.stratio-genai
+  annotations:
+    cct.stratio.com/application_id: genai-api.stratio-genai
+    cct.stratio.com/application_model: genai-api
+    cct.stratio.com/application_name: genai-api
+    cct.stratio.com/application_service: genai
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-gateway
+  namespace: stratio-genai
+  labels:
+    cct.stratio.com/application_id: genai-gateway.stratio-genai
+  annotations:
+    cct.stratio.com/application_id: genai-gateway.stratio-genai
+    cct.stratio.com/application_model: genai-gateway
+    cct.stratio.com/application_name: genai-gateway
+    cct.stratio.com/application_service: genai
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-litellm
+  namespace: stratio-genai
+  labels:
+    cct.stratio.com/application_id: genai-litellm.stratio-genai
+  annotations:
+    cct.stratio.com/application_id: genai-litellm.stratio-genai
+    cct.stratio.com/application_model: genai-litellm
+    cct.stratio.com/application_name: genai-litellm
+    cct.stratio.com/application_service: genai
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: genai
+  namespace: stratio-datastores
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: rocket
+  namespace: stratio-datastores
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocket
+  namespace: stratio-rocket
+  labels:
+    cct.stratio.com/application_id: rocket.stratio-rocket
+  annotations:
+    cct.stratio.com/application_id: rocket.stratio-rocket
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: rocket
+    cct.stratio.com/application_service: rocket
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocket-catalog
+  namespace: stratio-rocket
+  labels:
+    app.kubernetes.io/component: worker
+  annotations:
+    cct.stratio.com/application_id: rocket.stratio-rocket
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: rocket
+    cct.stratio.com/application_service: rocket
+    cct.stratio.com/application_tenant: stratio
+  ownerReferences:
+  - apiVersion: apps/v1
+    kind: Deployment
+    name: rocket
+    uid: 00000000-0000-0000-0000-000000000000
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: rocket-catalog-standalone
+  namespace: stratio-datastores
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocket-catalog-standalone
+  namespace: stratio-rocket
+  labels:
+    cct.stratio.com/application_id: rocket-catalog-standalone.stratio-rocket
+  annotations:
+    cct.stratio.com/application_id: rocket-catalog-standalone.stratio-rocket
+    cct.stratio.com/application_model: catalog
+    cct.stratio.com/application_name: rocket-catalog-standalone
+    cct.stratio.com/application_service: rocket
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datamarket-agent
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: datamarket-agent.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: datamarket-agent.stratio-datastores
+    cct.stratio.com/application_model: agent-default
+    cct.stratio.com/application_name: datamarket-agent
+    cct.stratio.com/application_service: data-marketplace
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: dlc-entity
+  namespace: stratio-datastores
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dlc-entity
+  namespace: stratio-dlc
+  labels:
+    cct.stratio.com/application_id: dlc-entity.stratio-dlc
+  annotations:
+    cct.stratio.com/application_id: dlc-entity.stratio-dlc
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: dlc-entity
+    cct.stratio.com/application_service: dlc-entity
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: intelligence
+  namespace: stratio-datastores
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intelligence
+  namespace: stratio-intelligence
+  labels:
+    cct.stratio.com/application_id: intelligence.stratio-intelligence
+  annotations:
+    cct.stratio.com/application_id: intelligence.stratio-intelligence
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: intelligence
+    cct.stratio.com/application_service: intelligence
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discovery
+  namespace: stratio-apps
+  labels:
+    cct.stratio.com/application_id: discovery.stratio-apps
+  annotations:
+    cct.stratio.com/application_id: discovery.stratio-apps
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: discovery
+    cct.stratio.com/application_service: discovery
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: postgres.stratio.com/v1
+kind: PgDatabase
+metadata:
+  name: discovery
+  namespace: stratio-datastores
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dg-datarest-pgi
+  namespace: stratio-datastores
+  labels:
+    app.kubernetes.io/component: dg-datarest-pgi
+    cct.stratio.com/application_id: dg-datarest-pgi.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: dg-datarest-pgi.stratio-datastores
+    cct.stratio.com/application_model: datarest-pginternal
+    cct.stratio.com/application_name: dg-datarest-pgi
+    cct.stratio.com/application_service: bdl
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch1-dashboards
+  namespace: stratio-datastores
+  labels:
+    cct.stratio.com/application_id: opensearch1-dashboards.stratio-datastores
+  annotations:
+    cct.stratio.com/application_id: opensearch1-dashboards.stratio-datastores
+    cct.stratio.com/application_model: default
+    cct.stratio.com/application_name: opensearch1-dashboards
+    cct.stratio.com/application_service: Dashboards-Opensearch
+    cct.stratio.com/application_tenant: stratio
+  ownerReferences:
+  - apiVersion: opensearch.stratio.com/v1
+    kind: OsDashboards
+    name: opensearch1-dashboards
+    uid: 00000000-0000-0000-0000-000000000000

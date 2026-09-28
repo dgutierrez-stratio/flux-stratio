@@ -2,79 +2,70 @@ package config
 
 import "testing"
 
-func TestSeed_ValidAndComplete(t *testing.T) {
-	cfg := Seed("/stratio/gitops", "eosdev", "stratio", "")
-
-	if cfg.Base != "/stratio/gitops" || cfg.Cluster != "eosdev" || cfg.Tenant != "stratio" {
-		t.Errorf("unexpected top-level fields: %+v", cfg)
+func TestSeedCatalog_Valid(t *testing.T) {
+	cat := SeedCatalog()
+	if len(cat.Types) != 18 {
+		t.Fatalf("len(Types) = %d, want 18", len(cat.Types))
 	}
-	if cfg.ChartsBase != "" {
-		t.Errorf("ChartsBase = %q, want empty when not passed", cfg.ChartsBase)
-	}
-	if len(cfg.Apps) != 16 {
-		t.Fatalf("len(Apps) = %d, want 16", len(cfg.Apps))
-	}
-	if err := cfg.validate(); err != nil {
+	if err := cat.validate(); err != nil {
 		t.Fatalf("validate() = %v, want nil", err)
 	}
 }
 
-func TestSeed_ChartsBaseRoundTrips(t *testing.T) {
-	cfg := Seed("/stratio/gitops", "eosdev", "stratio", "/stratio/charts/charts")
-
-	if cfg.ChartsBase != "/stratio/charts/charts" {
-		t.Errorf("ChartsBase = %q, want %q", cfg.ChartsBase, "/stratio/charts/charts")
-	}
-}
-
-func TestSeed_GatedAppsDeclarePrepare(t *testing.T) {
-	cfg := Seed("/stratio/gitops", "eosdev", "stratio", "")
+func TestSeedCatalog_GatedTypesDeclarePrepare(t *testing.T) {
+	cat := SeedCatalog()
 
 	cases := []struct {
-		id      string
+		typ     string
 		prepare string
 	}{
 		{"genai", "prepare-genai"},
 		{"datamarket-agent", "prepare-datamarket-agent"},
 		{"dlc-entity", "prepare-dlc"},
-		{"dg-datarest-pgi", "prepare-datarest"},
+		{"bdl-datarest", "prepare-datarest"},
 	}
 	for _, c := range cases {
-		app := cfg.Find(c.id)
-		if app == nil {
-			t.Fatalf("Find(%q) = nil", c.id)
+		typ := cat.Find(c.typ)
+		if typ == nil {
+			t.Fatalf("Find(%q) = nil", c.typ)
 		}
-		if app.Prepare != c.prepare {
-			t.Errorf("%s: Prepare = %q, want %q", c.id, app.Prepare, c.prepare)
+		if typ.Prepare != c.prepare {
+			t.Errorf("%s: Prepare = %q, want %q", c.typ, typ.Prepare, c.prepare)
 		}
 	}
 }
 
-func TestSeed_PreviousNamespaceScopedToTenant(t *testing.T) {
-	cfg := Seed("/stratio/gitops", "eosdev", "acme", "")
+func TestSeedCatalog_GosecAgentsHaveNoExplicitAnchor(t *testing.T) {
+	cat := SeedCatalog()
 
-	app := cfg.Find("datamarket-agent")
-	if app == nil {
-		t.Fatal(`Find("datamarket-agent") = nil`)
-	}
-	if want := "acme-datastores"; app.PreviousNamespace != want {
-		t.Errorf("PreviousNamespace = %q, want %q", app.PreviousNamespace, want)
-	}
-}
-
-func TestSeed_GosecAgentsHaveNoExplicitAnchor(t *testing.T) {
-	cfg := Seed("/stratio/gitops", "eosdev", "stratio", "")
-
-	for _, id := range []string{"psql-gosec-agent", "opensearch1-gosec-agent"} {
-		app := cfg.Find(id)
-		if app == nil {
+	for _, id := range []string{"postgres-gosec-agent", "opensearch-gosec-agent"} {
+		typ := cat.Find(id)
+		if typ == nil {
 			t.Fatalf("Find(%q) = nil", id)
 		}
-		if app.Anchor != "" {
-			t.Errorf("%s: Anchor = %q, want unset (the catalog derives it)", id, app.Anchor)
+		if typ.Anchor != "" {
+			t.Errorf("%s: Anchor = %q, want unset (the catalog derives it)", id, typ.Anchor)
 		}
-		if app.ChartPath == "" || app.Renamed == "" {
-			t.Errorf("%s: expected ChartPath and Renamed to be set: %+v", id, app)
+		if typ.ChartPath() == "" || typ.Entry == "" || typ.Object == "" {
+			t.Errorf("%s: expected chart and entry/object templates to be set: %+v", id, typ)
 		}
+	}
+}
+
+func TestSeedCatalog_EveryTypeHasASelector(t *testing.T) {
+	for _, typ := range SeedCatalog().Types {
+		if typ.Match.Labels == nil && typ.Match.Annotations == nil {
+			t.Errorf("%s: no label/annotation selector — it would match every %v", typ.Type, typ.Match.Kinds)
+		}
+	}
+}
+
+func TestSeedEnvironment(t *testing.T) {
+	env := SeedEnvironment("/stratio/gitops", "eosdev", "stratio", "")
+	if err := env.validate(); err != nil {
+		t.Fatalf("validate() = %v", err)
+	}
+	if env.ChartsBase != "" || env.ChartsRoot() != "/stratio/gitops" {
+		t.Errorf("unexpected charts fields: %+v", env)
 	}
 }

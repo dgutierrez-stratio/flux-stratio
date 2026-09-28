@@ -8,23 +8,31 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/yaml"
+
+	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
 
 // readBaselineYAML reads name (e.g. "cr.yaml") from a backup directory —
 // the same format internal/backup's yamlFile writer produces — and decodes
-// it into an Unstructured object.
+// it into an Unstructured object through internal/yamldocs.Decode, the
+// same int64-for-whole-numbers convention the rendered and live sides use.
+// A plain map decode here made every integer a float64, so a --baseline
+// diff reported every unchanged integer field (probe thresholds,
+// minAvailable, ...) as a difference and back-ported it into the patch.
 func readBaselineYAML(dir, name string) (*unstructured.Unstructured, error) {
 	path := filepath.Join(dir, name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading baseline %s: %w", path, err)
 	}
-	obj := &unstructured.Unstructured{}
-	if err := yaml.Unmarshal(data, &obj.Object); err != nil {
+	docs, err := yamldocs.Decode(data)
+	if err != nil {
 		return nil, fmt.Errorf("parsing baseline %s: %w", path, err)
 	}
-	return obj, nil
+	if len(docs) != 1 {
+		return nil, fmt.Errorf("parsing baseline %s: want exactly one object, found %d", path, len(docs))
+	}
+	return docs[0], nil
 }
 
 // readBaselineEnvFile reads name (e.g. "env-vars.env") from a backup

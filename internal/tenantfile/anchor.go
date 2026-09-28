@@ -26,6 +26,58 @@ func FindComponentEntry(d *Doc, objectName string) (*yaml.Node, error) {
 	return entry, nil
 }
 
+// EntryNames returns the name of every components.<componentKey>[] entry,
+// in file order — empty (not an error) when the key isn't declared at all,
+// since a tenant file legitimately declares only the components that
+// tenant runs. Used by internal/components to check a live instance's
+// derived entry name against what the tenant actually declares.
+func EntryNames(d *Doc, componentKey string) ([]string, error) {
+	components, err := d.components()
+	if err != nil {
+		return nil, err
+	}
+	seq := mapGet(components, componentKey)
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		return nil, nil
+	}
+	var names []string
+	for _, entry := range seq.Content {
+		if nameNode := mapGet(entry, "name"); nameNode != nil && nameNode.Value != "" {
+			names = append(names, nameNode.Value)
+		}
+	}
+	return names, nil
+}
+
+// CommentedOut reports whether the tenant file carries componentKey as a
+// commented-out component block — a "# <key>:" comment line, as left by
+// commenting out part of a `tenant import` result to enable components
+// one at a time. A commented-out block is invisible to EntryNames, so
+// internal/components uses this only to explain an "isn't declared" error.
+// Only a key directly after "#" (at most one space) counts: a dependency
+// reference nested deeper inside some other commented-out block
+// ("#         postgres:") keeps its indentation and doesn't match.
+func CommentedOut(d *Doc, componentKey string) bool {
+	want := componentKey + ":"
+	var found bool
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		for _, c := range []string{n.HeadComment, n.LineComment, n.FootComment} {
+			for _, line := range strings.Split(c, "\n") {
+				rest, ok := strings.CutPrefix(strings.TrimSpace(line), "#")
+				if ok && strings.TrimRight(strings.TrimPrefix(rest, " "), " ") == want {
+					found = true
+				}
+			}
+		}
+		for _, child := range n.Content {
+			walk(child)
+		}
+	}
+	walk(d.root)
+	return found
+}
+
 func (d *Doc) components() (*yaml.Node, error) {
 	root := documentRoot(d.root)
 	spec := mapGet(root, "spec")

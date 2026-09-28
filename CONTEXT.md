@@ -46,29 +46,38 @@ validation," that's almost certainly the wrong repo.
 
 ```
 flux stratio version
-flux stratio doctor                            # preflight: binaries (+ optional meld), config, repo layout, cluster, tenant file
+flux stratio doctor                            # preflight: binaries (+ optional meld), catalog, environment, repo layout,
+                                                 # chart paths, catalog types vs. templates, cluster, tenant file
 
-flux stratio config init --base --cluster --tenant [--output] [--force]
-                                                 # seed a config file from the known 16-app Stratio catalog
+flux stratio config init --base --cluster --tenant [--charts] [--dir] [--force]
+                                                 # write catalog.yaml (18 seeded component types) + environment.yaml
 
 flux stratio tenant import [--size] [--output] [--force]
                                                  # scan the live cluster → tenant RSIP skeleton
 
-flux stratio apps backup <id> | --catalog | --all [--dir]
-                                                 # capture live state; --catalog = config apps, --all = everything discovered
+flux stratio apps backup <name> | --catalog | --all [--dir] [--as]
+                                                 # capture live state; --catalog = classified instances, --all = everything discovered
 
-flux stratio apps diff <id> [--baseline <path>] [--drift <path>] [--view unified|patch|meld]
+flux stratio apps diff <name> [--baseline <path>] [--drift <path>] [--view unified|patch|meld] [--as]
                                                  # --baseline: pre-migration (desired vs. a backup instead of live)
                                                  # --drift: post-migration (live now vs. a backup, no GitOps render)
 
-flux stratio apps migrate <id> | --all [--dry-run] [-y/--yes] [--continue-on-error]
+flux stratio apps migrate <name> | --all [--dry-run] [-y/--yes] [--continue-on-error] [--as] [--baseline <path>] [--dir]
                                                  # diff (running any declared prepare step first), then splice the patch
 ```
 
-Persistent flags on every command: `--config`, `--base`, `--cluster`, `--tenant`, `--kubeconfig`,
+`<name>` is a live object's name (`psql-agent`) or an instance's derived GitOps object name
+(`psql-gosec-agent`); the component type is detected from the live object (§6, `internal/components`).
+`--as <type>[/<entry>]` answers the type/tenant-entry question up front.
+
+Persistent flags on every command: `--config` (catalog), `--env-config`, `--base`, `--cluster`, `--tenant`, `--kubeconfig`,
 `--kube-context`, `-v/--verbose`. Run `flux stratio apps diff --help` for the fullest single
 explanation of the baseline-vs-drift distinction in the codebase — it's worth reading before
-touching `internal/appdiff` or `internal/drift`.
+touching `internal/appdiff` or `internal/drift`. Likewise `flux stratio apps migrate --help` is the
+canonical user-facing explanation of how a patch is computed (base rendered without the existing
+same-kind patch, whole-patch replacement, up-to-date detection) and of recovering a component Flux
+already reconciled unpatched (`--baseline latest`) — keep it, README's "How `apps migrate` computes
+a patch" section and `docs/migration-runbook.md` step 6 in sync when changing that behavior.
 
 ## 4. Requirements
 
@@ -108,8 +117,8 @@ convention, that repo is the reference:
 - Flux and Stratio CRDs are **never** imported as typed API packages — always
   `unstructured.Unstructured`, resolved by a literal `schema.GroupVersionKind`.
 - stdlib `testing` only — no testify, no gomega. `client/fake` (controller-runtime) for cluster
-  mocking, `runner.Fake` for subprocess mocking, `t.TempDir()` for filesystem state. 20 packages,
-  ~316 tests, all currently green.
+  mocking, `runner.Fake` for subprocess mocking, `t.TempDir()` for filesystem state. 22 packages,
+  ~414 tests (counting subtests), all currently green.
 - Verification loop for every change: `make fmt-check vet lint test build`. `golangci-lint` isn't
   installed by `make`; if `make lint` reports it missing, it needs manual install and may not be on
   `$PATH` by default — try `export PATH="$PATH:$(go env GOPATH)/bin"` first.
@@ -147,13 +156,39 @@ convention, that repo is the reference:
 
 ### The catalog and tenant file (application-migration-specific)
 
-- **`internal/config`** — `Config`/`App`: the *external*, version-controlled app catalog (never
-  embedded in the binary at runtime — see the design rationale in the git history if curious why).
-  `Resolve`/`Load` implement the config-file lookup ladder (`--config` →
-  `$FLUX_STRATIO_CONFIG` → `~/.fluxcd/flux-stratio/config.yaml` (a sibling of `~/.fluxcd/plugins/`, never inside it) → `./flux-stratio.yaml`), strict
-  `KnownFields(true)` decoding. `Seed` (new, `config init`) is the *one* place a hardcoded app list
-  legitimately lives in this codebase — a one-time scaffold, ported from the legacy `config.json`,
-  never consulted at runtime by any other command.
+- **`internal/config`** — two external, operator-owned files (never embedded in the binary at
+  runtime) plus the resolved-instance type:
+  - `Catalog`/`ComponentType` (`catalog.yaml`): the typed **component catalog** — per type, static
+    facts only (`component` tenant key, `rset`, `chart`, `exclude`, `prepare`, `anchor`), the
+    `match` selectors (`kinds` + label/annotation selectors — the seed selects on CCT's
+    `cct.stratio.com/application_service`/`application_model` annotations) that recognize its live
+    legacy objects, and `entry`/`object`/`kustomization` **name templates** (text/template over the
+    live object). Nothing environment- or instance-specific: no object name, rename, namespace.
+    `Resolve`/`Load`: `--config` → `$FLUX_STRATIO_CONFIG` → `~/.fluxcd/flux-stratio/catalog.yaml`
+    (a sibling of `~/.fluxcd/plugins/`, never inside it) → `./flux-stratio.yaml`, strict
+    `KnownFields(true)` decoding; a pre-catalog `config.yaml` (top-level `apps:`) is recognized and
+    rejected with a pointer to `config init`.
+  - `Environment` (`environment.yaml`): `base`/`chartsBase`/`cluster`/`tenant`, same ladder via
+    `--env-config`/`$FLUX_STRATIO_ENV`; `LoadEnvironment` applies `--base/--cluster/--tenant` on top
+    and needs no file at all if the flags supply everything.
+  - `App`: one **resolved instance** (never read from or written to disk) — a type's facts plus the
+    derived `Entry`/`Object`/`Kustomization` and `Live []ObjectRef` (the exact live objects it was
+    classified from). `LiveName()`/`LiveNamespace()` replace the old `renamed`/`previousNamespace`
+    config fields. It's what every diff/backup/migrate package operates on.
+  - `SeedCatalog`/`SeedEnvironment` (`config init`) are the *one* place a hardcoded component list
+    legitimately lives in this codebase.
+- **`internal/components`** — live objects → `config.App`. `Classify` matches every discovered
+  object against every type (skipping anything with `ownerReferences`), renders its entry, and
+  groups by (type, namespace, entry); an object CCT annotated as another tenant's
+  (`cct.stratio.com/application_tenant`) is skipped too. `Resolve(opts, name)` picks the one instance `name` refers to
+  (live/object name first, entry name as fallback) and `ResolveAll` all of them; with a tenant file
+  (`Options.Doc`, set for diff/migrate, nil for backup/drift) each entry must be declared under
+  `components.<component>`, else the `Prompter` asks which declared entry it is (`--as` answers up
+  front; `NonInteractive` — used by `migrate --yes` — fails naming `--as`; `ResolveAll` returns
+  such instances as `unresolved` instead of aborting, so `--all` reports them all as failed apps).
+  Nothing is persisted.
+  Its fixtures (`testdata/live.yaml`) are metadata-only copies of real captured legacy objects,
+  including same-named PgDatabases that must never classify as their chart app.
 - **`internal/catalog`** — parses `keos-use-cases/apps/components/resourceset-apps-*.yaml`
   (Go-template `<< >>` syntax, regex-split rather than a real template evaluator, matching the
   Python client's own approach) into: component schemas, a chart→component-key map (with
@@ -189,20 +224,22 @@ convention, that repo is the reference:
   commands compute a diff, so they can never disagree about what a migration would do.** Dispatch
   is by `App.ChartPath` (chart-mode vs. manifest-mode), never a flag the operator sets. Exports
   `MergeLiveEnv` and `FetchLiveWorkloads` (chart-mode's "fetch every live Deployment/StatefulSet/
-  DaemonSet a chart declares, applying `Renamed`/`PreviousNamespace`") for reuse by
+  DaemonSet a chart declares, translating `App.Object` to `App.LiveName()` and falling back to
+  `App.LiveNamespace()`") for reuse by
   `internal/backup`'s own chart-mode capture — the one legitimate cross-package dependency from
   backup back into appdiff, and only for this pure "given rendered docs, fetch the matching live
   objects" helper, never appdiff's render-triggering entrypoints. `LiveManifestObject`/
   `LiveChartWorkloads` are also exported but **currently unused outside this package's own
   tests** — see §10, this is a known stale spot.
 - **`internal/discovery`** — cluster-wide, name-indexed live-object scanner: lists every
-  Kustomization, HelmRelease, Deployment/StatefulSet/DaemonSet, and 14 hardcoded Stratio operator
-  CRDs (verified against a real cluster's installed CRDs, not copied from the Python client's own
+  Kustomization, HelmRelease, Deployment/StatefulSet/DaemonSet, 14 hardcoded Stratio operator
+  CRDs, plus any extra kinds passed in (the catalog's `match.kinds`, via `config.Catalog.Kinds`) (verified against a real cluster's installed CRDs, not copied from the Python client's own
   differently-cased dict) — **with no namespace filter and no tenant-file dependency at all**. This
   is what lets `apps backup`/`apps diff --drift` work on an app whose component isn't declared in
   the tenant file yet, unlike `internal/render`. `Index.Find{CR,Workload,HelmRelease,
-  Kustomization}` are per-kind lookups; `Index.Names()` is the union across all four, used by
-  `apps backup --all`.
+  Kustomization}` are per-kind name lookups; `Index.Get(gvk, ns, name)` is the exact lookup for an
+  already-classified object; `Index.Objects()` feeds `internal/components`; `Index.Names()` is the
+  union across all four, used by `apps backup --all`.
 - **`internal/backup`** — captures an app's live state to
   `<dir>/<App.ID>/<UTC-timestamp>/{cr.yaml | deployment.yaml+env-vars.env |
   helmrelease.yaml+values.yaml}`, dispatching on `App.ChartPath` with a graceful fallback cascade
@@ -211,9 +248,11 @@ convention, that repo is the reference:
   --all`/`--catalog` must not abort on one app's shape surprise. Chart-mode capture sources `helm
   template`'s values from the **live** HelmRelease it just found via `internal/discovery`, never a
   flux-rendered *desired* one — capturing desired-state values would defeat backup's own purpose.
-  `DiscoveredApps(cfg, idx)` builds the app list for `--all`: a catalog entry when a discovered
-  identity's live name matches one (so it's captured identically to `--catalog`), a minimal
-  synthetic `App{ID, Name, Object}` otherwise. `ResolveBaseline(root, appID)` is the shared
+  A classified app (`App.Live` set) is captured from its exact live object (`Index.Get`) before any
+  name-only cascade — the cascade alone once captured a same-named `PgDatabase` as the genai/rocket
+  apps. `DiscoveredApps(catalogApps, idx)` builds the app list for `--all`: the classified catalog
+  instances, plus a minimal synthetic `App{ID, Name, Object}` for every live name none of their
+  `Live` refs covers. `ResolveBaseline(root, appID)` is the shared
   auto-locate logic both `apps diff --baseline` and `--drift` use.
 - **`internal/drift`** — answers a genuinely different question than `internal/appdiff`: not "what
   would migrating this app change" (desired vs. live-ish), but "has this app's live state changed
@@ -254,9 +293,13 @@ convention, that repo is the reference:
   `apps migrate`) goes through `internal/render` (needs the tenant file to declare the component,
   because it's rendering *desired* state to compute a patch against). Don't casually swap one for
   the other — they answer different questions and have different prerequisites on purpose.
-- **Idempotency contract**: `apps migrate` recomputes its patch from live state on every run and
-  replaces patches by `target.kind` at the anchor — running it twice converges, it never trusts "I
-  already migrated this." `--dry-run` on every mutating command; `--yes` skips confirmation
+- **Idempotency contract**: `apps migrate` recomputes its patch from live state (or a `--baseline`
+  backup) on every run and replaces patches by `target.kind` at the anchor — so `internal/render`
+  renders the base *without* the tenant file's existing patches for the object's kind
+  (`Result.ReplacedPatches`), making every computed patch the whole one, never a leftover delta that
+  would drop what the existing patch carried; `appdiff.Result.UpToDate` is "the tenant already
+  carries exactly this patch". Running it twice converges; it never trusts "I already migrated
+  this." `--dry-run` on every mutating command; `--yes` skips confirmation
   (blank line/EOF both mean "no," ported from flux-keos's own `Confirm` semantics) — except
   `prepare-genai`'s confirmation, which `--yes` never skips.
 - **JSON6902 vs. strategic-merge-patch is auto-detected, never a flag.** See
@@ -295,6 +338,8 @@ being tested in a feature package first.
   to `internal/discovery`. They're currently only called by their own package's tests. Worth either
   unexporting them or deleting them and inlining at the two test call sites, plus fixing the stale
   comments either way.
-- `docs/config-reference.md` and this file can drift from the actual `config.App` struct fields —
-  if you add/remove a field on `config.App`, grep for `docs/config-reference.md` and
-  `internal/config/seed.go` in the same change.
+- `docs/config-reference.md` and this file can drift from the actual `config.ComponentType` fields —
+  if you add/remove one, update `docs/config-reference.md` and `internal/config/seed.go` in the
+  same change.
+- `internal/prepare`'s steps still hardcode their legacy namespaces (`<tenant>-datastores`,
+  `<tenant>-dlc`); they could take the resolved `App.LiveNamespace()` instead.

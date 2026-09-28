@@ -10,63 +10,94 @@ import (
 	"github.com/Stratio/flux-stratio/internal/config"
 )
 
-const seedHeader = "" +
-	"# Seeded by `flux stratio config init` from the known Stratio application catalog.\n" +
-	"# Review before use: an environment may run a subset of these applications, or run\n" +
-	"# ones this catalog doesn't know about yet. See docs/config-reference.md.\n"
+const catalogHeader = "" +
+	"# Seeded by `flux stratio config init` from the known Stratio component catalog.\n" +
+	"# Static, environment-independent component types only: each type's match selectors\n" +
+	"# recognize its live legacy instances; instance names are derived at run time.\n" +
+	"# Review before use — see docs/config-reference.md.\n"
+
+const environmentHeader = "" +
+	"# Seeded by `flux stratio config init`: where the GitOps repositories live and which\n" +
+	"# cluster/tenant to operate on. --base/--cluster/--tenant override it per run.\n"
 
 func newConfigCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Manage the flux-stratio config file",
+		Short: "Manage the flux-stratio catalog and environment files",
 	}
 	cmd.AddCommand(newConfigInitCommand())
 	return cmd
 }
 
 func newConfigInitCommand() *cobra.Command {
-	var output string
+	var dir string
 	var force bool
 	var charts string
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Write a starting config file, seeded with the known Stratio application catalog",
+		Short: "Write the component catalog (seeded with the known Stratio components) and an environment file",
+		Long: `Writes two files into --dir:
+
+  catalog.yaml      the component catalog: every supported component type, with the
+                    selectors that recognize its live legacy instances — static, the
+                    same for every environment
+  environment.yaml  --base (where the keos-* GitOps repositories are checked out),
+                    --charts, --cluster and --tenant — this workstation's target`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runConfigInit(cmd, output, force, charts)
+			return runConfigInit(cmd, dir, force, charts)
 		},
 	}
-	cmd.Flags().StringVar(&output, "output", "flux-stratio.yaml", "file to write the seeded config to")
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite --output if it already exists")
-	cmd.Flags().StringVar(&charts, "charts", "", "optional: parent directory holding chart-mode apps' Helm chart sources, if it isn't a sibling of --base's keos-* repos")
+	cmd.Flags().StringVar(&dir, "dir", "", "directory to write catalog.yaml and environment.yaml into (default: ~/.fluxcd/flux-stratio)")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite catalog.yaml/environment.yaml if they already exist")
+	cmd.Flags().StringVar(&charts, "charts", "", "optional: parent directory holding chart-mode components' Helm chart sources, if it isn't a sibling of --base's keos-* repos")
 	return cmd
 }
 
-func runConfigInit(cmd *cobra.Command, output string, force bool, charts string) error {
+func runConfigInit(cmd *cobra.Command, dir string, force bool, charts string) error {
 	if baseFlag == "" || clusterFlag == "" || tenantFlag == "" {
-		return fmt.Errorf("--base, --cluster and --tenant are all required (there is no config file yet to read them from)")
+		return fmt.Errorf("--base, --cluster and --tenant are all required (there is no environment file yet to read them from)")
 	}
-	if !force {
-		if _, err := os.Stat(output); err == nil {
-			return fmt.Errorf("%s already exists; pass --force to overwrite", output)
+	if dir == "" {
+		var err error
+		if dir, err = config.UserDir(); err != nil {
+			return err
 		}
 	}
 
-	seeded := config.Seed(baseFlag, clusterFlag, tenantFlag, charts)
-	body, err := config.Marshal(seeded)
-	if err != nil {
-		return fmt.Errorf("marshaling seeded config: %w", err)
+	catalog := config.SeedCatalog()
+	files := []struct {
+		name, header string
+		value        any
+	}{
+		{config.CatalogFile, catalogHeader, catalog},
+		{config.EnvironmentFile, environmentHeader, config.SeedEnvironment(baseFlag, clusterFlag, tenantFlag, charts)},
 	}
 
-	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", filepath.Dir(output), err)
+	if !force {
+		for _, f := range files {
+			path := filepath.Join(dir, f.name)
+			if _, err := os.Stat(path); err == nil {
+				return fmt.Errorf("%s already exists; pass --force to overwrite", path)
+			}
+		}
 	}
-	if err := os.WriteFile(output, append([]byte(seedHeader), body...), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", output, err)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
 	}
 
 	logger := rootLogger(cmd)
-	logger.Successf("wrote %s (%d apps)", output, len(seeded.Apps))
-	logger.Actionf("review it, then run `flux stratio doctor` to check it against your cluster")
+	for _, f := range files {
+		body, err := config.Marshal(f.value)
+		if err != nil {
+			return fmt.Errorf("marshaling %s: %w", f.name, err)
+		}
+		path := filepath.Join(dir, f.name)
+		if err := os.WriteFile(path, append([]byte(f.header), body...), 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", path, err)
+		}
+		logger.Successf("wrote %s", path)
+	}
+	logger.Actionf("catalog has %d component types; review it, then run `flux stratio doctor` to check it against your cluster", len(catalog.Types))
 	return nil
 }

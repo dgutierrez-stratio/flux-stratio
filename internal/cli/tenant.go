@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Stratio/flux-stratio/internal/catalog"
-	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/tenantimport"
 )
@@ -51,16 +50,13 @@ func runTenantImport(cmd *cobra.Command, size, output string, force bool) error 
 	}
 
 	logger := rootLogger(cmd)
-	cfg, err := config.Load(configFlag)
+	env, err := loadEnvironment()
 	if err != nil {
 		return err
 	}
-	base, _, tenant := cfg.Effective(baseFlag, clusterFlag, tenantFlag)
-	if tenant == "" {
-		return fmt.Errorf("tenant is required (pass --tenant or set it in the config file)")
-	}
+	tenant := env.Tenant
 
-	cat, err := catalog.Load(filepath.Join(base, "keos-use-cases"))
+	cat, err := catalog.Load(filepath.Join(env.Base, "keos-use-cases"))
 	if err != nil {
 		return err
 	}

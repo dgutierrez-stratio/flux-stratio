@@ -135,7 +135,8 @@ func TestDiff_ChartMode_AppliesRenameForLiveLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := chartDiffOptions(t, base)
-	opts.App.Renamed = "psql-agent" // the live cluster's old name for this object
+	// the live cluster's old name for this object
+	opts.App.Live = []config.ObjectRef{{Namespace: "stratio-datastores", Name: "psql-agent"}}
 
 	liveDeployment := deploymentWithEnv(t, "psql-agent", "stratio-datastores", "WARN")
 	opts.Client = fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(liveDeployment).Build()

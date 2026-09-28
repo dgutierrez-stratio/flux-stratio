@@ -34,17 +34,19 @@ func manifestDiff(ctx context.Context, opts Options, rendered *render.Result) (*
 
 	localYAML, _ := yaml.Marshal(rendered.Object.Object["spec"])
 	liveYAML, _ := yaml.Marshal(live.Object["spec"])
-	return &Result{Patch: patch, Before: string(localYAML), After: string(liveYAML)}, nil
+	result := &Result{Patch: patch, Before: string(localYAML), After: string(liveYAML)}
+	if opts.Baseline == "" {
+		result.FluxManagedBy = fluxManagedBy(live)
+	}
+	return result, nil
 }
 
 // fetchLiveManifestObject fetches the live cluster object at gvk/namespace,
-// falling back to App.PreviousNamespace if it isn't found there.
+// falling back to the namespace the app's live object was classified in
+// (App.LiveNamespace) if it isn't found there.
 func fetchLiveManifestObject(ctx context.Context, opts Options, gvk schema.GroupVersionKind, namespace string) (*unstructured.Unstructured, error) {
 	name := opts.App.LiveName()
-	live, err := kubeclient.GetUnstructured(ctx, opts.Client, gvk, namespace, name)
-	if err != nil && kubeclient.IsNotFound(err) && opts.App.PreviousNamespace != "" {
-		live, err = kubeclient.GetUnstructured(ctx, opts.Client, gvk, opts.App.PreviousNamespace, name)
-	}
+	live, err := getWithLiveNamespaceFallback(ctx, opts, gvk, namespace, name)
 	if err != nil {
 		return nil, fmtNotFound(gvk.Kind, namespace, name, err)
 	}
@@ -65,4 +67,16 @@ func LiveManifestObject(ctx context.Context, opts Options) (*unstructured.Unstru
 		return nil, err
 	}
 	return fetchLiveManifestObject(ctx, opts, rendered.Object.GroupVersionKind(), rendered.Object.GetNamespace())
+}
+
+// getWithLiveNamespaceFallback gets gvk namespace/name, retrying in
+// App.LiveNamespace when it's not found and that namespace differs — the
+// legacy object may still live where CCT put it, not where the GitOps
+// redesign's rendered manifest now expects it.
+func getWithLiveNamespaceFallback(ctx context.Context, opts Options, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error) {
+	live, err := kubeclient.GetUnstructured(ctx, opts.Client, gvk, namespace, name)
+	if liveNS := opts.App.LiveNamespace(); err != nil && kubeclient.IsNotFound(err) && liveNS != "" && liveNS != namespace {
+		live, err = kubeclient.GetUnstructured(ctx, opts.Client, gvk, liveNS, name)
+	}
+	return live, err
 }

@@ -348,3 +348,47 @@ func TestDependencyNames_NoDependenciesReturnsNil(t *testing.T) {
 		t.Errorf("DependencyNames = %v, want nil", got)
 	}
 }
+
+func TestCommentedOut(t *testing.T) {
+	src := `spec:
+  defaultValues:
+    components:
+      connectors:
+        - name: connectors
+      # postgres:
+      #   - config:
+      #       dependencies:
+      #         pgbackuprepository:
+      #           name: pgbackuprepository
+      #     name: psql
+      # discovery:
+      #   - config:
+      #       dependencies:
+      #         pgbouncer:
+      #           name: pool-psql
+      #     name: discovery
+`
+	path := filepath.Join(t.TempDir(), "tenant.yaml")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		{"postgres", true},
+		{"discovery", true},
+		{"pgbouncer", false},  // only a nested dependency reference, not a component block
+		{"connectors", false}, // declared, not commented out
+		{"kafka", false},
+	}
+	for _, c := range cases {
+		if got := CommentedOut(d, c.key); got != c.want {
+			t.Errorf("CommentedOut(%q) = %v, want %v", c.key, got, c.want)
+		}
+	}
+}

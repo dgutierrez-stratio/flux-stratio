@@ -266,3 +266,87 @@ func TestWriteTempKustomization_CreatesAndCallerRemoves(t *testing.T) {
 		t.Errorf("temp file content missing kustomization name: %s", data)
 	}
 }
+
+const rsetOutputWithPatches = `
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps-psql
+  namespace: stratio-datastores
+spec:
+  path: components/postgres/app/overlays/S
+  patches:
+    - patch: |
+        kind: HelmRelease
+        metadata:
+          name: psql
+        spec:
+          values:
+            foo: patched
+      target:
+        kind: HelmRelease
+    - patch: |
+        kind: ConfigMap
+        metadata:
+          name: unrelated-configmap
+      target:
+        kind: ConfigMap
+`
+
+// TestRender_StripsTheObjectKindsOwnPatches: the base is rendered without
+// the tenant file's existing patch for the selected object's kind (the one
+// tenantfile.Splice would replace), keeping every other kind's patch.
+func TestRender_StripsTheObjectKindsOwnPatches(t *testing.T) {
+	opts := baseOptions(t)
+	fakeRunner := &runner.Fake{Responses: map[string]runner.FakeResponse{
+		"flux-operator": {Stdout: []byte(rsetOutputWithPatches)},
+		"flux":          {Stdout: []byte(kustomizationBuildOutput)},
+	}}
+	opts.Runner = fakeRunner
+
+	result, err := Render(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if len(result.ReplacedPatches) != 1 || !strings.Contains(result.ReplacedPatches[0], "foo: patched") {
+		t.Fatalf("ReplacedPatches = %q, want the one HelmRelease patch", result.ReplacedPatches)
+	}
+	patches, _, _ := unstructured.NestedSlice(result.Kustomization.Object, "spec", "patches")
+	if len(patches) != 1 {
+		t.Fatalf("rendered Kustomization kept %d patches, want only the ConfigMap one", len(patches))
+	}
+	if kind, _, _ := unstructured.NestedString(patches[0].(map[string]any), "target", "kind"); kind != "ConfigMap" {
+		t.Errorf("kept patch targets %q, want ConfigMap", kind)
+	}
+	var builds int
+	for _, c := range fakeRunner.Calls {
+		if c.Name == "flux" {
+			builds++
+		}
+	}
+	if builds != 2 {
+		t.Errorf("flux build ran %d times, want 2 (once to learn the object's kind, once without its patch)", builds)
+	}
+}
+
+func TestRender_NoOwnPatchesRendersOnce(t *testing.T) {
+	opts := baseOptions(t)
+	fakeRunner := opts.Runner.(*runner.Fake)
+	result, err := Render(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if len(result.ReplacedPatches) != 0 {
+		t.Errorf("ReplacedPatches = %q, want none", result.ReplacedPatches)
+	}
+	var builds int
+	for _, c := range fakeRunner.Calls {
+		if c.Name == "flux" {
+			builds++
+		}
+	}
+	if builds != 1 {
+		t.Errorf("flux build ran %d times, want 1", builds)
+	}
+}

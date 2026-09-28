@@ -15,13 +15,28 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
 )
 
-// fixtureBase creates a temp directory with the four sibling repo checkouts
-// and, when tenant is non-empty, a tenant RSIP file at the expected path.
+// fixtureTemplate is a minimal keos-use-cases ResourceSet template
+// declaring one component key, "postgres" — enough for checkTypes.
+const fixtureTemplate = `spec:
+  resourcesTemplate: |
+    <<- range $component := $postgres >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    <<- end >>
+`
+
+// fixtureBase creates a temp directory with the four sibling repo
+// checkouts (keos-use-cases carrying fixtureTemplate) and, when tenant is
+// non-empty, a tenant RSIP file at the expected path.
 func fixtureBase(t *testing.T, cluster, tenant string) string {
 	t.Helper()
 	base := t.TempDir()
@@ -29,6 +44,13 @@ func fixtureBase(t *testing.T, cluster, tenant string) string {
 		if err := os.MkdirAll(filepath.Join(base, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+	componentsDir := filepath.Join(base, "keos-use-cases", "apps", "components")
+	if err := os.MkdirAll(componentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(componentsDir, "resourceset-apps-fixture.yaml"), []byte(fixtureTemplate), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	if tenant != "" {
 		tenantDir := filepath.Join(base, "keos-fleet", "clusters", cluster, "tenants", "config")
@@ -42,15 +64,35 @@ func fixtureBase(t *testing.T, cluster, tenant string) string {
 	return base
 }
 
-func writeConfig(t *testing.T, base, cluster, tenant string) string {
+// setConfig writes a one-type catalog (chart-mode when chartPath is set)
+// and an environment file, pointing opts at both.
+func setConfig(t *testing.T, opts *Options, base, cluster, tenant, chartsBase, chartPath string) {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
-	body := "base: " + base + "\ncluster: " + cluster + "\ntenant: " + tenant + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+
+	catalogBody := "types:\n" +
+		"  - type: postgres\n" +
+		"    name: Postgres\n" +
+		"    component: postgres\n" +
+		"    rset: apps/components/resourceset-apps-fixture.yaml\n" +
+		"    match:\n" +
+		"      kinds: [postgres.stratio.com/v1/PgCluster]\n"
+	if chartPath != "" {
+		catalogBody += "    chart:\n      path: " + chartPath + "\n"
+	}
+	opts.ConfigFlag = filepath.Join(dir, "catalog.yaml")
+	if err := os.WriteFile(opts.ConfigFlag, []byte(catalogBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return path
+
+	envBody := "base: " + base + "\ncluster: " + cluster + "\ntenant: " + tenant + "\n"
+	if chartsBase != "" {
+		envBody += "chartsBase: " + chartsBase + "\n"
+	}
+	opts.EnvConfigFlag = filepath.Join(dir, "environment.yaml")
+	if err := os.WriteFile(opts.EnvConfigFlag, []byte(envBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func passingRunner() *runner.Fake {
@@ -80,15 +122,15 @@ func baseOptions() Options {
 func TestRun_AllChecksPass(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	opts := baseOptions()
-	opts.ConfigFlag = writeConfig(t, base, "eosdev", "stratio")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
 
 	report := Run(context.Background(), opts)
 
 	if !report.OK() {
 		t.Fatalf("report.OK() = false, want true; error: %v", report.Err())
 	}
-	if len(report.Checks) != 7 {
-		t.Errorf("len(Checks) = %d, want 7", len(report.Checks))
+	if len(report.Checks) != 9 {
+		t.Errorf("len(Checks) = %d, want 9", len(report.Checks))
 	}
 }
 
@@ -96,15 +138,15 @@ func TestRun_MissingBinaries_OtherChecksStillRun(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	opts := baseOptions()
 	opts.Runner = &runner.Fake{} // every binary unconfigured -> Fake errors for all
-	opts.ConfigFlag = writeConfig(t, base, "eosdev", "stratio")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
 
 	report := Run(context.Background(), opts)
 
 	if report.OK() {
 		t.Fatal("report.OK() = true, want false")
 	}
-	if len(report.Checks) != 7 {
-		t.Fatalf("len(Checks) = %d, want 7 (downstream checks must still run)", len(report.Checks))
+	if len(report.Checks) != 9 {
+		t.Fatalf("len(Checks) = %d, want 9 (downstream checks must still run)", len(report.Checks))
 	}
 	if report.Checks[0].Name != CheckBinaries || report.Checks[0].OK {
 		t.Errorf("Checks[0] = %+v, want a failing binaries check", report.Checks[0])
@@ -116,8 +158,29 @@ func TestRun_MissingBinaries_OtherChecksStillRun(t *testing.T) {
 	}
 }
 
-func TestRun_InvalidConfig_SkipsDownstreamChecks(t *testing.T) {
+func TestRun_InvalidEnvironment_SkipsDownstreamChecks(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
 	opts := baseOptions()
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
+	opts.EnvConfigFlag = filepath.Join(t.TempDir(), "does-not-exist.yaml")
+
+	report := Run(context.Background(), opts)
+
+	if report.OK() {
+		t.Fatal("report.OK() = true, want false")
+	}
+	if len(report.Checks) != 4 {
+		t.Fatalf("len(Checks) = %d, want 4 (binaries + meld + catalog + environment only)", len(report.Checks))
+	}
+	if report.Checks[3].Name != CheckEnvironment || report.Checks[3].OK {
+		t.Errorf("Checks[3] = %+v, want a failing environment check", report.Checks[3])
+	}
+}
+
+func TestRun_InvalidCatalog_SkipsCatalogDependentChecks(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	opts := baseOptions()
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
 	opts.ConfigFlag = filepath.Join(t.TempDir(), "does-not-exist.yaml")
 
 	report := Run(context.Background(), opts)
@@ -125,18 +188,44 @@ func TestRun_InvalidConfig_SkipsDownstreamChecks(t *testing.T) {
 	if report.OK() {
 		t.Fatal("report.OK() = true, want false")
 	}
-	if len(report.Checks) != 3 {
-		t.Fatalf("len(Checks) = %d, want 3 (binaries + meld + config only, no cfg to check further)", len(report.Checks))
+	var names []string
+	for _, c := range report.Checks {
+		names = append(names, string(c.Name))
 	}
-	if report.Checks[2].Name != CheckConfig || report.Checks[2].OK {
-		t.Errorf("Checks[2] = %+v, want a failing config check", report.Checks[2])
+	want := "binaries,meld (optional),catalog,environment,repo layout,cluster access,tenant file"
+	if strings.Join(names, ",") != want {
+		t.Errorf("checks = %s, want %s", strings.Join(names, ","), want)
+	}
+}
+
+func TestRun_UnknownComponentKeyOrPrepareStep(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	opts := baseOptions()
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
+	body := "types:\n" +
+		"  - type: kafka\n    name: Kafka\n    component: kafka\n    rset: r.yaml\n" +
+		"    prepare: prepare-nothing\n    match:\n      kinds: [kafka.stratio.com/v1/KafkaCluster]\n"
+	if err := os.WriteFile(opts.ConfigFlag, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := Run(context.Background(), opts)
+
+	var typesCheck Check
+	for _, c := range report.Checks {
+		if c.Name == CheckTypes {
+			typesCheck = c
+		}
+	}
+	if typesCheck.OK || !strings.Contains(typesCheck.Detail, `component "kafka"`) || !strings.Contains(typesCheck.Detail, "prepare-nothing") {
+		t.Errorf("catalog types check = %+v, want it to flag the unknown component and prepare step", typesCheck)
 	}
 }
 
 func TestRun_RepoLayoutMissingDirs(t *testing.T) {
 	base := t.TempDir() // no keos-* subdirectories created
 	opts := baseOptions()
-	opts.ConfigFlag = writeConfig(t, base, "eosdev", "stratio")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
 
 	report := Run(context.Background(), opts)
 
@@ -159,34 +248,11 @@ func TestRun_RepoLayoutMissingDirs(t *testing.T) {
 	}
 }
 
-// writeConfigWithChartApp writes a config declaring one chart-mode app
-// (chartPath), optionally with a chartsBase override.
-func writeConfigWithChartApp(t *testing.T, base, cluster, tenant, chartsBase, chartPath string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
-	body := "base: " + base + "\ncluster: " + cluster + "\ntenant: " + tenant + "\n"
-	if chartsBase != "" {
-		body += "chartsBase: " + chartsBase + "\n"
-	}
-	body += "apps:\n" +
-		"  - id: virtualizer\n" +
-		"    name: Virtualizer\n" +
-		"    rset: apps/components/resourceset-apps-apps.yaml\n" +
-		"    kustomization: apps-virtualizer\n" +
-		"    object: virtualizer\n" +
-		"    chartPath: " + chartPath + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 func TestRun_ChartPathMissing(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	opts := baseOptions()
 	// No charts/virtualizer directory created under base.
-	opts.ConfigFlag = writeConfigWithChartApp(t, base, "eosdev", "stratio", "", "charts/virtualizer")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "charts/virtualizer")
 
 	report := Run(context.Background(), opts)
 
@@ -202,8 +268,8 @@ func TestRun_ChartPathMissing(t *testing.T) {
 	if chartCheck.OK {
 		t.Error("chart paths check passed, want it to fail")
 	}
-	if !strings.Contains(chartCheck.Detail, "virtualizer") {
-		t.Errorf("chart paths detail %q should mention the app missing its chart", chartCheck.Detail)
+	if !strings.Contains(chartCheck.Detail, "postgres") {
+		t.Errorf("chart paths detail %q should mention the type missing its chart", chartCheck.Detail)
 	}
 }
 
@@ -216,7 +282,7 @@ func TestRun_ChartPathsUsesChartsBaseOverride(t *testing.T) {
 	opts := baseOptions()
 	// The chart lives only under chartsRoot, never under base — the check
 	// must resolve against chartsBase, not base, once it's set.
-	opts.ConfigFlag = writeConfigWithChartApp(t, base, "eosdev", "stratio", chartsRoot, "charts/virtualizer")
+	setConfig(t, &opts, base, "eosdev", "stratio", chartsRoot, "charts/virtualizer")
 
 	report := Run(context.Background(), opts)
 
@@ -231,7 +297,7 @@ func TestRun_ClusterUnreachable(t *testing.T) {
 	opts.NewClient = func(*genericclioptions.ConfigFlags) (client.Client, error) {
 		return nil, errors.New("connection refused")
 	}
-	opts.ConfigFlag = writeConfig(t, base, "eosdev", "stratio")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
 
 	report := Run(context.Background(), opts)
 
@@ -252,7 +318,7 @@ func TestRun_ClusterUnreachable(t *testing.T) {
 func TestRun_TenantFileMissing(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "" /* no tenant file written */)
 	opts := baseOptions()
-	opts.ConfigFlag = writeConfig(t, base, "eosdev", "stratio")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
 
 	report := Run(context.Background(), opts)
 
@@ -275,10 +341,8 @@ func TestRun_OverridesTakePrecedenceOverConfig(t *testing.T) {
 	// at the real fixture. Every downstream check must use the overrides.
 	base := fixtureBase(t, "real-cluster", "real-tenant")
 	opts := baseOptions()
-	opts.ConfigFlag = writeConfig(t, "/does/not/exist", "bogus-cluster", "bogus-tenant")
-	opts.BaseOverride = base
-	opts.ClusterOverride = "real-cluster"
-	opts.TenantOverride = "real-tenant"
+	setConfig(t, &opts, "/does/not/exist", "bogus-cluster", "bogus-tenant", "", "")
+	opts.Overrides = config.Environment{Base: base, Cluster: "real-cluster", Tenant: "real-tenant"}
 
 	report := Run(context.Background(), opts)
 
@@ -290,14 +354,14 @@ func TestRun_OverridesTakePrecedenceOverConfig(t *testing.T) {
 func TestReport_Err_AggregatesFailingChecks(t *testing.T) {
 	r := Report{Checks: []Check{
 		{Name: CheckBinaries, OK: true},
-		{Name: CheckConfig, OK: false, Detail: "boom"},
+		{Name: CheckCatalog, OK: false, Detail: "boom"},
 		{Name: CheckCluster, OK: false, Detail: "unreachable"},
 	}}
 	err := r.Err()
 	if err == nil {
 		t.Fatal("Err() = nil, want non-nil")
 	}
-	for _, want := range []string{"config", "boom", "cluster access", "unreachable"} {
+	for _, want := range []string{"catalog", "boom", "cluster access", "unreachable"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Err() = %q, missing %q", err, want)
 		}
@@ -332,12 +396,12 @@ func TestRun_NarratesThroughLog(t *testing.T) {
 	var buf bytes.Buffer
 	opts := baseOptions()
 	opts.Log = log.New(&buf, false)
-	opts.ConfigFlag = writeConfig(t, base, "eosdev", "stratio")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
 
 	Run(context.Background(), opts)
 
 	out := buf.String()
-	for _, want := range []string{"checking required binaries", "loading config", "checking cluster access"} {
+	for _, want := range []string{"checking required binaries", "loading component catalog", "loading environment", "checking cluster access"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log output missing %q; got:\n%s", want, out)
 		}

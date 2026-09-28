@@ -10,12 +10,11 @@ import (
 
 	"github.com/Stratio/flux-stratio/internal/appmigrate"
 	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/components"
 	"github.com/Stratio/flux-stratio/internal/config"
-	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/runner"
-	"github.com/Stratio/flux-stratio/internal/tenantfile"
 	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
@@ -24,67 +23,83 @@ func newAppsMigrateCommand() *cobra.Command {
 	var dryRun bool
 	var yes bool
 	var continueOnError bool
+	var as string
+	var baseline string
+	var dir string
 
 	cmd := &cobra.Command{
-		Use:   "migrate [id]",
+		Use:   "migrate [name]",
 		Short: "Diff an app and splice the resulting patch into the tenant file",
+		Long:  appsMigrateLong,
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAppsMigrate(cmd, args, all, dryRun, yes, continueOnError)
+			return runAppsMigrate(cmd, args, all, dryRun, yes, continueOnError, as, baseline, dir)
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "migrate every app in the config catalog")
+	addAsFlag(cmd, &as)
+	cmd.Flags().StringVar(&baseline, "baseline", "",
+		"compute the patch against a backup (see apps backup) instead of the live cluster — for a component Flux "+
+			"already reconciled unpatched, whose live state no longer reflects the legacy installation; takes the same "+
+			"values as apps diff --baseline (e.g. latest)")
+	cmd.Flags().StringVar(&dir, "dir", "", "backups root directory to resolve --baseline latest against (default: a backups/ directory next to the catalog file)")
+	cmd.Flags().BoolVar(&all, "all", false, "migrate every live object a catalog type selects and the tenant file declares")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without writing anything")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt (and never ask which type/entry an ambiguous live object is — fail naming --as instead)")
 	cmd.Flags().BoolVar(&continueOnError, "continue-on-error", false, "with --all, keep migrating remaining apps after one fails (default: stop on the first error)")
 	return cmd
 }
 
-func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continueOnError bool) error {
+func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continueOnError bool, as, baseline, dirFlag string) error {
 	if all == (len(args) > 0) {
-		return fmt.Errorf("provide exactly one of an app id or --all")
+		return fmt.Errorf("provide exactly one of an app name or --all")
+	}
+	if as != "" && all {
+		return fmt.Errorf("--as only applies to a single named app")
 	}
 
-	logger := rootLogger(cmd)
-	cfg, err := config.Load(configFlag)
+	s, err := openSession(cmd)
 	if err != nil {
 		return err
 	}
-
-	var apps []config.App
-	if all {
-		apps = cfg.Apps
-	} else {
-		app := cfg.Find(args[0])
-		if app == nil {
-			return fmt.Errorf("app %q not found in the config catalog", args[0])
-		}
-		apps = []config.App{*app}
-	}
-
-	base, cluster, tenant := cfg.Effective(baseFlag, clusterFlag, tenantFlag)
+	logger := s.log
+	base, cluster, tenant := s.env.Base, s.env.Cluster, s.env.Tenant
 
 	cat, err := catalog.Load(filepath.Join(base, "keos-use-cases"))
 	if err != nil {
 		return err
 	}
-
-	c, err := kubeclient.New(kubeconfigArgs)
+	ropts, err := s.resolveOptions(cmd, true, !yes, as)
 	if err != nil {
-		return fmt.Errorf("connecting to the cluster: %w", err)
+		return err
 	}
 
+	var apps []config.App
+	var unresolved []error
 	if all {
-		doc, err := tenantfile.Load(tenantfile.Path(base, cluster, tenant))
+		if apps, unresolved, err = components.ResolveAll(ropts); err != nil {
+			return err
+		}
+		for _, u := range unresolved {
+			logger.Failuref("%v", u)
+		}
+		// An unresolved instance is a failed app like any other: without
+		// --continue-on-error, nothing is migrated past it.
+		if len(unresolved) > 0 && !continueOnError {
+			return fmt.Errorf("%d live instance(s) could not be resolved; answer interactively, migrate them one at a time with --as, or pass --continue-on-error to migrate the rest", len(unresolved))
+		}
+		apps = appmigrate.OrderApps(ropts.Doc, cat, apps)
+	} else {
+		app, err := components.Resolve(ropts, args[0])
 		if err != nil {
 			return err
 		}
-		apps = appmigrate.OrderApps(doc, cat, apps)
+		apps = []config.App{app}
 	}
+	c := s.client
 
 	var failed []string
 	for _, app := range apps {
-		err := migrateOne(cmd, app, base, cluster, tenant, cfg.ChartsBase, cat, c, logger, dryRun, yes)
+		err := migrateOne(cmd, app, base, cluster, tenant, s.env.ChartsBase, cat, c, logger, dryRun, yes, baseline, dirFlag)
 		if err == nil {
 			continue
 		}
@@ -102,13 +117,24 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 			break
 		}
 	}
+	if len(unresolved) > 0 {
+		failed = append(failed, fmt.Sprintf("%d unresolved instance(s)", len(unresolved)))
+	}
 	if len(failed) > 0 {
 		return fmt.Errorf("migration failed for: %s", strings.Join(failed, ", "))
 	}
 	return nil
 }
 
-func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chartsBase string, cat *catalog.Catalog, c client.Client, logger *log.Logger, dryRun, yes bool) error {
+func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chartsBase string, cat *catalog.Catalog, c client.Client, logger *log.Logger, dryRun, yes bool, baseline, dirFlag string) error {
+	resolvedBaseline := ""
+	if baseline != "" {
+		var err error
+		if resolvedBaseline, err = resolveBackupArg(baseline, app.ID, dirFlag); err != nil {
+			return err
+		}
+	}
+
 	if app.Prepare != "" {
 		if err := ensurePrepared(cmd, app, tenant, c, logger, dryRun, yes); err != nil {
 			return err
@@ -117,16 +143,17 @@ func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chart
 
 	opts := appmigrate.Options{
 		Base: base, Cluster: cluster, Tenant: tenant, ChartsBase: chartsBase, App: app, Catalog: cat,
-		Runner: runner.Exec{}, Client: c, Log: logger,
+		Runner: runner.Exec{}, Client: c, Baseline: resolvedBaseline, Log: logger,
 	}
 
-	logger.Actionf("migrating %q", app.Name)
+	logger.Actionf("migrating %q: patch from %s", app.Name, desiredComparison(baseline, resolvedBaseline))
 	planned, err := appmigrate.Plan(cmd.Context(), opts)
 	if err != nil {
 		return err
 	}
+	warnFluxManaged(logger, app, planned.FluxManagedBy)
 	if !planned.Migrated {
-		logger.Successf("no differences")
+		reportNoChange(logger, planned.UpToDate, planned.ObsoletePatches)
 		return nil
 	}
 

@@ -2,6 +2,48 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **Config split into a typed component catalog and an environment file.** `config init` now
+  writes `~/.fluxcd/flux-stratio/catalog.yaml` and `environment.yaml` (`--dir`, `--force`,
+  `--charts`) instead of one `config.yaml` whose flat `apps:` list mixed static coordinates with
+  per-environment instance values:
+  * `catalog.yaml` holds 18 **component types** — static facts only (`component`, `rset`, `chart`,
+    `exclude`, `prepare`), `entry`/`object`/`kustomization` name templates, and `match` selectors
+    (`kinds` + label/annotation selectors) that recognize a type's live legacy objects. Every
+    seeded selector comes from the CCT `application_service`/`application_model` annotations on
+    real captured legacy objects. `renamed`/`previousNamespace` are gone: the live object's own
+    name and namespace are used.
+  * `environment.yaml` holds `base`/`chartsBase`/`cluster`/`tenant` (`--env-config`,
+    `$FLUX_STRATIO_ENV`); `--base/--cluster/--tenant` still override it.
+  * New `internal/components` classifies live objects against the catalog and resolves each
+    instance against the tenant file, asking — only when it can't infer it — which type or which
+    declared tenant entry a live object is. `--as <type>[/<entry>]` answers up front; `apps migrate
+    --yes` fails naming `--as` instead of asking. Answers are never stored.
+  * `apps diff/backup/migrate <name>` take a live name (`psql-agent`) or a GitOps object name
+    (`psql-gosec-agent`); `migrate --all`/`backup --catalog` cover every classified instance,
+    skipping (with a warning) types the tenant file doesn't declare.
+  * `doctor` checks the catalog and environment separately, and every type's `component` key and
+    `prepare` step against the real `keos-use-cases` templates.
+  * A pre-catalog `config.yaml` is recognized and rejected with a pointer to `config init --force`.
+* New seeded type `opendashboards` (OsDashboards, `Dashboards-Opensearch`): no excludes — the
+  legacy image pin and `admin.<tenant>.<domain>` exposition host are deliberately kept.
+* An object CCT annotated as another tenant's (`cct.stratio.com/application_tenant`) is never an
+  instance: eosdev's platform `opensearch1` (tenant `keos`, `keos-core`) no longer shadows the
+  `stratio` tenant's own — name-only discovery had been backing up the `keos-core` copy.
+* Fix: re-running `apps migrate` on a component whose tenant entry already carried a patch diffed
+  base+patch against live and spliced the *leftover delta* in as a replacement, silently dropping
+  every field the existing patch carried. The base is now rendered without the existing patch for
+  the object's kind, so the whole patch is always recomputed; one the tenant file already carries
+  exactly is reported as up to date.
+* Fix: `apps diff --baseline` decoded a backup's `cr.yaml` into a plain map, turning every integer
+  into a float64 — every unchanged integer field (probe thresholds, `minAvailable`, …) was reported
+  as a difference and back-ported into the patch. It now decodes through `internal/yamldocs.Decode`
+  like the rendered and live sides.
+* `apps migrate --baseline <backup>` (with `--dir`): compute the patch from a pre-cutover backup
+  instead of live, for a component Flux already reconciled unpatched. `apps diff`/`migrate` warn
+  when the live object is already Flux-managed.
+* Fix: `apps backup` captured a same-named `PgDatabase` as the `genai` and `rocket` apps (name-only
+  lookup, CRs first). A classified instance is now captured from the exact live object it was
+  classified from, and `apps backup --all` captures the unrelated same-named object separately.
 * Initial release: application migration ported from the Python `migrate.py` client's `tenant`,
   `backup`, `patch`/`patch --chart-path` and `migrate-app` commands, redesigned around
   `flux stratio tenant import`, `apps backup`, `apps diff` and `apps migrate`.

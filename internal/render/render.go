@@ -65,6 +65,11 @@ type Result struct {
 	// AllDocs is every object flux build kustomization --dry-run rendered
 	// for this Kustomization, Object among them.
 	AllDocs []*unstructured.Unstructured
+	// ReplacedPatches are the patch bodies the tenant file already applies
+	// to Object's own kind (spec.patches entries whose target.kind is
+	// Object's kind). Object, Kustomization and AllDocs are rendered
+	// *without* them — see Render.
+	ReplacedPatches []string
 }
 
 // Render runs the full two-stage pipeline described in the package doc and
@@ -89,6 +94,37 @@ func Render(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
+	obj, err := findObject(docs, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Render the pristine base, without the patches the tenant file already
+	// applies to this object's kind: those are exactly what
+	// tenantfile.Splice replaces (by target.kind), so the patch computed
+	// against this render is always the *whole* patch, never just what's
+	// left over after the existing one — which, spliced in as a
+	// replacement, would silently drop everything the existing patch
+	// already carried. Every keos-use-cases template takes its patches only
+	// from the tenant entry, so nothing template-authored is dropped here.
+	replaced, stripped, err := withoutPatchesFor(ks, obj.GetKind())
+	if err != nil {
+		return nil, err
+	}
+	if len(replaced) > 0 {
+		opts.Log.Debugf("rendering %q without the tenant file's %d existing %s patch(es)", opts.Object, len(replaced), obj.GetKind())
+		ks = stripped
+		if docs, err = buildKustomizationObjects(ctx, opts, ks); err != nil {
+			return nil, err
+		}
+		if obj, err = findObject(docs, opts); err != nil {
+			return nil, err
+		}
+	}
+	return &Result{Object: obj, Kustomization: ks, AllDocs: docs, ReplacedPatches: replaced}, nil
+}
+
+func findObject(docs []*unstructured.Unstructured, opts Options) (*unstructured.Unstructured, error) {
 	obj := yamldocs.FindByName(docs, opts.Object)
 	if obj == nil {
 		return nil, fmt.Errorf(
@@ -96,8 +132,40 @@ func Render(ctx context.Context, opts Options) (*Result, error) {
 			opts.Object, len(docs), opts.Kustomization, opts.Rset,
 		)
 	}
+	return obj, nil
+}
 
-	return &Result{Object: obj, Kustomization: ks, AllDocs: docs}, nil
+// withoutPatchesFor returns the patch bodies of ks's spec.patches entries
+// targeting kind, and a copy of ks with those entries removed. ks is
+// returned unchanged (and no copy made) when none target kind.
+func withoutPatchesFor(ks *unstructured.Unstructured, kind string) ([]string, *unstructured.Unstructured, error) {
+	patches, found, err := unstructured.NestedSlice(ks.Object, "spec", "patches")
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading kustomization %q spec.patches: %w", ks.GetName(), err)
+	}
+	if !found {
+		return nil, ks, nil
+	}
+	var replaced []string
+	kept := make([]any, 0, len(patches))
+	for _, p := range patches {
+		entry, _ := p.(map[string]any)
+		targetKind, _, _ := unstructured.NestedString(entry, "target", "kind")
+		if targetKind != kind {
+			kept = append(kept, p)
+			continue
+		}
+		body, _, _ := unstructured.NestedString(entry, "patch")
+		replaced = append(replaced, body)
+	}
+	if len(replaced) == 0 {
+		return nil, ks, nil
+	}
+	stripped := ks.DeepCopy()
+	if err := unstructured.SetNestedSlice(stripped.Object, kept, "spec", "patches"); err != nil {
+		return nil, nil, fmt.Errorf("stripping kustomization %q spec.patches: %w", ks.GetName(), err)
+	}
+	return replaced, stripped, nil
 }
 
 func tenantFilePath(opts Options) string {

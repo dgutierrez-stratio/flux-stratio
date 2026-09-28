@@ -47,6 +47,40 @@ func TestDiff_ManifestMode_Baseline(t *testing.T) {
 	}
 }
 
+// TestDiff_ManifestMode_BaselineUnchangedIntegerIsNoDiff is the regression
+// test for baseline numeric decoding: a backup whose integer fields equal
+// the render's must produce no patch — a plain map decode made them
+// float64, so every unchanged integer was back-ported into the patch.
+func TestDiff_ManifestMode_BaselineUnchangedIntegerIsNoDiff(t *testing.T) {
+	base := fixtureBase(t)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseline := t.TempDir()
+	cr := "apiVersion: postgres.stratio.com/v1\nkind: PgCluster\nmetadata:\n  name: psql\n  namespace: stratio-datastores\nspec:\n  instances: 1\n"
+	if err := os.WriteFile(filepath.Join(baseline, "cr.yaml"), []byte(cr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{
+		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		App:      config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
+		Baseline: baseline,
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
+			"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
+		}},
+		Client: fake.NewClientBuilder().WithScheme(mustScheme(t)).Build(),
+		Log:    log.New(io.Discard, false),
+	}
+	result, err := Diff(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Diff returned error: %v", err)
+	}
+	if result.Patch != nil {
+		t.Errorf("Patch = %+v, want nil (baseline instances: 1 equals the rendered instances: 1)", result.Patch)
+	}
+}
+
 func TestDiff_ManifestMode_BaselineFileMissing(t *testing.T) {
 	base := fixtureBase(t)
 	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "postgres", "app", "overlays", "S"), 0o755); err != nil {

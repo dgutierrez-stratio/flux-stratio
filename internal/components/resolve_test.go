@@ -1,0 +1,308 @@
+package components
+
+import (
+	"bytes"
+	"errors"
+	"strings"
+	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/Stratio/flux-stratio/internal/log"
+	"github.com/Stratio/flux-stratio/internal/tenantfile"
+)
+
+// scripted is a test Prompter answering each Choose with the next index in
+// answers (ErrNoAnswer once they run out), recording every question asked.
+type scripted struct {
+	answers   []int
+	questions []string
+	options   [][]string
+}
+
+func (s *scripted) Choose(q string, options []string) (int, error) {
+	s.questions = append(s.questions, q)
+	s.options = append(s.options, options)
+	if len(s.answers) == 0 {
+		return 0, ErrNoAnswer
+	}
+	a := s.answers[0]
+	s.answers = s.answers[1:]
+	return a, nil
+}
+
+func loadTenant(t *testing.T) *tenantfile.Doc {
+	t.Helper()
+	d, err := tenantfile.Load("testdata/tenant.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func baseOptions(t *testing.T) Options {
+	return Options{
+		Catalog: seededCatalog(),
+		Objects: loadLiveFixture(t),
+		Tenant:  "stratio",
+		Doc:     loadTenant(t),
+		Log:     log.New(&bytes.Buffer{}, false),
+	}
+}
+
+func TestResolve_ManifestInstanceByLiveName(t *testing.T) {
+	app, err := Resolve(baseOptions(t), "psql")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.ID != "psql" || app.Type != "postgres" || app.Kustomization != "apps-psql" || app.Object != "psql" || app.Entry != "psql" {
+		t.Errorf("unexpected app: %+v", app)
+	}
+	if app.ChartPath != "" || len(app.Exclude) == 0 || app.Rset == "" {
+		t.Errorf("type facts not carried over: %+v", app)
+	}
+	if app.LiveName() != "psql" || app.LiveNamespace() != "stratio-datastores" || app.Live[0].GVK.Kind != "PgCluster" {
+		t.Errorf("live ref = %+v", app.Live)
+	}
+}
+
+func TestResolve_GosecAgentByLegacyOrGitOpsName(t *testing.T) {
+	for _, name := range []string{"psql-agent", "psql-gosec-agent"} {
+		t.Run(name, func(t *testing.T) {
+			app, err := Resolve(baseOptions(t), name)
+			if err != nil {
+				t.Fatalf("Resolve returned error: %v", err)
+			}
+			if app.Entry != "psql" || app.Object != "psql-gosec-agent" || app.Kustomization != "apps-psql-gosec-agent" {
+				t.Errorf("unexpected names: entry=%q object=%q kustomization=%q", app.Entry, app.Object, app.Kustomization)
+			}
+			if app.LiveName() != "psql-agent" || app.ChartPath != "charts/gosec-agent" {
+				t.Errorf("LiveName=%q ChartPath=%q", app.LiveName(), app.ChartPath)
+			}
+		})
+	}
+}
+
+func TestResolve_ChartTypeNeverPicksSameNamedPgDatabase(t *testing.T) {
+	app, err := Resolve(baseOptions(t), "genai")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.Type != "genai" || app.Live[0].GVK.Kind != "Deployment" || app.LiveName() != "genai-api" {
+		t.Errorf("app = %+v, want the genai chart anchored on its genai-api Deployment", app)
+	}
+}
+
+func TestResolve_UndeclaredEntryPromptsAmongTenantEntries(t *testing.T) {
+	opts := baseOptions(t)
+	p := &scripted{answers: []int{0}}
+	opts.Prompter = p
+
+	app, err := Resolve(opts, "kafka1")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.Entry != "kafka" || app.Object != "kafka" || app.Kustomization != "apps-kafka" || app.LiveName() != "kafka1" {
+		t.Errorf("unexpected app: %+v", app)
+	}
+	if len(p.questions) != 1 || strings.Join(p.options[0], ",") != "kafka" {
+		t.Errorf("questions=%v options=%v, want one question offering the declared kafka entries", p.questions, p.options)
+	}
+}
+
+func TestResolve_UndeclaredEntryWithoutAnswerNamesAs(t *testing.T) {
+	_, err := Resolve(baseOptions(t), "kafka1") // NonInteractive by default
+	if err == nil || !strings.Contains(err.Error(), "--as") {
+		t.Errorf("Resolve error = %v, want it to suggest --as", err)
+	}
+}
+
+func TestResolve_AsPinsEntry(t *testing.T) {
+	opts := baseOptions(t)
+	opts.As = "kafka/kafka"
+	app, err := Resolve(opts, "kafka1")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.Entry != "kafka" {
+		t.Errorf("Entry = %q, want kafka", app.Entry)
+	}
+}
+
+func TestResolve_AsWithUndeclaredEntryFails(t *testing.T) {
+	opts := baseOptions(t)
+	opts.As = "kafka/nope"
+	_, err := Resolve(opts, "kafka1")
+	if err == nil || !strings.Contains(err.Error(), `"nope"`) {
+		t.Errorf("Resolve error = %v, want it to reject the undeclared entry", err)
+	}
+}
+
+func TestResolve_AsUnknownTypeFails(t *testing.T) {
+	opts := baseOptions(t)
+	opts.As = "bogus"
+	if _, err := Resolve(opts, "psql"); err == nil || !strings.Contains(err.Error(), "unknown type") {
+		t.Errorf("Resolve error = %v, want unknown type", err)
+	}
+}
+
+func TestResolve_SameEntryInTwoNamespacesAsks(t *testing.T) {
+	// Same tenant, same entry, two namespaces — a real "which one?" (the
+	// other-tenant case never gets this far; see
+	// TestClassify_OtherTenantsObjectsExcluded).
+	opts := baseOptions(t)
+	opts.Doc = nil
+	opts.Objects = []*unstructured.Unstructured{
+		deployment("opensearch1-agent", "keos-core", map[string]string{"cct.stratio.com/application_service": "os-gosec-agent"}),
+		deployment("opensearch1-agent", "stratio-datastores", map[string]string{"cct.stratio.com/application_service": "os-gosec-agent"}),
+	}
+	p := &scripted{answers: []int{1}}
+	opts.Prompter = p
+
+	app, err := Resolve(opts, "opensearch1-agent")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if len(p.questions) != 1 || len(p.options[0]) != 2 {
+		t.Fatalf("questions=%v options=%v, want one question with 2 options", p.questions, p.options)
+	}
+	if app.LiveNamespace() != "stratio-datastores" || app.Object != "opensearch1-gosec-agent" {
+		t.Errorf("chose %s/%s object %q, want the second (stratio-datastores) candidate", app.LiveNamespace(), app.LiveName(), app.Object)
+	}
+}
+
+func TestResolve_OtherTenantsCopyNeverAsked(t *testing.T) {
+	app, err := Resolve(baseOptions(t), "opensearch1-agent") // NonInteractive: any question would fail
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.LiveNamespace() != "stratio-datastores" {
+		t.Errorf("LiveNamespace = %q, want the stratio tenant's copy", app.LiveNamespace())
+	}
+}
+
+func TestResolve_NoTenantDocSkipsEntryChecks(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	app, err := Resolve(opts, "kafka1")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.Entry != "kafka1" {
+		t.Errorf("Entry = %q, want the derived kafka1 unchanged", app.Entry)
+	}
+}
+
+func TestResolve_UnclassifiedLiveObjectExplained(t *testing.T) {
+	_, err := Resolve(baseOptions(t), "genai-litellm")
+	if err == nil || !strings.Contains(err.Error(), "none is selected") || !strings.Contains(err.Error(), "Deployment stratio-genai/genai-litellm") {
+		t.Errorf("Resolve error = %v, want it to name the live object no type selects", err)
+	}
+}
+
+func TestResolve_UnknownNameFails(t *testing.T) {
+	if _, err := Resolve(baseOptions(t), "does-not-exist"); err == nil {
+		t.Error("Resolve returned nil error for an unknown name")
+	}
+}
+
+func TestResolveAll_SkipsUndeclaredComponentsAndAsksAboutTheRest(t *testing.T) {
+	opts := baseOptions(t)
+	var logs bytes.Buffer
+	opts.Log = log.New(&logs, false)
+	// Three questions, all answered with the first option: kafka1's entry
+	// (only "kafka" is declared), dg-postgresql-internal-agent's entry
+	// (only "dg-hdfs-agent" is declared), then the resulting duplicate —
+	// both dg-agents now mapping to dg-hdfs-agent. (The keos tenant's
+	// opensearch1 copies are excluded outright, never asked about.)
+	p := &scripted{answers: []int{0, 0, 0}}
+	opts.Prompter = p
+
+	apps, unresolved, err := ResolveAll(opts)
+	if err != nil || len(unresolved) > 0 {
+		t.Fatalf("ResolveAll returned error %v, unresolved %v", err, unresolved)
+	}
+
+	var ids []string
+	for _, a := range apps {
+		ids = append(ids, a.Type+"/"+a.ID)
+	}
+	want := "postgres/psql,pgbouncer/pool-psql,postgres-gosec-agent/psql-gosec-agent,opensearch/opensearch1," +
+		"opensearch-gosec-agent/opensearch1-gosec-agent,kafka/kafka,dg-agent/dg-hdfs-agent,genai/genai"
+	if strings.Join(ids, ",") != want {
+		t.Errorf("apps = %s\nwant   %s", strings.Join(ids, ","), want)
+	}
+	if len(p.questions) != 3 {
+		t.Errorf("asked %d questions, want 3: %v", len(p.questions), p.questions)
+	}
+	for _, skipped := range []string{"components.hdfs", "components.rocket", "components.virtualizer"} {
+		if !strings.Contains(logs.String(), skipped) {
+			t.Errorf("log missing a skip warning for %s:\n%s", skipped, logs.String())
+		}
+	}
+}
+
+func TestResolveAll_NonInteractiveReportsEveryUnansweredAndResolvesTheRest(t *testing.T) {
+	apps, unresolved, err := ResolveAll(baseOptions(t)) // NonInteractive
+	if err != nil {
+		t.Fatalf("ResolveAll returned error: %v", err)
+	}
+	// kafka1 and dg-postgresql-internal-agent both need an entry answer.
+	if len(unresolved) != 2 {
+		t.Fatalf("unresolved = %v, want 2 (kafka1, dg-postgresql-internal-agent)", unresolved)
+	}
+	for _, u := range unresolved {
+		if !errors.Is(u, ErrNoAnswer) || !strings.Contains(u.Error(), "--as") {
+			t.Errorf("unresolved error %q should wrap ErrNoAnswer and name --as", u)
+		}
+	}
+	var ids []string
+	for _, a := range apps {
+		ids = append(ids, a.ID)
+	}
+	if want := "psql,pool-psql,psql-gosec-agent,opensearch1,opensearch1-gosec-agent,dg-hdfs-agent,genai"; strings.Join(ids, ",") != want {
+		t.Errorf("resolved apps = %s, want %s", strings.Join(ids, ","), want)
+	}
+}
+
+func TestResolveAll_WithoutTenantDocResolvesEverything(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	apps, unresolved, err := ResolveAll(opts) // NonInteractive: nothing left to ask
+	if err != nil || len(unresolved) > 0 {
+		t.Fatalf("ResolveAll returned error %v, unresolved %v", err, unresolved)
+	}
+	if len(apps) != 19 {
+		t.Errorf("len(apps) = %d, want 19 (one per stratio-tenant instance)", len(apps))
+	}
+}
+
+func TestTerminal_ChoosesReaskAndEOF(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    int
+		wantErr error
+	}{
+		{"valid", "2\n", 1, nil},
+		{"reask then valid", "9\nx\n1\n", 0, nil},
+		{"blank line", "\n", 0, ErrNoAnswer},
+		{"EOF", "", 0, ErrNoAnswer},
+		{"too many invalid", "9\n9\n9\n1\n", 0, ErrNoAnswer},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			got, err := NewTerminal(strings.NewReader(c.input), &out).Choose("which?", []string{"a", "b"})
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("err = %v, want %v", err, c.wantErr)
+			}
+			if err == nil && got != c.want {
+				t.Errorf("Choose = %d, want %d", got, c.want)
+			}
+			if !strings.Contains(out.String(), "1) a") || !strings.Contains(out.String(), "2) b") {
+				t.Errorf("prompt output missing numbered options:\n%s", out.String())
+			}
+		})
+	}
+}

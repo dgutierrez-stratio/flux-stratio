@@ -179,7 +179,7 @@ func TestRun_ManifestMode_FoundOnlyAsWorkloadWarnsAndCaptures(t *testing.T) {
 	opts := Options{
 		Base: fixtureBase(t),
 		App: config.App{
-			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
+			ID: "psql", Type: "postgres", Rset: "apps/components/resourceset-apps-datastores.yaml",
 			Kustomization: "apps-psql", Object: "psql",
 		},
 		Index: idx,

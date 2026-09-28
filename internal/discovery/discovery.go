@@ -44,13 +44,16 @@ type Index struct {
 }
 
 // Scan lists every kind this package knows about, cluster-wide (no
-// namespace filter — matching Python's discovery.py exactly), and indexes
-// the results by name. A kind that isn't installed on this cluster
+// namespace filter — matching Python's discovery.py exactly), plus any
+// extraKinds (the component catalog's Match.Kinds, so every object a
+// catalog type could select is seen — see config.Catalog.Kinds), and
+// indexes the results by name. An extra kind that's already built in is
+// listed once; any other is indexed alongside the known CRDs. A kind that isn't installed on this cluster
 // (apimeta.IsNoMatchError) or that RBAC forbids listing
 // (apierrors.IsForbidden) is logged and treated as empty, mirroring
 // Python's bare "except Exception: items = []" for this one expected-absence
 // case; any other list error is fatal.
-func Scan(ctx context.Context, c client.Client, l *log.Logger) (*Index, error) {
+func Scan(ctx context.Context, c client.Client, l *log.Logger, extraKinds ...schema.GroupVersionKind) (*Index, error) {
 	idx := &Index{
 		crs:            bucket{},
 		workloads:      bucket{},
@@ -69,12 +72,29 @@ func Scan(ctx context.Context, c client.Client, l *log.Logger) (*Index, error) {
 			return nil, err
 		}
 	}
-	for _, gvk := range crdGVKs {
+	for _, gvk := range crdKinds(extraKinds) {
 		if err := scanInto(ctx, c, l, gvk, idx.crs); err != nil {
 			return nil, err
 		}
 	}
 	return idx, nil
+}
+
+// crdKinds is crdGVKs plus every extra kind not already scanned under
+// some other bucket, deduplicated.
+func crdKinds(extra []schema.GroupVersionKind) []schema.GroupVersionKind {
+	seen := map[schema.GroupVersionKind]bool{kustomizationGVK: true, helmReleaseGVK: true}
+	for _, gvk := range workloadGVKs {
+		seen[gvk] = true
+	}
+	var out []schema.GroupVersionKind
+	for _, gvk := range append(append([]schema.GroupVersionKind{}, crdGVKs...), extra...) {
+		if !seen[gvk] {
+			seen[gvk] = true
+			out = append(out, gvk)
+		}
+	}
+	return out
 }
 
 func scanInto(ctx context.Context, c client.Client, l *log.Logger, gvk schema.GroupVersionKind, into bucket) error {
@@ -138,6 +158,45 @@ func (idx *Index) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// Objects returns every object Scan indexed, across all four buckets —
+// what internal/components classifies against the catalog — sorted by
+// kind, namespace and name for a deterministic result.
+func (idx *Index) Objects() []*unstructured.Unstructured {
+	var out []*unstructured.Unstructured
+	for _, b := range []bucket{idx.crs, idx.workloads, idx.helmReleases, idx.kustomizations} {
+		for _, objs := range b {
+			out = append(out, objs...)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.GetKind() != b.GetKind() {
+			return a.GetKind() < b.GetKind()
+		}
+		if a.GetNamespace() != b.GetNamespace() {
+			return a.GetNamespace() < b.GetNamespace()
+		}
+		return a.GetName() < b.GetName()
+	})
+	return out
+}
+
+// Get returns the indexed object with exactly this group, kind, namespace
+// and name — the precise lookup for a live object internal/components
+// already classified, unlike the name-only Find* methods, which can't
+// tell a "genai" chart's workload from a "genai" PgDatabase.
+func (idx *Index) Get(gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, bool) {
+	for _, b := range []bucket{idx.crs, idx.workloads, idx.helmReleases, idx.kustomizations} {
+		for _, obj := range b[name] {
+			got := obj.GroupVersionKind()
+			if got.Group == gvk.Group && got.Kind == gvk.Kind && obj.GetNamespace() == namespace {
+				return obj, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // find returns a match for name in b, warning if more than one namespace

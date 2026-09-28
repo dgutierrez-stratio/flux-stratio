@@ -1,7 +1,8 @@
 // Package doctor implements `flux stratio doctor`: a single preflight pass
 // over everything a migration command depends on — required binaries, the
-// app catalog config, the GitOps repo layout, each chart-mode app's
-// on-disk chart directory, cluster access, and the target tenant file —
+// component catalog and environment files, the GitOps repo layout, each
+// chart-mode type's on-disk chart directory, each type's component key
+// and prepare step, cluster access, and the target tenant file —
 // so a broken prerequisite is caught up front, not discovered
 // mid-migration.
 package doctor
@@ -18,8 +19,10 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/Stratio/flux-stratio/internal/catalog"
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/log"
+	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
@@ -29,10 +32,14 @@ import (
 // real cluster client and real subprocess Runner in production; tests
 // inject fakes.
 type Options struct {
-	ConfigFlag                                    string
-	BaseOverride, ClusterOverride, TenantOverride string
-	KubeconfigArgs                                *genericclioptions.ConfigFlags
-	Runner                                        runner.Runner
+	// ConfigFlag and EnvConfigFlag are the --config (catalog) and
+	// --env-config (environment) flag values.
+	ConfigFlag, EnvConfigFlag string
+	// Overrides are the root command's --base/--cluster/--tenant flags,
+	// applied on top of the environment file.
+	Overrides      config.Environment
+	KubeconfigArgs *genericclioptions.ConfigFlags
+	Runner         runner.Runner
 	// NewClient builds a cluster client from KubeconfigArgs. Defaults to
 	// kubeclient.New; overridden in tests to avoid a real kubeconfig.
 	NewClient func(*genericclioptions.ConfigFlags) (client.Client, error)
@@ -44,12 +51,14 @@ type CheckName string
 
 // The checks doctor runs, in order.
 const (
-	CheckBinaries   CheckName = "binaries"
-	CheckConfig     CheckName = "config"
-	CheckRepoLayout CheckName = "repo layout"
-	CheckChartPaths CheckName = "chart paths"
-	CheckCluster    CheckName = "cluster access"
-	CheckTenant     CheckName = "tenant file"
+	CheckBinaries    CheckName = "binaries"
+	CheckCatalog     CheckName = "catalog"
+	CheckEnvironment CheckName = "environment"
+	CheckRepoLayout  CheckName = "repo layout"
+	CheckChartPaths  CheckName = "chart paths"
+	CheckTypes       CheckName = "catalog types"
+	CheckCluster     CheckName = "cluster access"
+	CheckTenant      CheckName = "tenant file"
 	// CheckMeld is Optional: apps diff --meld is the only thing it gates.
 	CheckMeld CheckName = "meld (optional)"
 )
@@ -66,9 +75,10 @@ type Check struct {
 }
 
 // Report is the outcome of a full doctor run: one Check per stage that ran.
-// A check after a hard prerequisite failure (an unloadable config makes
-// the repo-layout, cluster and tenant checks meaningless) is skipped
-// rather than reported as a confusing false failure.
+// A check after a hard prerequisite failure (an unloadable environment
+// makes the repo-layout, cluster and tenant checks meaningless; an
+// unloadable catalog, the chart-path and type checks) is skipped rather
+// than reported as a confusing false failure.
 type Report struct {
 	Checks []Check
 }
@@ -108,22 +118,38 @@ func Run(ctx context.Context, opts Options) Report {
 	report.Checks = append(report.Checks, binCheck)
 	report.Checks = append(report.Checks, checkMeld(ctx, opts))
 
-	cfg, cfgCheck := checkConfig(opts)
-	report.Checks = append(report.Checks, cfgCheck)
-	if cfg == nil {
-		// Nothing below this point can be meaningfully checked without a
-		// loaded config (no base/cluster/tenant to check against).
+	cat, catCheck := checkCatalog(opts)
+	report.Checks = append(report.Checks, catCheck)
+	env, envCheck := checkEnvironment(opts)
+	report.Checks = append(report.Checks, envCheck)
+	if env == nil {
+		// Nothing below this point can be meaningfully checked without
+		// base/cluster/tenant to check against.
 		return report
 	}
 
-	base, cluster, tenant := cfg.Effective(opts.BaseOverride, opts.ClusterOverride, opts.TenantOverride)
-
-	report.Checks = append(report.Checks, checkRepoLayout(base))
-	report.Checks = append(report.Checks, checkChartPaths(cfg, base))
+	report.Checks = append(report.Checks, narrate(opts.Log, checkRepoLayout(env.Base)))
+	if cat != nil {
+		report.Checks = append(report.Checks, narrate(opts.Log, checkChartPaths(cat, *env)))
+		report.Checks = append(report.Checks, narrate(opts.Log, checkTypes(cat, env.Base)))
+	}
 	report.Checks = append(report.Checks, checkCluster(ctx, opts))
-	report.Checks = append(report.Checks, checkTenantFile(base, cluster, tenant))
+	report.Checks = append(report.Checks, narrate(opts.Log, checkTenantFile(env.Base, env.Cluster, env.Tenant)))
 
 	return report
+}
+
+// narrate logs a check that doesn't narrate itself — its outcome and the
+// detail it resolved (the repo base, charts root, tenant file path, ...),
+// so a doctor run shows every location it checked, not only failures —
+// and returns it unchanged.
+func narrate(l *log.Logger, c Check) Check {
+	if c.OK {
+		l.Successf("%s: %s", c.Name, c.Detail)
+	} else {
+		l.Failuref("%s: %s", c.Name, c.Detail)
+	}
+	return c
 }
 
 func checkBinaries(ctx context.Context, opts Options) Check {
@@ -149,15 +175,27 @@ func checkMeld(ctx context.Context, opts Options) Check {
 	return Check{Name: CheckMeld, OK: true, Optional: true}
 }
 
-func checkConfig(opts Options) (*config.Config, Check) {
-	opts.Log.Actionf("loading config")
-	cfg, err := config.Load(opts.ConfigFlag)
+func checkCatalog(opts Options) (*config.Catalog, Check) {
+	opts.Log.Actionf("loading component catalog")
+	cat, err := config.Load(opts.ConfigFlag)
 	if err != nil {
 		opts.Log.Failuref("%v", err)
-		return nil, Check{Name: CheckConfig, OK: false, Detail: err.Error()}
+		return nil, Check{Name: CheckCatalog, OK: false, Detail: err.Error()}
 	}
-	opts.Log.Successf("config loaded (%d app(s))", len(cfg.Apps))
-	return cfg, Check{Name: CheckConfig, OK: true, Detail: fmt.Sprintf("%d app(s)", len(cfg.Apps))}
+	opts.Log.Successf("catalog loaded (%d type(s))", len(cat.Types))
+	return cat, Check{Name: CheckCatalog, OK: true, Detail: fmt.Sprintf("%d type(s)", len(cat.Types))}
+}
+
+func checkEnvironment(opts Options) (*config.Environment, Check) {
+	opts.Log.Actionf("loading environment")
+	env, err := config.LoadEnvironment(opts.EnvConfigFlag, opts.Overrides)
+	if err != nil {
+		opts.Log.Failuref("%v", err)
+		return nil, Check{Name: CheckEnvironment, OK: false, Detail: err.Error()}
+	}
+	detail := fmt.Sprintf("cluster %s, tenant %s", env.Cluster, env.Tenant)
+	opts.Log.Successf("environment loaded (%s)", detail)
+	return &env, Check{Name: CheckEnvironment, OK: true, Detail: detail}
 }
 
 func checkRepoLayout(base string) Check {
@@ -167,32 +205,54 @@ func checkRepoLayout(base string) Check {
 	return Check{Name: CheckRepoLayout, OK: true, Detail: base}
 }
 
-// checkChartPaths validates that every chart-mode app's on-disk chart
-// directory (App.ChartPath, resolved against ChartsBase when set, else
-// Base — see internal/appdiff.chartPath/internal/backup's own copy of the
-// same resolution) actually exists, so a misconfigured or missing chart
-// checkout is caught here instead of surfacing mid-run as a "could not
-// find <path>" error from the first chart-mode apps diff/backup/migrate.
-func checkChartPaths(cfg *config.Config, base string) Check {
-	chartsBase := cfg.ChartsBase
-	if chartsBase == "" {
-		chartsBase = base
-	}
+// checkChartPaths validates that every chart-mode type's on-disk chart
+// directory (Chart.Path, resolved against Environment.ChartsRoot — the
+// same resolution internal/appdiff.chartPath and internal/backup use)
+// actually exists, so a misconfigured or missing chart checkout is caught
+// here instead of surfacing mid-run as a "could not find <path>" error
+// from the first chart-mode apps diff/backup/migrate.
+func checkChartPaths(cat *config.Catalog, env config.Environment) Check {
+	chartsRoot := env.ChartsRoot()
 	var missing []string
-	for _, app := range cfg.Apps {
-		if app.ChartPath == "" {
+	for _, t := range cat.Types {
+		if t.ChartPath() == "" {
 			continue
 		}
-		path := filepath.Join(chartsBase, app.ChartPath)
+		path := filepath.Join(chartsRoot, t.ChartPath())
 		info, err := os.Stat(path)
 		if err != nil || !info.IsDir() {
-			missing = append(missing, fmt.Sprintf("%s (%s)", app.ID, path))
+			missing = append(missing, fmt.Sprintf("%s (%s)", t.Type, path))
 		}
 	}
 	if len(missing) > 0 {
 		return Check{Name: CheckChartPaths, OK: false, Detail: fmt.Sprintf("chart directory not found for: %s", strings.Join(missing, ", "))}
 	}
-	return Check{Name: CheckChartPaths, OK: true, Detail: chartsBase}
+	return Check{Name: CheckChartPaths, OK: true, Detail: chartsRoot}
+}
+
+// checkTypes validates each catalog type against what it refers to
+// outside the catalog file itself: its component key must be one
+// keos-use-cases's templates declare (else no tenant entry could ever
+// render it), and its prepare step, if any, must be one internal/prepare
+// knows — both otherwise only discovered mid-migration.
+func checkTypes(cat *config.Catalog, base string) Check {
+	templates, err := catalog.Load(filepath.Join(base, "keos-use-cases"))
+	if err != nil {
+		return Check{Name: CheckTypes, OK: false, Detail: err.Error()}
+	}
+	var problems []string
+	for _, t := range cat.Types {
+		if _, ok := templates.Schemas[t.Component]; !ok {
+			problems = append(problems, fmt.Sprintf("%s: component %q isn't declared by any keos-use-cases template", t.Type, t.Component))
+		}
+		if t.Prepare != "" && prepare.Find(t.Prepare) == nil {
+			problems = append(problems, fmt.Sprintf("%s: unknown prepare step %q", t.Type, t.Prepare))
+		}
+	}
+	if len(problems) > 0 {
+		return Check{Name: CheckTypes, OK: false, Detail: strings.Join(problems, "; ")}
+	}
+	return Check{Name: CheckTypes, OK: true, Detail: fmt.Sprintf("%d type(s)", len(cat.Types))}
 }
 
 func checkCluster(ctx context.Context, opts Options) Check {

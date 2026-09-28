@@ -7,146 +7,124 @@ import (
 	"testing"
 )
 
-const validYAML = `
-base: /stratio/gitops
-cluster: eosdev
-tenant: stratio
-apps:
-  - id: psql
-    name: Postgres psql
+const validCatalogYAML = `
+types:
+  - type: postgres
+    name: Postgres
+    component: postgres
     rset: apps/components/resourceset-apps-datastores.yaml
-    kustomization: apps-psql
-    object: psql
+    match:
+      kinds: [postgres.stratio.com/v1/PgCluster]
+      annotations:
+        matchLabels:
+          cct.stratio.com/application_service: Postgres
     exclude:
       - spec.bootstrap.pgBackup
-  - id: psql-gosec-agent
+  - type: postgres-gosec-agent
     name: Postgres gosec agent
+    component: postgres
     rset: apps/components/resourceset-apps-datastores.yaml
-    kustomization: apps-psql-gosec-agent
-    object: psql-gosec-agent
     anchor: config.agent
-    chartPath: charts/gosec-agent
-    renamed: psql-agent
+    entry: '{{ .Live.Name | trimSuffix "-agent" }}'
+    object: '{{ .Entry }}-gosec-agent'
+    chart:
+      path: charts/gosec-agent
+    match:
+      kinds: [apps/v1/Deployment]
+      annotations:
+        matchExpressions:
+          - key: cct.stratio.com/application_service
+            operator: In
+            values: [pg-gosec-agent]
 `
 
-func TestLoad_ValidConfig(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
-	if err := os.WriteFile(path, []byte(validYAML), 0o644); err != nil {
+func writeFile(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
 
-	cfg, err := Load(path)
+func TestLoad_ValidCatalog(t *testing.T) {
+	cat, err := Load(writeFile(t, "catalog.yaml", validCatalogYAML))
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.Base != "/stratio/gitops" || cfg.Cluster != "eosdev" || cfg.Tenant != "stratio" {
-		t.Errorf("unexpected top-level fields: %+v", cfg)
-	}
-	if len(cfg.Apps) != 2 {
-		t.Fatalf("len(Apps) = %d, want 2", len(cfg.Apps))
+	if len(cat.Types) != 2 {
+		t.Fatalf("len(Types) = %d, want 2", len(cat.Types))
 	}
 
-	gosec := cfg.Find("psql-gosec-agent")
+	gosec := cat.Find("postgres-gosec-agent")
 	if gosec == nil {
-		t.Fatal("Find(\"psql-gosec-agent\") = nil")
+		t.Fatal(`Find("postgres-gosec-agent") = nil`)
 	}
-	if gosec.Anchor != "config.agent" {
-		t.Errorf("Anchor = %q", gosec.Anchor)
+	if gosec.Anchor != "config.agent" || gosec.ChartPath() != "charts/gosec-agent" {
+		t.Errorf("unexpected type fields: %+v", gosec)
 	}
-	if gosec.ChartPath != "charts/gosec-agent" || gosec.Renamed != "psql-agent" {
-		t.Errorf("unexpected app fields: %+v", gosec)
+	if got := gosec.KustomizationTemplate(); got != DefaultKustomization {
+		t.Errorf("KustomizationTemplate() = %q, want the default %q", got, DefaultKustomization)
 	}
-}
-
-func TestLoad_ChartsBaseParsed(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
-	body := validYAML + "chartsBase: /stratio/charts/charts\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.ChartsBase != "/stratio/charts/charts" {
-		t.Errorf("ChartsBase = %q, want %q", cfg.ChartsBase, "/stratio/charts/charts")
+	if pg := cat.Find("postgres"); pg.EntryTemplate() != DefaultEntry || pg.ObjectTemplate() != DefaultObject {
+		t.Errorf("postgres templates = (%q, %q), want defaults", pg.EntryTemplate(), pg.ObjectTemplate())
 	}
 }
 
-func TestLoad_UnknownTopLevelKeyRejected(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
-	body := "base: /x\ncluster: c\ntenant: t\nnotAField: true\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+func TestLoad_UnknownKeyRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"top-level", validCatalogYAML + "bogus: true\n"},
+		{"type-level", strings.Replace(validCatalogYAML, "    name: Postgres\n", "    name: Postgres\n    renamed: psql\n", 1)},
 	}
-
-	if _, err := Load(path); err == nil {
-		t.Fatal("Load with an unknown top-level key: got nil error, want non-nil")
-	}
-}
-
-func TestLoad_UnknownAppKeyRejected(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
-	body := "base: /x\ncluster: c\ntenant: t\napps:\n  - id: a\n    name: A\n    rset: r\n    kustomization: k\n    object: o\n    namespace: dead-field\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := Load(path); err == nil {
-		t.Fatal("Load with an unknown app-level key (namespace): got nil error, want non-nil")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := Load(writeFile(t, "catalog.yaml", c.body)); err == nil {
+				t.Error("Load accepted an unknown key, want an error")
+			}
+		})
 	}
 }
 
-func TestLoad_MissingRequiredFieldsReported(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
-	body := "apps:\n  - id: a\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("Load with missing base/cluster/tenant and app fields: got nil error, want non-nil")
-	}
-	for _, want := range []string{"base is required", "cluster is required", "tenant is required", "name is required"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q missing expected substring %q", err, want)
-		}
+func TestLoad_LegacyConfigGetsActionableError(t *testing.T) {
+	legacy := "base: /stratio/gitops\ncluster: eosdev\ntenant: stratio\napps:\n  - id: psql\n"
+	_, err := Load(writeFile(t, "config.yaml", legacy))
+	if err == nil || !strings.Contains(err.Error(), "config init") {
+		t.Errorf("Load error = %v, want it to point at `config init`", err)
 	}
 }
 
-func TestLoad_DuplicateAppIDRejected(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flux-stratio.yaml")
+func TestLoad_ValidationProblemsReported(t *testing.T) {
 	body := `
-base: /x
-cluster: c
-tenant: t
-apps:
-  - id: a
+types:
+  - type: a
+    match:
+      kinds: [not-a-kind]
+      labels:
+        matchExpressions:
+          - key: k
+            operator: Maybe
+  - type: a
     name: A
-    rset: r
-    kustomization: k
-    object: o
-  - id: a
-    name: A2
-    rset: r2
-    kustomization: k2
-    object: o2
+    component: a
+    rset: r.yaml
+    entry: '{{ .Live.Name'
+    match:
+      kinds: [v1/ConfigMap]
 `
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+	_, err := Load(writeFile(t, "catalog.yaml", body))
+	if err == nil {
+		t.Fatal("Load returned nil error, want validation problems")
 	}
-
-	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "duplicate id") {
-		t.Errorf("Load error = %v, want it to mention duplicate id", err)
+	for _, want := range []string{
+		"a: name is required", "a: component is required", "a: rset is required",
+		`kind "not-a-kind"`, `unknown operator "Maybe"`, `duplicate type "a"`, "entry:",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q; got:\n%v", want, err)
+		}
 	}
 }
 
@@ -155,6 +133,42 @@ func TestLoad_MissingFileReportsPath(t *testing.T) {
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), path) {
 		t.Errorf("Load error = %v, want it to mention %q", err, path)
+	}
+}
+
+func TestParseKind(t *testing.T) {
+	cases := []struct {
+		in      string
+		group   string
+		version string
+		kind    string
+		wantErr bool
+	}{
+		{in: "apps/v1/Deployment", group: "apps", version: "v1", kind: "Deployment"},
+		{in: "v1/ConfigMap", version: "v1", kind: "ConfigMap"},
+		{in: "Deployment", wantErr: true},
+		{in: "apps//Deployment", wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			gvk, err := ParseKind(c.in)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("ParseKind(%q) err = %v, wantErr %v", c.in, err, c.wantErr)
+			}
+			if !c.wantErr && (gvk.Group != c.group || gvk.Version != c.version || gvk.Kind != c.kind) {
+				t.Errorf("ParseKind(%q) = %v", c.in, gvk)
+			}
+		})
+	}
+}
+
+func TestCatalog_KindsDeduplicated(t *testing.T) {
+	cat := Catalog{Types: []ComponentType{
+		{Match: Match{Kinds: []string{"apps/v1/Deployment", "v1/ConfigMap"}}},
+		{Match: Match{Kinds: []string{"apps/v1/Deployment"}}},
+	}}
+	if got := cat.Kinds(); len(got) != 2 || got[0].Kind != "Deployment" || got[1].Kind != "ConfigMap" {
+		t.Errorf("Kinds() = %v, want [Deployment ConfigMap]", got)
 	}
 }
 
@@ -171,8 +185,7 @@ func TestResolve_ExplicitFlagWins(t *testing.T) {
 }
 
 func TestResolve_EnvVarUsedWhenNoFlag(t *testing.T) {
-	dir := t.TempDir()
-	envPath := filepath.Join(dir, "env-config.yaml")
+	envPath := filepath.Join(t.TempDir(), "env-catalog.yaml")
 	t.Setenv(EnvConfigFile, envPath)
 
 	got, err := Resolve("")
@@ -188,8 +201,8 @@ func TestResolve_FallsBackToCwdFileWhenItExists(t *testing.T) {
 	t.Setenv(EnvConfigFile, "")
 	dir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(dir, "no-fluxcd-home-here"))
-	cwdConfig := filepath.Join(dir, "flux-stratio.yaml")
-	if err := os.WriteFile(cwdConfig, []byte("base: /x\n"), 0o644); err != nil {
+	cwdCatalog := filepath.Join(dir, "flux-stratio.yaml")
+	if err := os.WriteFile(cwdCatalog, []byte("types: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
@@ -198,25 +211,25 @@ func TestResolve_FallsBackToCwdFileWhenItExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != cwdConfig {
-		t.Errorf("Resolve = %q, want %q", got, cwdConfig)
+	if got != cwdCatalog {
+		t.Errorf("Resolve = %q, want %q", got, cwdCatalog)
 	}
 }
 
 func TestResolve_PrefersFluxcdHomeOverCwd(t *testing.T) {
 	t.Setenv(EnvConfigFile, "")
 	home := t.TempDir()
-	userConfig := filepath.Join(home, ".fluxcd", "flux-stratio", "config.yaml")
-	if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+	userCatalog := filepath.Join(home, ".fluxcd", "flux-stratio", CatalogFile)
+	if err := os.MkdirAll(filepath.Dir(userCatalog), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(userConfig, []byte("base: /x\n"), 0o644); err != nil {
+	if err := os.WriteFile(userCatalog, []byte("types: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
 
 	cwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cwd, "flux-stratio.yaml"), []byte("base: /y\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cwd, "flux-stratio.yaml"), []byte("types: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(cwd)
@@ -225,8 +238,8 @@ func TestResolve_PrefersFluxcdHomeOverCwd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != userConfig {
-		t.Errorf("Resolve = %q, want %q (should prefer ~/.fluxcd/flux-stratio/config.yaml over ./flux-stratio.yaml)", got, userConfig)
+	if got != userCatalog {
+		t.Errorf("Resolve = %q, want %q (should prefer ~/.fluxcd/flux-stratio/catalog.yaml over ./flux-stratio.yaml)", got, userCatalog)
 	}
 }
 
@@ -234,65 +247,66 @@ func TestResolve_NoCandidateExistsReturnsActionableError(t *testing.T) {
 	t.Setenv(EnvConfigFile, "")
 	dir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(dir, "no-fluxcd-home-here"))
-	t.Chdir(dir) // empty dir: no ./flux-stratio.yaml here
+	t.Chdir(dir)
 
 	_, err := Resolve("")
 	if err == nil {
 		t.Fatal("Resolve with no candidate file present: got nil error, want non-nil")
 	}
-	if !strings.Contains(err.Error(), "--config") || !strings.Contains(err.Error(), EnvConfigFile) {
-		t.Errorf("error %q should name --config and %s as remedies", err, EnvConfigFile)
+	if !strings.Contains(err.Error(), "config init") || !strings.Contains(err.Error(), EnvConfigFile) {
+		t.Errorf("error %q should name config init and %s as remedies", err, EnvConfigFile)
+	}
+}
+
+func TestResolve_LegacyConfigInHomeMentioned(t *testing.T) {
+	t.Setenv(EnvConfigFile, "")
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".fluxcd", "flux-stratio", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("apps: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+
+	_, err := Resolve("")
+	if err == nil || !strings.Contains(err.Error(), legacy) {
+		t.Errorf("Resolve error = %v, want it to mention the legacy %s", err, legacy)
 	}
 }
 
 func TestMarshal_UsesTwoSpaceIndent(t *testing.T) {
 	// gopkg.in/yaml.v3's default Marshal would indent "name:" 4 spaces
-	// deeper than the "- id:" it belongs under; this plugin's convention
-	// (internal/tenantfile.Doc.Bytes, and now every other generated YAML
-	// file) is 2, including `flux stratio config init`'s own output.
-	cfg := Config{
-		Base: "/stratio/gitops", Cluster: "eosdev", Tenant: "stratio",
-		Apps: []App{{ID: "psql", Name: "Postgres psql", Rset: "r.yaml", Kustomization: "apps-psql", Object: "psql"}},
-	}
-	out, err := Marshal(cfg)
+	// deeper than the "- type:" it belongs under; this plugin's convention
+	// (internal/tenantfile.Doc.Bytes, and every other generated YAML file)
+	// is 2, including `flux stratio config init`'s own output.
+	cat := Catalog{Types: []ComponentType{{Type: "postgres", Name: "Postgres"}}}
+	out, err := Marshal(cat)
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
 	}
 	s := string(out)
-	if !strings.Contains(s, "\n  - id: psql") || !strings.Contains(s, "\n    name: Postgres psql") {
-		t.Errorf("output missing 2-space-indented apps list; got:\n%s", s)
-	}
-	if strings.Contains(s, "\n    id: psql") || strings.Contains(s, "\n      name:") {
-		t.Errorf("output is 4-space indented, want 2; got:\n%s", s)
+	if !strings.Contains(s, "\n  - type: postgres") || !strings.Contains(s, "\n    name: Postgres") {
+		t.Errorf("output missing 2-space-indented types list; got:\n%s", s)
 	}
 }
 
-func TestApp_LiveName(t *testing.T) {
-	if got := (App{Object: "psql-gosec-agent"}).LiveName(); got != "psql-gosec-agent" {
-		t.Errorf("LiveName (no rename) = %q", got)
+func TestApp_LiveNameAndNamespace(t *testing.T) {
+	plain := App{Object: "psql-gosec-agent"}
+	if plain.LiveName() != "psql-gosec-agent" || plain.LiveNamespace() != "" {
+		t.Errorf("no live ref: LiveName/LiveNamespace = %q/%q", plain.LiveName(), plain.LiveNamespace())
 	}
-	if got := (App{Object: "psql-gosec-agent", Renamed: "psql-agent"}).LiveName(); got != "psql-agent" {
-		t.Errorf("LiveName (renamed) = %q, want %q", got, "psql-agent")
-	}
-}
-
-func TestFind_NoMatchReturnsNil(t *testing.T) {
-	cfg := Config{Apps: []App{{ID: "a"}}}
-	if got := cfg.Find("nope"); got != nil {
-		t.Errorf("Find(\"nope\") = %+v, want nil", got)
+	renamed := App{Object: "psql-gosec-agent", Live: []ObjectRef{{Namespace: "stratio-datastores", Name: "psql-agent"}}}
+	if renamed.LiveName() != "psql-agent" || renamed.LiveNamespace() != "stratio-datastores" {
+		t.Errorf("live ref: LiveName/LiveNamespace = %q/%q", renamed.LiveName(), renamed.LiveNamespace())
 	}
 }
 
-func TestConfig_Effective(t *testing.T) {
-	cfg := Config{Base: "cfg-base", Cluster: "cfg-cluster", Tenant: "cfg-tenant"}
-
-	base, cluster, tenant := cfg.Effective("", "", "")
-	if base != "cfg-base" || cluster != "cfg-cluster" || tenant != "cfg-tenant" {
-		t.Errorf("no overrides: got (%q, %q, %q), want config values", base, cluster, tenant)
-	}
-
-	base, cluster, tenant = cfg.Effective("flag-base", "", "flag-tenant")
-	if base != "flag-base" || cluster != "cfg-cluster" || tenant != "flag-tenant" {
-		t.Errorf("partial overrides: got (%q, %q, %q)", base, cluster, tenant)
+func TestCatalog_FindNoMatchReturnsNil(t *testing.T) {
+	cat := Catalog{Types: []ComponentType{{Type: "a"}}}
+	if got := cat.Find("nope"); got != nil {
+		t.Errorf(`Find("nope") = %+v, want nil`, got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/Stratio/flux-stratio/internal/config"
@@ -14,20 +15,24 @@ import (
 	"github.com/Stratio/flux-stratio/internal/log"
 )
 
-func TestDiscoveredApps_CatalogMatchRoutesToRealApp(t *testing.T) {
-	logger := log.New(&bytes.Buffer{}, false)
-	// psql-gosec-agent's live name is "psql-agent" (Renamed), the same
-	// convention liveName uses everywhere else.
-	catalogApp := config.App{
-		ID: "psql-gosec-agent", Name: "Postgres gosec agent",
-		Rset:          "apps/components/resourceset-apps-datastores.yaml",
-		Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent",
-		ChartPath: "charts/gosec-agent", Renamed: "psql-agent",
-	}
-	cfg := &config.Config{Apps: []config.App{catalogApp}}
+var deploymentGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
 
+// gosecAgentApp is the classified instance internal/components produces
+// for a legacy "psql-agent" Deployment migrating into psql-gosec-agent.
+func gosecAgentApp() config.App {
+	return config.App{
+		ID: "psql-gosec-agent", Name: "Postgres gosec agent psql-gosec-agent", Type: "postgres-gosec-agent",
+		Rset:          "apps/components/resourceset-apps-datastores.yaml",
+		Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent", Entry: "psql",
+		ChartPath: "charts/gosec-agent",
+		Live:      []config.ObjectRef{{GVK: deploymentGVK, Namespace: "stratio-datastores", Name: "psql-agent"}},
+	}
+}
+
+func TestDiscoveredApps_CatalogAppsKeptAndTheirLiveNamesCovered(t *testing.T) {
+	logger := log.New(&bytes.Buffer{}, false)
 	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(
-		obj("helm.toolkit.fluxcd.io/v2", "HelmRelease", "stratio-datastores", "psql-agent", nil),
+		obj("apps/v1", "Deployment", "stratio-datastores", "psql-agent", nil),
 		obj("apps/v1", "Deployment", "keos-core", "capsule", nil),
 	).Build()
 	idx, err := discovery.Scan(context.Background(), c, logger)
@@ -35,88 +40,67 @@ func TestDiscoveredApps_CatalogMatchRoutesToRealApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	apps := DiscoveredApps(cfg, idx)
-	var names []string
+	apps := DiscoveredApps([]config.App{gosecAgentApp()}, idx)
+	var ids []string
 	for _, a := range apps {
-		names = append(names, a.ID)
+		ids = append(ids, a.ID)
 	}
-	sort.Strings(names)
-	if want := []string{"capsule", "psql-gosec-agent"}; !equalStrings(names, want) {
-		t.Fatalf("IDs = %v, want %v", names, want)
+	sort.Strings(ids)
+	if want := []string{"capsule", "psql-gosec-agent"}; !equalStrings(ids, want) {
+		t.Fatalf("IDs = %v, want %v (psql-agent is covered by the catalog app, not captured twice)", ids, want)
 	}
 
 	for _, a := range apps {
 		switch a.ID {
 		case "psql-gosec-agent":
-			if a.ChartPath != "charts/gosec-agent" || a.Renamed != "psql-agent" {
-				t.Errorf("psql-gosec-agent resolved to a non-catalog App: %+v", a)
-			}
-			if !isCatalogApp(a) {
-				t.Errorf("isCatalogApp(psql-gosec-agent) = false, want true")
+			if !isCatalogApp(a) || a.ChartPath != "charts/gosec-agent" {
+				t.Errorf("psql-gosec-agent lost its catalog facts: %+v", a)
 			}
 		case "capsule":
-			if a.ChartPath != "" || isCatalogApp(a) {
+			if a.ChartPath != "" || isCatalogApp(a) || a.Object != "capsule" {
 				t.Errorf("capsule should be synthetic: %+v", a)
-			}
-			if a.Object != "capsule" {
-				t.Errorf("capsule Object = %q, want %q", a.Object, "capsule")
 			}
 		}
 	}
 }
 
-// TestDiscoveredApps_RenamedAppsNewNameAlsoLive_IDsDisambiguated covers a
-// mid-migration state: a Renamed catalog app's legacy live name AND its
-// new/Object name (which is conventionally also the catalog App's own
-// ID) are both live at once. Without disambiguation, the second identity
-// would silently reuse the first's App.ID and both would be captured
-// under the same backups/<id>/<timestamp>/ directory.
-func TestDiscoveredApps_RenamedAppsNewNameAlsoLive_IDsDisambiguated(t *testing.T) {
+// TestDiscoveredApps_SameNameUnrelatedObjectStillCapturedSeparately is the
+// regression test for the name-collision bug the catalog's selectors fix:
+// a "genai" PgDatabase isn't the genai chart app (anchored on genai-api),
+// so it gets its own synthetic App — and, sharing the catalog app's ID, a
+// disambiguated one — rather than being captured *as* the genai app.
+func TestDiscoveredApps_SameNameUnrelatedObjectStillCapturedSeparately(t *testing.T) {
 	logger := log.New(&bytes.Buffer{}, false)
-	catalogApp := config.App{
-		ID: "psql-gosec-agent", Name: "Postgres gosec agent",
-		Rset:          "apps/components/resourceset-apps-datastores.yaml",
-		Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent",
-		ChartPath: "charts/gosec-agent", Renamed: "psql-agent",
-	}
-	cfg := &config.Config{Apps: []config.App{catalogApp}}
-
 	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(
-		// The legacy (pre-migration) live object, matched via Renamed.
-		obj("helm.toolkit.fluxcd.io/v2", "HelmRelease", "stratio-datastores", "psql-agent", nil),
-		// The app's own catalog ID/Object also live at once, mid-migration.
-		obj("apps/v1", "Deployment", "stratio-datastores", "psql-gosec-agent", nil),
+		obj("apps/v1", "Deployment", "stratio-genai", "genai-api", nil),
+		obj("postgres.stratio.com/v1", "PgDatabase", "stratio-datastores", "genai", nil),
 	).Build()
-	idx, err := discovery.Scan(context.Background(), c, logger)
+	pgdb := schema.GroupVersionKind{Group: "postgres.stratio.com", Version: "v1", Kind: "PgDatabase"}
+	idx, err := discovery.Scan(context.Background(), c, logger, pgdb)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	apps := DiscoveredApps(cfg, idx)
-	if len(apps) != 2 {
-		t.Fatalf("len(apps) = %d, want 2 (both live identities captured separately)", len(apps))
+	genai := config.App{
+		ID: "genai", Type: "genai", Object: "genai", ChartPath: "charts/genai",
+		Live: []config.ObjectRef{{GVK: deploymentGVK, Namespace: "stratio-genai", Name: "genai-api"}},
 	}
+	apps := DiscoveredApps([]config.App{genai}, idx)
 
 	ids := map[string]config.App{}
 	for _, a := range apps {
 		ids[a.ID] = a
 	}
-	if len(ids) != 2 {
-		t.Fatalf("apps share a colliding ID: %+v", apps)
+	if len(apps) != 2 || len(ids) != 2 {
+		t.Fatalf("apps = %+v, want the catalog genai app plus one disambiguated synthetic", apps)
 	}
-	real, ok := ids["psql-gosec-agent"]
-	if !ok || !isCatalogApp(real) || real.ChartPath != "charts/gosec-agent" {
-		t.Errorf("psql-gosec-agent should still resolve to the real catalog App: %+v", ids)
-	}
-	synthetic, ok := ids["psql-gosec-agent-live"]
-	if !ok || isCatalogApp(synthetic) || synthetic.Object != "psql-gosec-agent" {
-		t.Errorf("the colliding synthetic entry should be disambiguated: %+v", ids)
+	if synthetic, ok := ids["genai-live"]; !ok || isCatalogApp(synthetic) || synthetic.Object != "genai" {
+		t.Errorf("the PgDatabase should be a separate, disambiguated synthetic app: %+v", ids)
 	}
 }
 
 func TestDiscoveredApps_Deduplicated(t *testing.T) {
 	logger := log.New(&bytes.Buffer{}, false)
-	cfg := &config.Config{}
 	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(
 		obj("helm.toolkit.fluxcd.io/v2", "HelmRelease", "ns", "shared", nil),
 		obj("apps/v1", "Deployment", "ns", "shared", nil),
@@ -126,9 +110,40 @@ func TestDiscoveredApps_Deduplicated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	apps := DiscoveredApps(cfg, idx)
+	apps := DiscoveredApps(nil, idx)
 	if len(apps) != 1 {
 		t.Fatalf("DiscoveredApps returned %d apps, want 1 (same name across kinds must not duplicate)", len(apps))
+	}
+}
+
+// TestRun_ClassifiedAppCapturesItsExactLiveObject: a catalog instance is
+// captured from the exact object it was classified from, never the
+// name-only cascade — whose manifest-mode order (CR first) would pick the
+// same-named "rocket" PgDatabase over the Deployment the instance
+// actually is.
+func TestRun_ClassifiedAppCapturesItsExactLiveObject(t *testing.T) {
+	logger := log.New(&bytes.Buffer{}, false)
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
+		deploymentWithEnv("rocket", "stratio-rocket", "INFO"),
+		obj("postgres.stratio.com/v1", "PgDatabase", "stratio-datastores", "rocket", nil),
+	).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := config.App{
+		ID: "rocket", Type: "rocket", Object: "rocket",
+		Live: []config.ObjectRef{{GVK: deploymentGVK, Namespace: "stratio-rocket", Name: "rocket"}},
+	}
+	result, err := Run(context.Background(), Options{
+		Base: fixtureBase(t), App: app, Index: idx, Client: c, Dir: t.TempDir(), Clock: fixedClock, Log: logger,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !equalStrings(result.Files, []string{"deployment.yaml", "env-vars.env"}) {
+		t.Errorf("Files = %v, want the Deployment's capture, not the PgDatabase's cr.yaml", result.Files)
 	}
 }
 
@@ -142,38 +157,4 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-func TestRun_SyntheticApp_NoMisleadingMismatchWarning(t *testing.T) {
-	var logbuf bytes.Buffer
-	logger := log.New(&logbuf, false)
-	live := deploymentWithEnv("capsule", "keos-core", "INFO")
-
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(live).Build()
-	idx, err := discovery.Scan(context.Background(), c, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The exact shape DiscoveredApps synthesizes for a non-catalog object.
-	synthetic := config.App{ID: "capsule", Name: "capsule", Object: "capsule"}
-
-	opts := Options{
-		Base:  fixtureBase(t),
-		App:   synthetic,
-		Index: idx,
-		Dir:   t.TempDir(),
-		Clock: fixedClock,
-		Log:   logger,
-	}
-	result, err := Run(context.Background(), opts)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if len(result.Files) != 2 {
-		t.Fatalf("Files = %v, want deployment.yaml+env-vars.env", result.Files)
-	}
-	if bytes.Contains(logbuf.Bytes(), []byte("is configured as manifest-mode")) {
-		t.Errorf("synthetic app should never trigger the catalog mismatch warning, got: %s", logbuf.String())
-	}
 }

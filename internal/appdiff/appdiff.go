@@ -16,7 +16,10 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
 
+	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/Stratio/flux-stratio/internal/config"
@@ -50,9 +53,25 @@ type Options struct {
 
 // Result is the outcome of diffing one app.
 type Result struct {
-	// Patch is the patch flux-stratio would splice into the tenant YAML,
-	// or nil if there is no difference.
+	// Patch is the whole patch the app needs — computed against the
+	// rendered base *without* the tenant file's existing patch for this
+	// object's kind (see internal/render.Result.ReplacedPatches) — or nil
+	// if live and base agree.
 	Patch *diff.PatchDoc
+	// UpToDate is true when the tenant file already carries exactly Patch
+	// as this object's kind's only patch: migrating would change nothing.
+	UpToDate bool
+	// ObsoletePatches counts existing patches for this object's kind in
+	// the tenant file when Patch is nil — live already matches the base,
+	// so whatever they set would move live away from its current state.
+	ObsoletePatches int
+	// FluxManagedBy is set (to "Kustomization <name>" or "HelmRelease
+	// <name>") when the live object compared against is already managed by
+	// Flux: its state then reflects the GitOps render, not the legacy
+	// installation, and a patch computed from it can miss legacy values
+	// Flux already reset — compare against a backup (Baseline) instead.
+	// Always empty in Baseline mode.
+	FluxManagedBy string
 	// Before and After are a human-readable, textual view of the rendered
 	// desired state and the live legacy state — a manifest-mode spec's
 	// YAML in manifest mode, sorted "KEY=VALUE" env var lines in chart
@@ -73,10 +92,63 @@ func Diff(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
+	var result *Result
 	if opts.App.ChartPath == "" {
-		return manifestDiff(ctx, opts, rendered)
+		result, err = manifestDiff(ctx, opts, rendered)
+	} else {
+		result, err = chartDiff(ctx, opts, rendered)
 	}
-	return chartDiff(ctx, opts, rendered)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case result.Patch == nil:
+		result.ObsoletePatches = len(rendered.ReplacedPatches)
+	case len(rendered.ReplacedPatches) == 1:
+		result.UpToDate, err = samePatch(*result.Patch, rendered.ReplacedPatches[0])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// Labels Flux's controllers stamp on every object they apply.
+const (
+	kustomizeNameLabel = "kustomize.toolkit.fluxcd.io/name"
+	helmNameLabel      = "helm.toolkit.fluxcd.io/name"
+)
+
+// fluxManagedBy reports which Flux object, if any, manages obj.
+func fluxManagedBy(obj *unstructured.Unstructured) string {
+	labels := obj.GetLabels()
+	if name := labels[kustomizeNameLabel]; name != "" {
+		return "Kustomization " + name
+	}
+	if name := labels[helmNameLabel]; name != "" {
+		return "HelmRelease " + name
+	}
+	return ""
+}
+
+// samePatch reports whether existing (a tenant-file patch body) is
+// semantically the patch computed as doc — compared as decoded YAML, so
+// key order, indentation or quoting never make an unchanged patch look
+// changed.
+func samePatch(doc diff.PatchDoc, existing string) (bool, error) {
+	computed, err := yaml.Marshal(doc.Patch)
+	if err != nil {
+		return false, fmt.Errorf("marshaling computed patch: %w", err)
+	}
+	var a, b any
+	if err := yaml.Unmarshal(computed, &a); err != nil {
+		return false, fmt.Errorf("decoding computed patch: %w", err)
+	}
+	if err := yaml.Unmarshal([]byte(existing), &b); err != nil {
+		// An existing patch that doesn't even parse is certainly not the same.
+		return false, nil //nolint:nilerr // unparseable just means "different"
+	}
+	return reflect.DeepEqual(a, b), nil
 }
 
 // renderApp is the one render.Render call site every entrypoint in this
