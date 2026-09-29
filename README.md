@@ -51,8 +51,8 @@ It never runs `git` itself: it edits the tenant file in place; committing and pu
 ```shell
 # Write ~/.fluxcd/flux-stratio/catalog.yaml (the known Stratio component types, with the
 # selectors that recognize their live legacy objects) and environment.yaml (--base/--cluster/
-# --tenant). See docs/config-reference.md. Add --charts /path/to/charts too if chart-mode
-# components' Helm chart sources aren't checked out as a sibling of --base's keos-* repos.
+# --tenant). See docs/config-reference.md. --base is the parent of the keos-* repos and the
+# charts repo; add --repo <name>=<path> for any checked out elsewhere (e.g. --repo charts=<worktree>).
 flux stratio config init --base /path/to/gitops --cluster eosdev --tenant stratio
 
 # Confirm binaries, catalog, environment, repo layout, cluster access and the tenant file are all in order
@@ -95,8 +95,9 @@ lives), not a subdirectory of it — keeping both files there means `apps backup
 permanently outside any source checkout, so nothing about building or cleaning this repo can ever
 touch any of them.
 
-`--base`, `--cluster` and `--tenant` override the environment file's fields for a single
-invocation; with all three given, no environment file is needed at all.
+`--base`, `--repo <name>=<path>`, `--cluster` and `--tenant` override the environment file's fields
+for a single invocation; with the repositories, cluster and tenant all given, no environment file is
+needed at all.
 
 The catalog holds no environment- or instance-specific value: which live object is which
 component instance, under what name and namespace, and which tenant-file entry it migrates into,
@@ -144,16 +145,16 @@ piping or redirecting a command's output never captures progress noise along wit
 |---|---|---|
 | `flux stratio version` | | Print the flux-stratio version |
 | `flux stratio doctor` | | Check binaries, catalog, environment, repo layout, chart paths, catalog types, cluster access and the tenant file are all in order |
-| `flux stratio config init` | `--dir`, `--force`, `--charts` | Write `catalog.yaml` (seeded with the known Stratio component types) and `environment.yaml` |
+| `flux stratio config init` | `--dir`, `--force` | Write `catalog.yaml` (seeded with the known Stratio component types) and `environment.yaml` |
 | `flux stratio tenant import` | `--size`, `--output`, `--force` | Scan a live, not-yet-migrated cluster and render a tenant `ResourceSetInputProvider` skeleton |
 | `flux stratio apps diff <name>` | `--baseline`, `--drift`, `--view`, `--as` | Pre-migration: compare desired state against live (or a backup, with `--baseline`). Post-migration: `--drift` compares live right now directly against a backup, no GitOps rendering. `--view unified\|patch\|meld` picks how it's shown |
 | `flux stratio apps backup <name> \| --catalog \| --all` | `--dir`, `--as` | Capture an app's live legacy state to disk (`--catalog`: every live object a catalog type selects; `--all`: that plus every other live object the cluster scan finds, unfiltered) |
 | `flux stratio apps migrate <name> \| --all` | `--dry-run`, `-y`/`--yes`, `--continue-on-error`, `--as`, `--baseline`, `--dir` | Diff an app (running its declared prepare step first, if any) and splice the resulting patch into the tenant file. `--baseline` computes the patch from a backup instead of live — for a component Flux already reconciled unpatched |
 
-Persistent flags on every command: `--config`, `--env-config`, `--base`, `--cluster`, `--tenant`, `--kubeconfig`,
+Persistent flags on every command: `--config`, `--env-config`, `--base`, `--repo`, `--cluster`, `--tenant`, `--kubeconfig`,
 `--kube-context`, `-v`/`--verbose`.
 
-`config init` requires `--base`, `--cluster` and `--tenant` on the command line, since by
+`config init` requires `--base` (or a `--repo` for every repository), `--cluster` and `--tenant` on the command line, since by
 definition there's no environment file yet to read them from. It writes a 19-type component
 catalog covering the application set the legacy Python migration client shipped, with every
 selector derived from real captured legacy objects — and refuses to overwrite either file without

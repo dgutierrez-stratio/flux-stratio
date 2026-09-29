@@ -3,8 +3,8 @@ All notable changes to this project will be documented in this file.
 ## 0.1.0-SNAPSHOT
 
 * **Config split into a typed component catalog and an environment file.** `config init` now
-  writes `~/.fluxcd/flux-stratio/catalog.yaml` and `environment.yaml` (`--dir`, `--force`,
-  `--charts`) instead of one `config.yaml` whose flat `apps:` list mixed static coordinates with
+  writes `~/.fluxcd/flux-stratio/catalog.yaml` and `environment.yaml` (`--dir`, `--force`)
+  instead of one `config.yaml` whose flat `apps:` list mixed static coordinates with
   per-environment instance values:
   * `catalog.yaml` holds 19 **component types** — static facts only (`component`, `rset`, `chart`,
     `exclude`, `prepare`), `entry`/`object`/`kustomization` name templates, and `match` selectors
@@ -12,8 +12,8 @@ All notable changes to this project will be documented in this file.
     seeded selector comes from the CCT `application_service`/`application_model` annotations on
     real captured legacy objects. `renamed`/`previousNamespace` are gone: the live object's own
     name and namespace are used.
-  * `environment.yaml` holds `base`/`chartsBase`/`cluster`/`tenant` (`--env-config`,
-    `$FLUX_STRATIO_ENV`); `--base/--cluster/--tenant` still override it.
+  * `environment.yaml` holds `base`/`repos`/`cluster`/`tenant` (`--env-config`,
+    `$FLUX_STRATIO_ENV`); `--base/--repo/--cluster/--tenant` still override it.
   * New `internal/components` classifies live objects against the catalog and resolves each
     instance against the tenant file, asking — only when it can't infer it — which type or which
     declared tenant entry a live object is. `--as <type>[/<entry>]` answers up front; `apps migrate
@@ -179,16 +179,19 @@ All notable changes to this project will be documented in this file.
 * A chart-mode capture (`apps backup`, `apps diff --drift`) that finds none of the chart's workloads
   live now says why: the "declares no live workloads" warning names the workloads it looked for, the
   chart directory it rendered, and the chart version the release runs — the usual cause is a
-  `chartsBase` checkout that isn't that version and names its workloads differently. `--drift`
+  charts repository checkout that isn't that version and names its workloads differently. `--drift`
   against a workload (`env-vars.env`) backup then points at that instead of reporting a shape
   change, and every shape-mismatch error lists the files the backup actually has.
-* `config init --charts <path>` seeds an optional top-level `chartsBase` config field: when set, it
-  overrides `base` for resolving a chart-mode app's `chartPath` into an on-disk Helm chart
-  directory. Fixes chart-mode apps (`apps diff`/`--baseline`/`--drift`, `apps backup`,
-  `apps migrate`) failing with "could not find `<base>/<chartPath>`" whenever the chart-source repo
-  isn't checked out as a sibling of `base`'s `keos-apps`/`keos-use-cases`/`keos-fleet`/
-  `keos-system-services`. Leaving `chartsBase` unset keeps `chartPath` resolving relative to `base`
-  exactly as before.
+* **Every repository's checkout is configurable on its own.** `environment.yaml` gains an optional
+  `repos:` map (and a repeatable `--repo <name>=<path>` flag, on every command and on `config
+  init`) pointing any of `keos-apps`, `keos-use-cases`, `keos-fleet`, `keos-system-services` and
+  `charts` straight at its checkout — a git worktree, or a clone under another name — while the
+  rest stay at `<base>/<name>`; `base` is optional when `repos` lists all five. Catalog
+  `chart.path` is now relative to the charts repository's root (`litellm`, not `charts/litellm`),
+  so it describes the chart rather than the directory layout. **Breaking:** `chartsBase` and
+  `config init --charts` are gone — an environment file still setting `chartsBase` fails saying to
+  set `repos.charts: <chartsBase>/charts`, and a catalog `chart.path` starting with `charts/` fails
+  pointing at `config init --force`.
 * Code review follow-ups:
   * Fix: `apps backup --all`, mid-migration, could assign the same `App.ID` to two different live
     objects (a Renamed app's legacy name and its new, already-live GitOps name both present at
@@ -199,8 +202,8 @@ All notable changes to this project will be documented in this file.
     for a Renamed, multi-workload chart whose sibling names derive from `.Release.Name`, this could
     miss or mis-resolve sibling workloads during backup. Both now use `App.Object`, consistently.
   * `flux stratio doctor` now validates that every chart-mode app's on-disk chart directory
-    (`chartsBase`-or-`base` + `chartPath`) actually exists, instead of only the four `base` sibling
-    repos — a misconfigured `chartsBase`/`chartPath` is now caught up front, not mid-run.
+    (the charts repository + `chartPath`) actually exists, instead of only the four GitOps
+    repos — a misconfigured charts checkout or `chartPath` is now caught up front, not mid-run.
   * `apps diff` gained a `--dir` flag so `--baseline latest`/`--drift latest` can resolve a backup
     captured with a matching `apps backup --dir <custom>`; previously `latest` could only ever look
     under the default backups location.

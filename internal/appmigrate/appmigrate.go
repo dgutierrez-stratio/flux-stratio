@@ -24,14 +24,14 @@ import (
 
 // Options configures migrating one app.
 type Options struct {
-	Base, Cluster, Tenant string
-	// ChartsBase, if set, overrides Base for resolving a chart-mode app's
-	// on-disk chart directory (see config.Config.ChartsBase).
-	ChartsBase string
-	App        config.App
-	Catalog    *catalog.Catalog
-	Runner     runner.Runner
-	Client     client.Client
+	// Repos is where the GitOps repositories and the charts repository
+	// are checked out.
+	Repos           config.RepoPaths
+	Cluster, Tenant string
+	App             config.App
+	Catalog         *catalog.Catalog
+	Runner          runner.Runner
+	Client          client.Client
 	// Baseline, if set, is a backup directory to compute the patch against
 	// instead of the live cluster (see appdiff.Options.Baseline) — for when
 	// live state no longer reflects the legacy installation, e.g. after
@@ -81,7 +81,7 @@ func Apply(ctx context.Context, opts Options) (*Result, error) {
 }
 
 func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, error) {
-	tenantPath := tenantfile.Path(opts.Base, opts.Cluster, opts.Tenant)
+	tenantPath := tenantfile.Path(opts.Repos.Fleet, opts.Cluster, opts.Tenant)
 	doc, err := tenantfile.Load(tenantPath)
 	if err != nil {
 		return nil, nil, "", err
@@ -92,7 +92,7 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	}
 
 	diffResult, err := appdiff.Diff(ctx, appdiff.Options{
-		Base: opts.Base, Cluster: opts.Cluster, Tenant: opts.Tenant, ChartsBase: opts.ChartsBase,
+		Repos: opts.Repos, Cluster: opts.Cluster, Tenant: opts.Tenant,
 		App: opts.App, Runner: opts.Runner, Client: opts.Client, Baseline: opts.Baseline, Log: opts.Log,
 	})
 	if err != nil {

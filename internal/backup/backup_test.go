@@ -83,7 +83,7 @@ func TestRun_ManifestMode_WritesCRYAML(t *testing.T) {
 	})
 
 	opts := Options{
-		Base:  base,
+		Repos: config.ReposUnder(base),
 		App:   config.App{ID: "psql", Object: "psql"},
 		Index: scan(t, logger, live),
 		Dir:   backupsDir,
@@ -118,7 +118,7 @@ func TestRun_ManifestMode_LiveObjectNotFoundErrors(t *testing.T) {
 	logger := log.New(io.Discard, false)
 
 	opts := Options{
-		Base:  fixtureBase(t),
+		Repos: config.ReposUnder(fixtureBase(t)),
 		App:   config.App{ID: "psql", Object: "psql"},
 		Index: scan(t, logger),
 		Dir:   backupsDir,
@@ -147,7 +147,7 @@ func TestRun_ManifestMode_NoTenantFileDeclarationNeeded(t *testing.T) {
 	live := obj("hdfs.stratio.com/v1", "HDFSCluster", "stratio-datastores", "hdfs1", nil)
 
 	opts := Options{
-		Base:  fixtureBase(t),
+		Repos: config.ReposUnder(fixtureBase(t)),
 		App:   config.App{ID: "hdfs1", Object: "hdfs1"},
 		Index: scan(t, logger, live),
 		Dir:   backupsDir,
@@ -177,7 +177,7 @@ func TestRun_ManifestMode_FoundOnlyAsWorkloadWarnsAndCaptures(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: fixtureBase(t),
+		Repos: config.ReposUnder(fixtureBase(t)),
 		App: config.App{
 			ID: "psql", Type: "postgres", Rset: "apps/components/resourceset-apps-datastores.yaml",
 			Kustomization: "apps-psql", Object: "psql",
@@ -207,7 +207,7 @@ func TestRun_KustomizationOnly_SkipsWithoutError(t *testing.T) {
 	live := obj("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "psql", nil)
 
 	opts := Options{
-		Base:  fixtureBase(t),
+		Repos: config.ReposUnder(fixtureBase(t)),
 		App:   config.App{ID: "psql", Object: "psql"},
 		Index: scan(t, logger, live),
 		Dir:   backupsDir,
@@ -239,7 +239,7 @@ func TestRun_UsesRealClockByDefault(t *testing.T) {
 	live := obj("postgres.stratio.com/v1", "PgCluster", "stratio-datastores", "psql", nil)
 
 	opts := Options{
-		Base:  fixtureBase(t),
+		Repos: config.ReposUnder(fixtureBase(t)),
 		App:   config.App{ID: "psql", Object: "psql"},
 		Index: scan(t, logger, live),
 		Dir:   backupsDir,

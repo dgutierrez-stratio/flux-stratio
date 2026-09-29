@@ -62,7 +62,7 @@ func (s *session) resolveOptions(cmd *cobra.Command, withTenant, interactive boo
 		opts.Prompter = components.NewTerminal(cmd.InOrStdin(), cmd.ErrOrStderr())
 	}
 	if withTenant {
-		doc, err := tenantfile.Load(tenantfile.Path(s.env.Base, s.env.Cluster, s.env.Tenant))
+		doc, err := tenantfile.Load(tenantfile.Path(s.env.Repo(config.RepoFleet), s.env.Cluster, s.env.Tenant))
 		if err != nil {
 			return components.Options{}, err
 		}

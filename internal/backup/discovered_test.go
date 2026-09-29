@@ -24,7 +24,7 @@ func gosecAgentApp() config.App {
 		ID: "psql-gosec-agent", Name: "Postgres gosec agent psql-gosec-agent", Type: "postgres-gosec-agent",
 		Rset:          "apps/components/resourceset-apps-datastores.yaml",
 		Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent", Entry: "psql",
-		ChartPath: "charts/gosec-agent",
+		ChartPath: "gosec-agent",
 		Live:      []config.ObjectRef{{GVK: deploymentGVK, Namespace: "stratio-datastores", Name: "psql-agent"}},
 	}
 }
@@ -53,7 +53,7 @@ func TestDiscoveredApps_CatalogAppsKeptAndTheirLiveNamesCovered(t *testing.T) {
 	for _, a := range apps {
 		switch a.ID {
 		case "psql-gosec-agent":
-			if !isCatalogApp(a) || a.ChartPath != "charts/gosec-agent" {
+			if !isCatalogApp(a) || a.ChartPath != "gosec-agent" {
 				t.Errorf("psql-gosec-agent lost its catalog facts: %+v", a)
 			}
 		case "capsule":
@@ -82,7 +82,7 @@ func TestDiscoveredApps_SameNameUnrelatedObjectStillCapturedSeparately(t *testin
 	}
 
 	genai := config.App{
-		ID: "genai", Type: "genai", Object: "genai", ChartPath: "charts/genai",
+		ID: "genai", Type: "genai", Object: "genai", ChartPath: "genai",
 		Live: []config.ObjectRef{{GVK: deploymentGVK, Namespace: "stratio-genai", Name: "genai-api"}},
 	}
 	apps := DiscoveredApps([]config.App{genai}, idx)
@@ -137,7 +137,7 @@ func TestRun_ClassifiedAppCapturesItsExactLiveObject(t *testing.T) {
 		Live: []config.ObjectRef{{GVK: deploymentGVK, Namespace: "stratio-rocket", Name: "rocket"}},
 	}
 	result, err := Run(context.Background(), Options{
-		Base: fixtureBase(t), App: app, Index: idx, Client: c, Dir: t.TempDir(), Clock: fixedClock, Log: logger,
+		Repos: config.ReposUnder(fixtureBase(t)), App: app, Index: idx, Client: c, Dir: t.TempDir(), Clock: fixedClock, Log: logger,
 	})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)

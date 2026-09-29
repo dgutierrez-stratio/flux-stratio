@@ -28,7 +28,7 @@ types:
     entry: '{{ .Live.Name | trimSuffix "-agent" }}'
     object: '{{ .Entry }}-gosec-agent'
     chart:
-      path: charts/gosec-agent
+      path: gosec-agent
     match:
       kinds: [apps/v1/Deployment]
       annotations:
@@ -60,7 +60,7 @@ func TestLoad_ValidCatalog(t *testing.T) {
 	if gosec == nil {
 		t.Fatal(`Find("postgres-gosec-agent") = nil`)
 	}
-	if gosec.Anchor != "config.agent" || gosec.ChartPath() != "charts/gosec-agent" {
+	if gosec.Anchor != "config.agent" || gosec.ChartPath() != "gosec-agent" {
 		t.Errorf("unexpected type fields: %+v", gosec)
 	}
 	if got := gosec.KustomizationTemplate(); got != DefaultKustomization {
@@ -124,6 +124,22 @@ types:
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q; got:\n%v", want, err)
+		}
+	}
+}
+
+// Chart paths used to start with the charts repo's own directory name
+// (charts/gosec-agent); they're relative to the repo root now, and an old
+// catalog fails saying so.
+func TestLoad_ChartPathWithChartsPrefixRejected(t *testing.T) {
+	body := strings.Replace(validCatalogYAML, "path: gosec-agent", "path: charts/gosec-agent", 1)
+	_, err := Load(writeFile(t, "catalog.yaml", body))
+	if err == nil {
+		t.Fatal("Load accepted a charts/-prefixed chart.path, want an error")
+	}
+	for _, want := range []string{`"gosec-agent"`, "config init --force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
 		}
 	}
 }

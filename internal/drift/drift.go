@@ -36,13 +36,11 @@ import (
 // Options configures a drift check for one app.
 type Options struct {
 	App config.App
-	// Base and ChartsBase are forwarded to backup.Options — see its doc
-	// comments.
-	Base       string
-	ChartsBase string
-	Runner     runner.Runner
-	Client     client.Client
-	Index      *discovery.Index
+	// Repos is forwarded to backup.Options — see its doc comment.
+	Repos  config.RepoPaths
+	Runner runner.Runner
+	Client client.Client
+	Index  *discovery.Index
 	// Against is the backup directory to compare live state against —
 	// resolve it first with backup.ResolveBaseline.
 	Against string
@@ -67,7 +65,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	live, err := backup.Run(ctx, backup.Options{
-		Base: opts.Base, ChartsBase: opts.ChartsBase, App: opts.App, Runner: opts.Runner, Client: opts.Client,
+		Repos: opts.Repos, App: opts.App, Runner: opts.Runner, Client: opts.Client,
 		Index: opts.Index, Dir: tempDir, Log: opts.Log,
 	})
 	if err != nil {
@@ -92,8 +90,9 @@ func compare(backupDir, liveDir string, liveFiles []string) (*Result, error) {
 		if (signal == "values.yaml" || signal == "helmrelease.yaml") && has(backupFiles, "env-vars.env") {
 			return nil, fmt.Errorf(
 				"live state was captured as %v because none of the live HelmRelease's workloads were found (see the "+
-					"warning above), but the backup at %s was captured as %v — make sure chartsBase holds the chart "+
-					"version the release runs, so its workloads are found and captured as env vars too",
+					"warning above), but the backup at %s was captured as %v — make sure the charts repository "+
+					"checkout (repos.charts) holds the chart version the release runs, so its workloads are found "+
+					"and captured as env vars too",
 				liveFiles, backupDir, backupFiles,
 			)
 		}

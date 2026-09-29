@@ -48,13 +48,10 @@ const timestampFormat = "2006-01-02T15-04-05Z"
 
 // Options configures backing up one app.
 type Options struct {
-	// Base is the parent directory holding keos-apps/keos-use-cases/etc.
-	// — only used to resolve a chart-mode app's on-disk chart path.
-	Base string
-	// ChartsBase, if set, overrides Base for resolving a chart-mode app's
-	// on-disk chart directory (see config.Environment.ChartsBase).
-	ChartsBase string
-	App        config.App
+	// Repos is where the repositories are checked out — only its Charts
+	// is used, to resolve a chart-mode app's on-disk chart path.
+	Repos config.RepoPaths
+	App   config.App
 	// Runner runs `helm template`/`helm dependency build` for a
 	// chart-mode app; unused in manifest mode.
 	Runner runner.Runner
@@ -273,11 +270,7 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 		return nil, err
 	}
 
-	chartsBase := opts.Base
-	if opts.ChartsBase != "" {
-		chartsBase = opts.ChartsBase
-	}
-	chartDir := filepath.Join(chartsBase, opts.App.ChartPath)
+	chartDir := filepath.Join(opts.Repos.Charts, opts.App.ChartPath)
 	// opts.App.Object, not hr.GetName() (the live, maybe-renamed name) — the
 	// same release name internal/appdiff's own renderChart uses, so a
 	// chart whose rendered resource names derive from .Release.Name
@@ -312,7 +305,7 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 // warnNoLiveWorkloads explains why a chart-mode capture degrades to the
 // HelmRelease and its values: either the chart renders no workload at all,
 // or none of the ones it renders exist live — most often because the chart
-// under chartsBase isn't the version the release runs, and names its
+// in the charts repository checkout isn't the version the release runs, and names its
 // workloads differently.
 func warnNoLiveWorkloads(opts Options, hr *unstructured.Unstructured, chartDir string, rendered []string) {
 	const consequence = "capturing the HelmRelease and its values instead, so this capture has no env-vars.env " +

@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -63,9 +62,9 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 		return err
 	}
 	logger := s.log
-	base, cluster, tenant := s.env.Base, s.env.Cluster, s.env.Tenant
+	repos, cluster, tenant := s.env.RepoPaths(), s.env.Cluster, s.env.Tenant
 
-	cat, err := catalog.Load(filepath.Join(base, "keos-use-cases"))
+	cat, err := catalog.Load(repos.UseCases)
 	if err != nil {
 		return err
 	}
@@ -100,7 +99,7 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 
 	var failed []string
 	for _, app := range apps {
-		err := migrateOne(cmd, app, base, cluster, tenant, s.env.ChartsBase, cat, c, logger, dryRun, yes, baseline, dirFlag)
+		err := migrateOne(cmd, app, repos, cluster, tenant, cat, c, logger, dryRun, yes, baseline, dirFlag)
 		if err == nil {
 			continue
 		}
@@ -127,7 +126,7 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 	return nil
 }
 
-func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chartsBase string, cat *catalog.Catalog, c client.Client, logger *log.Logger, dryRun, yes bool, baseline, dirFlag string) error {
+func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, cluster, tenant string, cat *catalog.Catalog, c client.Client, logger *log.Logger, dryRun, yes bool, baseline, dirFlag string) error {
 	resolvedBaseline := ""
 	if baseline != "" {
 		var err error
@@ -143,7 +142,7 @@ func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chart
 	}
 
 	opts := appmigrate.Options{
-		Base: base, Cluster: cluster, Tenant: tenant, ChartsBase: chartsBase, App: app, Catalog: cat,
+		Repos: repos, Cluster: cluster, Tenant: tenant, App: app, Catalog: cat,
 		Runner: runner.Exec{}, Client: c, Baseline: resolvedBaseline, Log: logger,
 	}
 

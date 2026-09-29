@@ -76,7 +76,7 @@ func TestResolve_GosecAgentByLegacyOrGitOpsName(t *testing.T) {
 			if app.Entry != "psql" || app.Object != "psql-gosec-agent" || app.Kustomization != "apps-psql-gosec-agent" {
 				t.Errorf("unexpected names: entry=%q object=%q kustomization=%q", app.Entry, app.Object, app.Kustomization)
 			}
-			if app.LiveName() != "psql-agent" || app.ChartPath != "charts/gosec-agent" {
+			if app.LiveName() != "psql-agent" || app.ChartPath != "gosec-agent" {
 				t.Errorf("LiveName=%q ChartPath=%q", app.LiveName(), app.ChartPath)
 			}
 		})
@@ -291,7 +291,7 @@ func TestResolve_LitellmKeepsItsLegacyName(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if app.Type != "litellm" || app.ID != "genai-litellm" || app.Entry != "genai-litellm" || app.Object != "genai-litellm" ||
-		app.Kustomization != "apps-genai-litellm" || app.ChartPath != "charts/litellm" || app.LiveNamespace() != "stratio-genai" {
+		app.Kustomization != "apps-genai-litellm" || app.ChartPath != "litellm" || app.LiveNamespace() != "stratio-genai" {
 		t.Errorf("Resolve(genai-litellm) = %+v", app)
 	}
 }
@@ -338,7 +338,7 @@ func TestResolve_MigratedChartInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
-	if app.Type != "virtualizer" || app.Object != "virtualizer" || app.ChartPath != "charts/virtualizer" || app.LiveNamespace() != "stratio-apps" {
+	if app.Type != "virtualizer" || app.Object != "virtualizer" || app.ChartPath != "virtualizer" || app.LiveNamespace() != "stratio-apps" {
 		t.Errorf("unexpected app: %+v", app)
 	}
 }

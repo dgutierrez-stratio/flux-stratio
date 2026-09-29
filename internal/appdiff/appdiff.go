@@ -31,12 +31,12 @@ import (
 
 // Options configures diffing one app.
 type Options struct {
-	Base, Cluster, Tenant string
-	// ChartsBase, if set, overrides Base for resolving a chart-mode app's
-	// on-disk chart directory (see config.Config.ChartsBase).
-	ChartsBase string
-	App        config.App
-	Runner     runner.Runner
+	// Repos is where the GitOps repositories and the charts repository
+	// are checked out.
+	Repos           config.RepoPaths
+	Cluster, Tenant string
+	App             config.App
+	Runner          runner.Runner
 	// Client talks to the live cluster: used by internal/render to
 	// resolve postBuild.substituteFrom, and — in both diff modes — to
 	// fetch the app's live state to compare against (unless Baseline is
@@ -156,7 +156,7 @@ func samePatch(doc diff.PatchDoc, existing string) (bool, error) {
 // interpreted the same way.
 func renderApp(ctx context.Context, opts Options) (*render.Result, error) {
 	return render.Render(ctx, render.Options{
-		Base:          opts.Base,
+		Repos:         opts.Repos,
 		Cluster:       opts.Cluster,
 		Tenant:        opts.Tenant,
 		Rset:          opts.App.Rset,
@@ -169,11 +169,7 @@ func renderApp(ctx context.Context, opts Options) (*render.Result, error) {
 }
 
 func chartPath(opts Options) string {
-	root := opts.Base
-	if opts.ChartsBase != "" {
-		root = opts.ChartsBase
-	}
-	return filepath.Join(root, opts.App.ChartPath)
+	return filepath.Join(opts.Repos.Charts, opts.App.ChartPath)
 }
 
 func fmtNotFound(kind, namespace, name string, err error) error {

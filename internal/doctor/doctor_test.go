@@ -66,7 +66,7 @@ func fixtureBase(t *testing.T, cluster, tenant string) string {
 
 // setConfig writes a one-type catalog (chart-mode when chartPath is set)
 // and an environment file, pointing opts at both.
-func setConfig(t *testing.T, opts *Options, base, cluster, tenant, chartsBase, chartPath string) {
+func setConfig(t *testing.T, opts *Options, base, cluster, tenant, chartsRepo, chartPath string) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -86,8 +86,8 @@ func setConfig(t *testing.T, opts *Options, base, cluster, tenant, chartsBase, c
 	}
 
 	envBody := "base: " + base + "\ncluster: " + cluster + "\ntenant: " + tenant + "\n"
-	if chartsBase != "" {
-		envBody += "chartsBase: " + chartsBase + "\n"
+	if chartsRepo != "" {
+		envBody += "repos:\n  charts: " + chartsRepo + "\n"
 	}
 	opts.EnvConfigFlag = filepath.Join(dir, "environment.yaml")
 	if err := os.WriteFile(opts.EnvConfigFlag, []byte(envBody), 0o644); err != nil {
@@ -252,7 +252,7 @@ func TestRun_ChartPathMissing(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	opts := baseOptions()
 	// No charts/virtualizer directory created under base.
-	setConfig(t, &opts, base, "eosdev", "stratio", "", "charts/virtualizer")
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "virtualizer")
 
 	report := Run(context.Background(), opts)
 
@@ -273,16 +273,16 @@ func TestRun_ChartPathMissing(t *testing.T) {
 	}
 }
 
-func TestRun_ChartPathsUsesChartsBaseOverride(t *testing.T) {
+func TestRun_ChartPathsUsesChartsRepo(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
-	chartsRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(chartsRoot, "charts", "virtualizer"), 0o755); err != nil {
+	chartsRepo := t.TempDir() // e.g. a worktree, not under base nor named charts
+	if err := os.MkdirAll(filepath.Join(chartsRepo, "virtualizer"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	opts := baseOptions()
-	// The chart lives only under chartsRoot, never under base — the check
-	// must resolve against chartsBase, not base, once it's set.
-	setConfig(t, &opts, base, "eosdev", "stratio", chartsRoot, "charts/virtualizer")
+	// The chart lives only in chartsRepo, never under base — the check
+	// must resolve against repos.charts, not base, once it's set.
+	setConfig(t, &opts, base, "eosdev", "stratio", chartsRepo, "virtualizer")
 
 	report := Run(context.Background(), opts)
 

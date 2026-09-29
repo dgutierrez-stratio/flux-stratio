@@ -13,6 +13,7 @@ import (
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
@@ -91,7 +92,7 @@ func fixtureBase(t *testing.T) string {
 
 func baseOptions(t *testing.T) Options {
 	return Options{
-		Base:          fixtureBase(t),
+		Repos:         config.ReposUnder(fixtureBase(t)),
 		Cluster:       "eosdev",
 		Tenant:        "stratio",
 		Rset:          "apps/components/resourceset-apps-datastores.yaml",
@@ -134,7 +135,7 @@ func TestRender_Success(t *testing.T) {
 
 func TestRender_MissingBaseLayout(t *testing.T) {
 	opts := baseOptions(t)
-	opts.Base = t.TempDir() // no sibling repo dirs created
+	opts.Repos = config.ReposUnder(t.TempDir()) // no sibling repo dirs created
 	if _, err := Render(context.Background(), opts); err == nil {
 		t.Fatal("Render with an incomplete base layout: got nil error, want non-nil")
 	}

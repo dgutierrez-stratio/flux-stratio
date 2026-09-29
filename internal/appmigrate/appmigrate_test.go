@@ -55,7 +55,7 @@ func fixtureBase(t *testing.T, cluster, tenant string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tenantPath := tenantfile.Path(base, cluster, tenant)
+	tenantPath := tenantfile.Path(filepath.Join(base, "keos-fleet"), cluster, tenant)
 	if err := os.MkdirAll(filepath.Dir(tenantPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func loadCatalog(t *testing.T, base string) *catalog.Catalog {
 
 func loadTenantDoc(t *testing.T, base, cluster, tenant string) (*tenantfile.Doc, error) {
 	t.Helper()
-	return tenantfile.Load(tenantfile.Path(base, cluster, tenant))
+	return tenantfile.Load(tenantfile.Path(filepath.Join(base, "keos-fleet"), cluster, tenant))
 }
 
 const rsetOutputPgCluster = `
@@ -113,7 +113,7 @@ func TestPlan_MigratedFalseWhenNoDiff(t *testing.T) {
 	}}
 
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
 		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
@@ -138,7 +138,7 @@ func TestPlan_MigratedFalseWhenNoDiff(t *testing.T) {
 func TestPlan_NeverWritesToDisk(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	cat := loadCatalog(t, base)
-	tenantPath := tenantfile.Path(base, "eosdev", "stratio")
+	tenantPath := tenantfile.Path(filepath.Join(base, "keos-fleet"), "eosdev", "stratio")
 	before, err := os.ReadFile(tenantPath)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestPlan_NeverWritesToDisk(t *testing.T) {
 		"spec":     map[string]any{"instances": int64(5)},
 	}}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
 		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
@@ -180,7 +180,7 @@ func TestPlan_NeverWritesToDisk(t *testing.T) {
 func TestApply_WritesPatchAndIsIdempotent(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	cat := loadCatalog(t, base)
-	tenantPath := tenantfile.Path(base, "eosdev", "stratio")
+	tenantPath := tenantfile.Path(filepath.Join(base, "keos-fleet"), "eosdev", "stratio")
 
 	liveObj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
@@ -188,7 +188,7 @@ func TestApply_WritesPatchAndIsIdempotent(t *testing.T) {
 		"spec":     map[string]any{"instances": int64(5)},
 	}}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
 		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
@@ -291,7 +291,7 @@ func tenantPgClusterPatch(t *testing.T, tenantPath string) string {
 func TestApply_RerunKeepsWhatTheExistingPatchCarried(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	cat := loadCatalog(t, base)
-	tenantPath := tenantfile.Path(base, "eosdev", "stratio")
+	tenantPath := tenantfile.Path(filepath.Join(base, "keos-fleet"), "eosdev", "stratio")
 
 	// The tenant already patches the image; live also differs in instances.
 	existing := "apiVersion: postgres.stratio.com/v1\nkind: PgCluster\nmetadata:\n  name: psql\nspec:\n  image: legacy:1.0\n"
@@ -301,7 +301,7 @@ func TestApply_RerunKeepsWhatTheExistingPatchCarried(t *testing.T) {
 		"spec":     map[string]any{"instances": int64(5), "image": "legacy:1.0"},
 	}}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
 		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgClusterWithPatch(existing))},
@@ -327,7 +327,7 @@ func TestApply_RerunKeepsWhatTheExistingPatchCarried(t *testing.T) {
 func TestPlan_ExistingPatchAlreadyExactIsUpToDate(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	cat := loadCatalog(t, base)
-	tenantPath := tenantfile.Path(base, "eosdev", "stratio")
+	tenantPath := tenantfile.Path(filepath.Join(base, "keos-fleet"), "eosdev", "stratio")
 
 	liveObj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
@@ -339,7 +339,7 @@ func TestPlan_ExistingPatchAlreadyExactIsUpToDate(t *testing.T) {
 		"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
 	}}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
 		App:    config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: fakeRunner,
 		Client: fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(liveObj).Build(),
@@ -379,7 +379,7 @@ func TestPlan_BaselineUsedInsteadOfLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio", Catalog: cat, Baseline: backupDir,
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat, Baseline: backupDir,
 		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},

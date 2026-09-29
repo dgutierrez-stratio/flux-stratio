@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -25,11 +26,12 @@ var configFlag string
 // internal/config.ResolveEnvironment.
 var envConfigFlag string
 
-// baseFlag, clusterFlag and tenantFlag override the environment file's
-// base, cluster and tenant fields, shared by all subcommands that operate
-// on a specific tenant.
+// baseFlag, repoFlag, clusterFlag and tenantFlag override the environment
+// file's base, repos, cluster and tenant fields, shared by all subcommands
+// that operate on a specific tenant.
 var (
 	baseFlag    string
+	repoFlag    map[string]string
 	clusterFlag string
 	tenantFlag  string
 )
@@ -45,10 +47,10 @@ var kubeconfigArgs = genericclioptions.NewConfigFlags(false)
 // internal/log.Logger.Debugf output (e.g. external command chatter).
 var verboseFlag bool
 
-// envOverrides returns the --base/--cluster/--tenant flags as an
+// envOverrides returns the --base/--repo/--cluster/--tenant flags as an
 // Environment to apply on top of the environment file.
 func envOverrides() config.Environment {
-	return config.Environment{Base: baseFlag, Cluster: clusterFlag, Tenant: tenantFlag}
+	return config.Environment{Base: baseFlag, Repos: repoFlag, Cluster: clusterFlag, Tenant: tenantFlag}
 }
 
 // loadEnvironment loads the environment file with the root flags applied.
@@ -79,7 +81,8 @@ func NewRootCommand() *cobra.Command {
 
 	root.PersistentFlags().StringVar(&configFlag, "config", "", "path to the component catalog file (default: $FLUX_STRATIO_CONFIG, ~/.fluxcd/flux-stratio/catalog.yaml, or ./flux-stratio.yaml)")
 	root.PersistentFlags().StringVar(&envConfigFlag, "env-config", "", "path to the environment file (default: $FLUX_STRATIO_ENV, ~/.fluxcd/flux-stratio/environment.yaml, or ./flux-stratio-env.yaml)")
-	root.PersistentFlags().StringVar(&baseFlag, "base", "", "path to the parent directory holding keos-apps, keos-use-cases, keos-fleet and keos-system-services (overrides the environment file's base)")
+	root.PersistentFlags().StringVar(&baseFlag, "base", "", "default parent directory of the repositories: keos-apps, keos-use-cases, keos-fleet, keos-system-services and charts, each expected at <base>/<name> unless --repo says otherwise (overrides the environment file's base)")
+	root.PersistentFlags().StringToStringVar(&repoFlag, "repo", nil, "point one repository straight at its checkout, e.g. --repo charts=/path/to/worktree (repeatable; names: "+strings.Join(config.RepoNames, ", ")+"; overrides the environment file's repos)")
 	root.PersistentFlags().StringVar(&clusterFlag, "cluster", "", "the cluster name to operate on (overrides the environment file's cluster)")
 	root.PersistentFlags().StringVar(&tenantFlag, "tenant", "", "the tenant name to operate on (overrides the environment file's tenant)")
 	root.PersistentFlags().StringVar(kubeconfigArgs.KubeConfig, "kubeconfig", "", "path to the kubeconfig file to use for cluster access")

@@ -61,11 +61,11 @@ func TestSeedCatalog_EveryTypeHasASelector(t *testing.T) {
 }
 
 func TestSeedEnvironment(t *testing.T) {
-	env := SeedEnvironment("/stratio/gitops", "eosdev", "stratio", "")
-	if err := env.validate(); err != nil {
-		t.Fatalf("validate() = %v", err)
+	env := SeedEnvironment("/stratio/gitops", "eosdev", "stratio", nil)
+	if err := env.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
 	}
-	if env.ChartsBase != "" || env.ChartsRoot() != "/stratio/gitops" {
-		t.Errorf("unexpected charts fields: %+v", env)
+	if env.Repos != nil || env.Repo(RepoCharts) != "/stratio/gitops/charts" {
+		t.Errorf("unexpected repos: %+v", env)
 	}
 }

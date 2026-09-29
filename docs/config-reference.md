@@ -20,7 +20,7 @@ silently ignored). A pre-catalog `config.yaml` (the old single file with a top-l
 is recognized and rejected with a pointer to `config init --force`.
 
 ```sh
-flux stratio config init --base /stratio/gitops --cluster eosdev --tenant stratio [--charts /stratio/charts]
+flux stratio config init --base /stratio/gitops --cluster eosdev --tenant stratio [--repo charts=/stratio/charts/charts]
 ```
 
 `config init` refuses to overwrite either file without `--force`. `flux stratio doctor` checks both,
@@ -29,14 +29,27 @@ plus every type's `component` key and `prepare` step against the real templates.
 ## `environment.yaml`
 
 ```yaml
-base: /stratio/gitops        # required: parent of keos-apps, keos-use-cases, keos-fleet, keos-system-services
-chartsBase: /stratio/charts  # optional: where chart-mode types' chart.path resolves (defaults to base)
+base: /stratio/gitops        # default parent of every repository: each is expected at <base>/<name>
+repos:                       # optional: point a repository straight at its checkout instead
+  charts: /stratio/aws/flux/.worktrees/charts-plt-4838   # e.g. a git worktree
+  # keos-apps / keos-use-cases / keos-fleet / keos-system-services: likewise
 cluster: eosdev              # required: the cluster name (locates the tenant file)
 tenant: stratio              # required: the tenant name (locates the tenant file, scopes tenant import)
 ```
 
-`--base`, `--cluster` and `--tenant` override these for a single invocation; with all three given,
-no environment file is needed at all.
+The repositories are `keos-apps`, `keos-use-cases`, `keos-fleet`, `keos-system-services` and
+`charts` (the chart sources that chart-mode types' `chart.path` is relative to). Each resolves to
+its `repos` entry, else `<base>/<name>`. That makes `base` optional when `repos` lists all five,
+and lets any one of them be a worktree or a clone under another name without moving the rest.
+
+`--base`, `--repo <name>=<path>` (repeatable), `--cluster` and `--tenant` override these for a
+single invocation; `--repo` entries override `repos` one by one. With the repositories, cluster and
+tenant all given, no environment file is needed at all.
+
+`chartsBase` is gone: it pointed at the directory *above* the charts repository, and catalog chart
+paths started with that repository's own directory name (`charts/litellm`). An environment file
+that still sets it fails with what to set instead (`repos.charts: <chartsBase>/charts`), and a
+catalog chart path starting with `charts/` fails too — re-run `config init --force`.
 
 ## `catalog.yaml` — the component catalog
 
@@ -50,7 +63,7 @@ types:
     object: '{{ .Entry }}-gosec-agent'
     # kustomization: 'apps-{{ .Object }}'   (the default)
     chart:
-      path: charts/gosec-agent     # set => chart mode; relative to chartsBase (or base)
+      path: gosec-agent            # set => chart mode; relative to the charts repository root
     match:
       kinds: [apps/v1/Deployment]
       annotations:

@@ -262,7 +262,7 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	comparison := desiredComparison(baseline, resolvedBaseline)
 	logger.Actionf("diffing %q: %s", app.Name, comparison)
 	result, err := appdiff.Diff(cmd.Context(), appdiff.Options{
-		Base: env.Base, Cluster: env.Cluster, Tenant: env.Tenant, ChartsBase: env.ChartsBase,
+		Repos: env.RepoPaths(), Cluster: env.Cluster, Tenant: env.Tenant,
 		App:      app,
 		Runner:   runner.Exec{},
 		Client:   c,
@@ -322,7 +322,7 @@ func runAppsDriftDiff(cmd *cobra.Command, app config.App, s *session, driftAgain
 	against := backupLabel(driftAgainst, resolved)
 	logger.Actionf("checking %q for drift: live now vs. %s", app.Name, against)
 	result, err := drift.Run(cmd.Context(), drift.Options{
-		App: app, Base: s.env.Base, ChartsBase: s.env.ChartsBase, Runner: runner.Exec{}, Client: s.client, Index: s.index,
+		App: app, Repos: s.env.RepoPaths(), Runner: runner.Exec{}, Client: s.client, Index: s.index,
 		Against: resolved, Log: logger,
 	})
 	if err != nil {
@@ -490,7 +490,7 @@ func runAppsBackup(cmd *cobra.Command, args []string, catalog, all bool, dirFlag
 		s.log.Failuref("%v", u)
 	}
 
-	err = backupAll(cmd, apps, backupsDir, s.env.Base, s.env.ChartsBase, s.client, s.index, s.log)
+	err = backupAll(cmd, apps, backupsDir, s.env.RepoPaths(), s.client, s.index, s.log)
 	if err == nil && len(unresolved) > 0 {
 		err = fmt.Errorf("backup skipped %d unresolved instance(s)", len(unresolved))
 	}
@@ -511,12 +511,12 @@ func resolveBackupsDir(dirFlag string) (string, error) {
 	return filepath.Join(filepath.Dir(configPath), "backups"), nil
 }
 
-func backupAll(cmd *cobra.Command, apps []config.App, backupsDir, base, chartsBase string, c client.Client, idx *discovery.Index, logger *log.Logger) error {
+func backupAll(cmd *cobra.Command, apps []config.App, backupsDir string, repos config.RepoPaths, c client.Client, idx *discovery.Index, logger *log.Logger) error {
 	var failed []string
 	for _, app := range apps {
 		logger.Actionf("backing up %q", app.Name)
 		result, err := backup.Run(cmd.Context(), backup.Options{
-			Base: base, ChartsBase: chartsBase, App: app, Runner: runner.Exec{}, Client: c, Index: idx, Dir: backupsDir, Log: logger,
+			Repos: repos, App: app, Runner: runner.Exec{}, Client: c, Index: idx, Dir: backupsDir, Log: logger,
 		})
 		if err != nil {
 			// A single requested app just returns its own error as-is —

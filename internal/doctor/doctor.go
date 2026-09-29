@@ -128,13 +128,14 @@ func Run(ctx context.Context, opts Options) Report {
 		return report
 	}
 
-	report.Checks = append(report.Checks, narrate(opts.Log, checkRepoLayout(env.Base)))
+	repos := env.RepoPaths()
+	report.Checks = append(report.Checks, narrate(opts.Log, checkRepoLayout(repos)))
 	if cat != nil {
-		report.Checks = append(report.Checks, narrate(opts.Log, checkChartPaths(cat, *env)))
-		report.Checks = append(report.Checks, narrate(opts.Log, checkTypes(cat, env.Base)))
+		report.Checks = append(report.Checks, narrate(opts.Log, checkChartPaths(cat, repos.Charts)))
+		report.Checks = append(report.Checks, narrate(opts.Log, checkTypes(cat, repos.UseCases)))
 	}
 	report.Checks = append(report.Checks, checkCluster(ctx, opts))
-	report.Checks = append(report.Checks, narrate(opts.Log, checkTenantFile(env.Base, env.Cluster, env.Tenant)))
+	report.Checks = append(report.Checks, narrate(opts.Log, checkTenantFile(repos.Fleet, env.Cluster, env.Tenant)))
 
 	return report
 }
@@ -198,21 +199,20 @@ func checkEnvironment(opts Options) (*config.Environment, Check) {
 	return &env, Check{Name: CheckEnvironment, OK: true, Detail: detail}
 }
 
-func checkRepoLayout(base string) Check {
-	if err := reporequire.Validate(base); err != nil {
+func checkRepoLayout(repos config.RepoPaths) Check {
+	if err := reporequire.Validate(repos); err != nil {
 		return Check{Name: CheckRepoLayout, OK: false, Detail: err.Error()}
 	}
-	return Check{Name: CheckRepoLayout, OK: true, Detail: base}
+	return Check{Name: CheckRepoLayout, OK: true, Detail: strings.Join([]string{repos.Apps, repos.UseCases, repos.Fleet, repos.SystemServices}, ", ")}
 }
 
 // checkChartPaths validates that every chart-mode type's on-disk chart
-// directory (Chart.Path, resolved against Environment.ChartsRoot — the
-// same resolution internal/appdiff.chartPath and internal/backup use)
+// directory (Chart.Path, resolved against the charts repository checkout —
+// the same resolution internal/appdiff.chartPath and internal/backup use)
 // actually exists, so a misconfigured or missing chart checkout is caught
 // here instead of surfacing mid-run as a "could not find <path>" error
 // from the first chart-mode apps diff/backup/migrate.
-func checkChartPaths(cat *config.Catalog, env config.Environment) Check {
-	chartsRoot := env.ChartsRoot()
+func checkChartPaths(cat *config.Catalog, chartsRoot string) Check {
 	var missing []string
 	for _, t := range cat.Types {
 		if t.ChartPath() == "" {
@@ -235,8 +235,8 @@ func checkChartPaths(cat *config.Catalog, env config.Environment) Check {
 // keos-use-cases's templates declare (else no tenant entry could ever
 // render it), and its prepare step, if any, must be one internal/prepare
 // knows — both otherwise only discovered mid-migration.
-func checkTypes(cat *config.Catalog, base string) Check {
-	templates, err := catalog.Load(filepath.Join(base, "keos-use-cases"))
+func checkTypes(cat *config.Catalog, useCases string) Check {
+	templates, err := catalog.Load(useCases)
 	if err != nil {
 		return Check{Name: CheckTypes, OK: false, Detail: err.Error()}
 	}
@@ -272,8 +272,8 @@ func checkCluster(ctx context.Context, opts Options) Check {
 	return Check{Name: CheckCluster, OK: true}
 }
 
-func checkTenantFile(base, cluster, tenant string) Check {
-	path := tenantfile.Path(base, cluster, tenant)
+func checkTenantFile(fleet, cluster, tenant string) Check {
+	path := tenantfile.Path(fleet, cluster, tenant)
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() {
 		return Check{Name: CheckTenant, OK: false, Detail: fmt.Sprintf("%s not found (run `flux stratio tenant import` first)", path)}

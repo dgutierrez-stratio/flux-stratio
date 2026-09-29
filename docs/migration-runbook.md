@@ -7,8 +7,9 @@ Ansible-based cluster onto Flux/GitOps with flux-stratio. It assumes:
   have already been migrated with [flux-keos](https://github.com/Stratio/flux-keos)'s
   `cluster migrate` — flux-stratio only ever touches applications, never that layer.
 - You have a local checkout of `keos-apps`, `keos-use-cases`, `keos-fleet` and
-  `keos-system-services` as sibling directories (`--base`/the environment file's `base` points at
-  their parent).
+  `keos-system-services` (and the `charts` repository, for chart-mode components): as sibling
+  directories under `--base`/the environment file's `base`, or wherever its `repos` entries (or
+  `--repo <name>=<path>`) point.
 - `flux-operator`, `flux` and `helm` are on `PATH` (see the [README](../README.md#install)).
 
 ## 1. Get a catalog and an environment file

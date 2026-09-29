@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
@@ -31,11 +32,11 @@ import (
 
 // Options configures one Render call.
 type Options struct {
-	// Base is the parent directory holding keos-apps, keos-use-cases,
-	// keos-fleet and keos-system-services as sibling checkouts.
-	Base string
+	// Repos is where keos-apps, keos-use-cases, keos-fleet and
+	// keos-system-services are checked out.
+	Repos config.RepoPaths
 	// Cluster and Tenant locate the tenant's ResourceSetInputProvider
-	// file: <Base>/keos-fleet/clusters/<Cluster>/tenants/config/<Tenant>.yaml.
+	// file: <keos-fleet>/clusters/<Cluster>/tenants/config/<Tenant>.yaml.
 	Cluster, Tenant string
 	// Rset is the path, relative to keos-use-cases, of the ResourceSet
 	// template that declares the app's Kustomization.
@@ -75,7 +76,7 @@ type Result struct {
 // Render runs the full two-stage pipeline described in the package doc and
 // returns the app's desired-state object.
 func Render(ctx context.Context, opts Options) (*Result, error) {
-	if err := reporequire.Validate(opts.Base); err != nil {
+	if err := reporequire.Validate(opts.Repos); err != nil {
 		return nil, err
 	}
 
@@ -169,9 +170,9 @@ func withoutPatchesFor(ks *unstructured.Unstructured, kind string) ([]string, *u
 }
 
 func tenantFilePath(opts Options) string {
-	return tenantfile.Path(opts.Base, opts.Cluster, opts.Tenant)
+	return tenantfile.Path(opts.Repos.Fleet, opts.Cluster, opts.Tenant)
 }
 
 func rsetPath(opts Options) string {
-	return filepath.Join(opts.Base, "keos-use-cases", opts.Rset)
+	return filepath.Join(opts.Repos.UseCases, opts.Rset)
 }

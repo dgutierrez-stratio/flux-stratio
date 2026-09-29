@@ -84,7 +84,8 @@ type ComponentType struct {
 
 // Chart locates a chart-mode type's Helm chart source.
 type Chart struct {
-	// Path is the chart directory, relative to Environment.ChartsRoot().
+	// Path is the chart directory, relative to the charts repository's
+	// root (RepoPaths.Charts).
 	Path string `yaml:"path"`
 	// ValuesRoot pins which .Values root to prefer when a chart mixes more
 	// than one flavor's values under the same directory tree (e.g.
@@ -267,6 +268,11 @@ func (c Catalog) validate() error {
 		}
 		if t.Chart != nil && t.Chart.Path == "" {
 			add("chart.path is required when chart is set")
+		}
+		if t.Chart != nil && strings.HasPrefix(t.Chart.Path, RepoCharts+"/") {
+			add("chart.path %q: chart paths are relative to the charts repository root now (repos.charts), so write %q; "+
+				"re-run `flux stratio config init --force` to re-seed the catalog",
+				t.Chart.Path, strings.TrimPrefix(t.Chart.Path, RepoCharts+"/"))
 		}
 
 		if len(t.Match.Kinds) == 0 {

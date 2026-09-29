@@ -80,7 +80,7 @@ func SeedCatalog() Catalog {
 			Match:     cctMatch(kindDeployment, "pg-gosec-agent", ""),
 			Entry:     gosecAgentEntry,
 			Object:    "{{ .Entry }}-gosec-agent",
-			Chart:     &Chart{Path: "charts/gosec-agent"},
+			Chart:     &Chart{Path: "gosec-agent"},
 			Exclude: []string{
 				"spec.values.gosecAgent.environment.domainsConfig.mappingUrl",
 				"spec.values.gosecAgent.environment.agent.agentServiceName",
@@ -117,7 +117,7 @@ func SeedCatalog() Catalog {
 			Match:     cctMatch(kindDeployment, "os-gosec-agent", ""),
 			Entry:     gosecAgentEntry,
 			Object:    "{{ .Entry }}-gosec-agent",
-			Chart:     &Chart{Path: "charts/gosec-agent"},
+			Chart:     &Chart{Path: "gosec-agent"},
 			Exclude: []string{
 				"spec.values.gosecAgent.environment.vault",
 				"spec.values.gosecAgent.environment.agent.agentServiceName",
@@ -156,7 +156,7 @@ func SeedCatalog() Catalog {
 					{Key: annService, Operator: OpIn, Values: []string{"connectors-dfs", "connectors-rdbms"}},
 				}},
 			},
-			Chart: &Chart{Path: "charts/dg-agent"},
+			Chart: &Chart{Path: "dg-agent"},
 		},
 		{
 			Type:      "eureka-agent",
@@ -164,7 +164,7 @@ func SeedCatalog() Catalog {
 			Component: "eurekaAgent",
 			Rset:      rsetDatastores,
 			Match:     cctMatch(kindDeployment, "bdl", "agent-bdl-default"),
-			Chart:     &Chart{Path: "charts/eureka-agent"},
+			Chart:     &Chart{Path: "eureka-agent"},
 			Exclude: []string{
 				"spec.values.eureka.general.externalConfiguration.governanceSettings",
 				"spec.values.eureka.general.identity",
@@ -178,7 +178,7 @@ func SeedCatalog() Catalog {
 			// The model pins the pginternal flavor, matching ValuesRoot; the
 			// chart's pgmd5/pgtls flavors would be their own types.
 			Match:   cctMatch(kindDeployment, "bdl", "datarest-pginternal"),
-			Chart:   &Chart{Path: "charts/bdl-datarest", ValuesRoot: "datarestPgInternal"},
+			Chart:   &Chart{Path: "bdl-datarest", ValuesRoot: "datarestPgInternal"},
 			Prepare: "prepare-datarest",
 			Notes:   "prepare-datarest runs automatically before migrating: removes the legacy ingress that would collide with the GitOps-managed one.",
 			Exclude: []string{"spec.values.datarestPgInternal.general.identity.approlename"},
@@ -191,7 +191,7 @@ func SeedCatalog() Catalog {
 			// model=default is the virtualizer server itself; its -monitor
 			// and -ui siblings are separate CCT apps of the same chart.
 			Match: cctMatch(kindDeployment, "virtualizer", "default"),
-			Chart: &Chart{Path: "charts/virtualizer"},
+			Chart: &Chart{Path: "virtualizer"},
 			Exclude: []string{
 				"spec.values.virtualizerMonitor.general.approlename",
 				"spec.values.virtualizerServer.general.governanceRegistration.governanceDeployment",
@@ -204,7 +204,7 @@ func SeedCatalog() Catalog {
 			Component: "discovery",
 			Rset:      rsetApps,
 			Match:     cctMatch(kindDeployment, "discovery", ""),
-			Chart:     &Chart{Path: "charts/discovery"},
+			Chart:     &Chart{Path: "discovery"},
 			Exclude:   []string{"spec.values.discovery.environment.approlename"},
 		},
 		{
@@ -214,7 +214,7 @@ func SeedCatalog() Catalog {
 			Rset:      rsetApps,
 			Match:     cctMatch(kindDeployment, "data-marketplace", "agent-default"),
 			Entry:     "governance-{{ .Live.Name }}",
-			Chart:     &Chart{Path: "charts/governance-datamarket-agent"},
+			Chart:     &Chart{Path: "governance-datamarket-agent"},
 			Prepare:   "prepare-datamarket-agent",
 			Notes:     "prepare-datamarket-agent runs automatically before migrating: suspends the legacy HelmRelease and scales it to 0.",
 			Exclude: []string{
@@ -235,7 +235,7 @@ func SeedCatalog() Catalog {
 			// CCT service's other model, is its own litellm component.
 			Match:   cctMatch(kindDeployment, "genai", "genai-api"),
 			Entry:   `{{ .Live.Name | trimSuffix "-api" }}`,
-			Chart:   &Chart{Path: "charts/genai"},
+			Chart:   &Chart{Path: "genai"},
 			Prepare: "prepare-genai",
 			Notes:   "prepare-genai is a manual Postgres data rewrite apps migrate cannot verify itself; it always asks its own confirmation before proceeding, never skipped by --yes.",
 			Exclude: []string{
@@ -273,7 +273,7 @@ func SeedCatalog() Catalog {
 			// SecretsIdentity role). Kept: the legacy Postgres database/schema,
 			// gosec groups and autoUvicornWorkers.
 			Match: cctMatch(kindDeployment, "genai", "genai-litellm"),
-			Chart: &Chart{Path: "charts/litellm"},
+			Chart: &Chart{Path: "litellm"},
 			Exclude: []string{
 				"spec.values.liteLlm.general.networking.ingressHost",
 				"spec.values.liteLlm.general.networking.ingressBasePath",
@@ -292,7 +292,7 @@ func SeedCatalog() Catalog {
 			// are owned by this one and skipped by classification anyway;
 			// model=default excludes rocket-catalog-standalone.
 			Match: cctMatch(kindDeployment, "rocket", "default"),
-			Chart: &Chart{Path: "charts/rocket"},
+			Chart: &Chart{Path: "rocket"},
 			Exclude: []string{
 				"spec.values.rocketCommon.settings.governanceIntegration.crossdataCatalogGovernanceUri",
 				"spec.values.rocketCommon.settings.governanceIntegration.crossdataCatalogGovernancePost",
@@ -308,7 +308,7 @@ func SeedCatalog() Catalog {
 			Component: "intelligence",
 			Rset:      rsetIntelligence,
 			Match:     cctMatch(kindDeployment, "intelligence", ""),
-			Chart:     &Chart{Path: "charts/intelligence"},
+			Chart:     &Chart{Path: "intelligence"},
 			Exclude: []string{
 				"spec.values.configuration.security.vault.multiuser.approlename",
 				"spec.values.configuration.general.genaiSettings.genaiLayerConf.genaiAPIIntegration.genaiChainsConf.genaiChainsGovernanceUrl",
@@ -320,7 +320,7 @@ func SeedCatalog() Catalog {
 			Component: "dlcEntity",
 			Rset:      rsetDLC,
 			Match:     cctMatch(kindDeployment, "dlc-entity", ""),
-			Chart:     &Chart{Path: "charts/dlc-entity"},
+			Chart:     &Chart{Path: "dlc-entity"},
 			Prepare:   "prepare-dlc",
 			Notes:     "prepare-dlc runs automatically before migrating: removes the legacy ingress and Deployment (the chart recreates the Deployment under an immutable selector label).",
 			Exclude: []string{
@@ -344,9 +344,8 @@ func cctMatch(kind, service, model string) Match {
 }
 
 // SeedEnvironment returns the environment `flux stratio config init`
-// writes from its --base/--cluster/--tenant/--charts flags. Pass "" for
-// chartsBase when the chart-source repo is a sibling of the keos-* repos
-// under base, as is the common case.
-func SeedEnvironment(base, cluster, tenant, chartsBase string) Environment {
-	return Environment{Base: base, ChartsBase: chartsBase, Cluster: cluster, Tenant: tenant}
+// writes from its --base/--repo/--cluster/--tenant flags. repos is empty
+// in the common case, every repository a sibling checkout under base.
+func SeedEnvironment(base, cluster, tenant string, repos map[string]string) Environment {
+	return Environment{Base: base, Repos: repos, Cluster: cluster, Tenant: tenant}
 }

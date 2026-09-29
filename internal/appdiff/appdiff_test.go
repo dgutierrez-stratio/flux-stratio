@@ -71,7 +71,7 @@ func TestDiff_ManifestMode_ProducesPatch(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{
 			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
 			Kustomization: "apps-psql", Object: "psql",
@@ -108,7 +108,7 @@ func TestDiff_ManifestMode_NoLiveObjectErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
@@ -133,7 +133,7 @@ func TestDiff_ManifestMode_LiveNamespaceFallback(t *testing.T) {
 		"spec":     map[string]any{"instances": int64(5)},
 	}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{
 			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
 			Kustomization: "apps-psql", Object: "psql",
@@ -158,7 +158,7 @@ func TestDiff_ManifestMode_LiveNamespaceFallback(t *testing.T) {
 func TestDiff_RenderFailurePropagates(t *testing.T) {
 	base := fixtureBase(t)
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App:    config.App{ID: "psql", Rset: "x.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{}, // "flux-operator" unconfigured -> errors
 		Client: fake.NewClientBuilder().WithScheme(mustScheme(t)).Build(),
@@ -181,7 +181,7 @@ func TestDiff_ManifestMode_AppliesRenameForLiveLookup(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{
 			ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml",
 			Kustomization: "apps-psql", Object: "psql",
@@ -235,7 +235,7 @@ func TestLiveManifestObject_Success(t *testing.T) {
 		"spec":     map[string]any{"instances": int64(3)},
 	}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
@@ -255,7 +255,7 @@ func TestLiveManifestObject_Success(t *testing.T) {
 }
 
 func TestLiveManifestObject_RejectsChartModeApp(t *testing.T) {
-	opts := Options{App: config.App{ID: "x", ChartPath: "charts/x"}}
+	opts := Options{App: config.App{ID: "x", ChartPath: "x"}}
 	if _, err := LiveManifestObject(context.Background(), opts); err == nil {
 		t.Fatal("LiveManifestObject on a chart-mode app: got nil error, want non-nil")
 	}
@@ -290,7 +290,7 @@ func TestDiff_ManifestMode_ReportsFluxManagedLive(t *testing.T) {
 				metadata["labels"] = c.labels
 			}
 			opts := Options{
-				Base: base, Cluster: "eosdev", Tenant: "stratio",
+				Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 				App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
 				Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 					"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},

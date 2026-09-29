@@ -22,7 +22,7 @@ func buildKustomizationObjects(ctx context.Context, opts Options, ks *unstructur
 	if !found || specPath == "" {
 		return nil, fmt.Errorf("kustomization %q has no spec.path", ks.GetName())
 	}
-	fullPath := filepath.Join(opts.Base, "keos-apps", specPath)
+	fullPath := filepath.Join(opts.Repos.Apps, specPath)
 	if info, err := os.Stat(fullPath); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("kustomization %q's spec.path %q does not exist under keos-apps (%s)", ks.GetName(), specPath, fullPath)
 	}

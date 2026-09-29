@@ -27,7 +27,7 @@ func TestDiff_ManifestMode_Baseline(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App:      config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Baseline: baseline,
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
@@ -62,7 +62,7 @@ func TestDiff_ManifestMode_BaselineUnchangedIntegerIsNoDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App:      config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Baseline: baseline,
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
@@ -87,7 +87,7 @@ func TestDiff_ManifestMode_BaselineFileMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App:      config.App{ID: "psql", Rset: "apps/components/resourceset-apps-datastores.yaml", Kustomization: "apps-psql", Object: "psql"},
 		Baseline: t.TempDir(), // empty: no cr.yaml
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{

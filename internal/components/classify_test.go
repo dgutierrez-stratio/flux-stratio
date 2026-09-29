@@ -272,7 +272,7 @@ func migrated(objs []*unstructured.Unstructured, name, namespace, chart string) 
 }
 
 func TestManagedMatches(t *testing.T) {
-	chartType := &config.ComponentType{Type: "virtualizer", Chart: &config.Chart{Path: "charts/virtualizer"},
+	chartType := &config.ComponentType{Type: "virtualizer", Chart: &config.Chart{Path: "virtualizer"},
 		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}}}
 	manifestType := &config.ComponentType{Type: "virtualizer",
 		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}}}

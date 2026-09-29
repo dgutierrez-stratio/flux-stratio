@@ -38,7 +38,7 @@ func fixtureChart(t *testing.T, base, name string) string {
 	if err := os.MkdirAll(filepath.Join(chartDir, "charts"), 0o755); err != nil { // avoid a `helm dependency build` call
 		t.Fatal(err)
 	}
-	return "charts/" + name
+	return name
 }
 
 func writeBackupFile(t *testing.T, dir, name, content string) {
@@ -71,7 +71,7 @@ func TestRun_ManifestMode_DiffsSpecOnly(t *testing.T) {
 	writeBackupFile(t, backupDir, "cr.yaml", "apiVersion: postgres.stratio.com/v1\nkind: PgCluster\nmetadata:\n    name: psql\n    resourceVersion: \"1\"\nspec:\n    instances: 3\n")
 
 	opts := Options{
-		Base:    t.TempDir(),
+		Repos:   config.ReposUnder(t.TempDir()),
 		App:     config.App{ID: "psql", Object: "psql"},
 		Index:   idx,
 		Against: backupDir,
@@ -120,9 +120,9 @@ func TestRun_ChartMode_DiffsEnvVarsOnly(t *testing.T) {
 	writeBackupFile(t, backupDir, "env-vars.env", "LOG_LEVEL=INFO\n")
 
 	opts := Options{
-		Base: t.TempDir(),
+		Repos: config.ReposUnder(t.TempDir()),
 		App: config.App{
-			ID: "eureka-agent", Object: "eureka-agent", ChartPath: "charts/eureka-agent",
+			ID: "eureka-agent", Object: "eureka-agent", ChartPath: "eureka-agent",
 		},
 		Index:   idx,
 		Against: backupDir,
@@ -140,14 +140,14 @@ func TestRun_ChartMode_DiffsEnvVarsOnly(t *testing.T) {
 	}
 }
 
-// TestRun_ChartMode_HelmReleaseSeeded_ThreadsChartsBase covers the path
+// TestRun_ChartMode_HelmReleaseSeeded_ThreadsChartsRepo covers the path
 // TestRun_ChartMode_DiffsEnvVarsOnly doesn't: a live HelmRelease (not just
 // a Deployment) present, so backup.Run's captureChartFromHelmRelease —
-// the one place that actually joins a base dir with App.ChartPath into a
-// chart directory — is exercised. The chart lives only under ChartsBase,
-// never under Base, so this fails loudly if drift.Run's Options.ChartsBase
-// ever stops reaching backup.Options.ChartsBase.
-func TestRun_ChartMode_HelmReleaseSeeded_ThreadsChartsBase(t *testing.T) {
+// the one place that actually joins the charts repo with App.ChartPath
+// into a chart directory — is exercised. The charts repo is checked out
+// away from the other repos, so this fails loudly if drift.Run's
+// Options.Repos ever stops reaching backup.Options.Repos.
+func TestRun_ChartMode_HelmReleaseSeeded_ThreadsChartsRepo(t *testing.T) {
 	logger := log.New(io.Discard, false)
 	chartsRoot := t.TempDir()
 	chartPath := fixtureChart(t, chartsRoot, "eureka-agent")
@@ -183,7 +183,7 @@ func TestRun_ChartMode_HelmReleaseSeeded_ThreadsChartsBase(t *testing.T) {
 	writeBackupFile(t, backupDir, "env-vars.env", "LOG_LEVEL=INFO\n")
 
 	opts := Options{
-		Base: t.TempDir(), ChartsBase: chartsRoot, // chart deliberately absent under Base
+		Repos: chartsRepoAt(t.TempDir(), filepath.Join(chartsRoot, "charts")), // chart deliberately absent under base
 		App: config.App{
 			ID: "eureka-agent", Object: "eureka-agent", ChartPath: chartPath,
 		},
@@ -209,7 +209,7 @@ spec:
 	}
 	result, err := Run(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("Run returned error (chart should resolve under ChartsBase, not Base): %v", err)
+		t.Fatalf("Run returned error (chart should resolve under repos.charts, not base): %v", err)
 	}
 	if result.Before != "LOG_LEVEL=INFO\n" {
 		t.Errorf("Before = %q, want %q", result.Before, "LOG_LEVEL=INFO\n")
@@ -238,7 +238,7 @@ func TestRun_ShapeMismatch_ReturnsClearError(t *testing.T) {
 	writeBackupFile(t, backupDir, "values.yaml", "a: 1\n")
 
 	opts := Options{
-		Base:    t.TempDir(),
+		Repos:   config.ReposUnder(t.TempDir()),
 		App:     config.App{ID: "psql", Object: "psql"},
 		Index:   idx,
 		Against: backupDir,
@@ -262,7 +262,7 @@ func TestRun_LiveObjectNotFound_Errors(t *testing.T) {
 	}
 
 	opts := Options{
-		Base:    t.TempDir(),
+		Repos:   config.ReposUnder(t.TempDir()),
 		App:     config.App{ID: "psql", Object: "psql"},
 		Index:   idx,
 		Against: t.TempDir(),
@@ -285,8 +285,16 @@ func TestCompare_DegradedHelmReleaseVsEnvBackup_PointsAtChart(t *testing.T) {
 	if err == nil {
 		t.Fatal("compare: got nil error, want non-nil")
 	}
-	if strings.Contains(err.Error(), "changed shape") || !strings.Contains(err.Error(), "chartsBase") ||
+	if strings.Contains(err.Error(), "changed shape") || !strings.Contains(err.Error(), "repos.charts") ||
 		!strings.Contains(err.Error(), "env-vars.env") {
-		t.Errorf("error = %v, want it to point at chartsBase and name the backup's files", err)
+		t.Errorf("error = %v, want it to point at repos.charts and name the backup's files", err)
 	}
+}
+
+// chartsRepoAt is the default layout under base, but with the charts
+// repository checked out at charts instead.
+func chartsRepoAt(base, charts string) config.RepoPaths {
+	repos := config.ReposUnder(base)
+	repos.Charts = charts
+	return repos
 }

@@ -18,7 +18,7 @@ const catalogHeader = "" +
 
 const environmentHeader = "" +
 	"# Seeded by `flux stratio config init`: where the GitOps repositories live and which\n" +
-	"# cluster/tenant to operate on. --base/--cluster/--tenant override it per run.\n"
+	"# cluster/tenant to operate on. --base/--repo/--cluster/--tenant override it per run.\n"
 
 func newConfigCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -32,7 +32,6 @@ func newConfigCommand() *cobra.Command {
 func newConfigInitCommand() *cobra.Command {
 	var dir string
 	var force bool
-	var charts string
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -42,21 +41,22 @@ func newConfigInitCommand() *cobra.Command {
   catalog.yaml      the component catalog: every supported component type, with the
                     selectors that recognize its live legacy instances — static, the
                     same for every environment
-  environment.yaml  --base (where the keos-* GitOps repositories are checked out),
-                    --charts, --cluster and --tenant — this workstation's target`,
+  environment.yaml  --base (the parent directory of the keos-* GitOps repositories and
+                    the charts repository), any --repo pointing one of them elsewhere,
+                    --cluster and --tenant — this workstation's target`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runConfigInit(cmd, dir, force, charts)
+			return runConfigInit(cmd, dir, force)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "directory to write catalog.yaml and environment.yaml into (default: ~/.fluxcd/flux-stratio)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite catalog.yaml/environment.yaml if they already exist")
-	cmd.Flags().StringVar(&charts, "charts", "", "optional: parent directory holding chart-mode components' Helm chart sources, if it isn't a sibling of --base's keos-* repos")
 	return cmd
 }
 
-func runConfigInit(cmd *cobra.Command, dir string, force bool, charts string) error {
-	if baseFlag == "" || clusterFlag == "" || tenantFlag == "" {
-		return fmt.Errorf("--base, --cluster and --tenant are all required (there is no environment file yet to read them from)")
+func runConfigInit(cmd *cobra.Command, dir string, force bool) error {
+	env := config.SeedEnvironment(baseFlag, clusterFlag, tenantFlag, repoFlag)
+	if err := env.Validate(); err != nil {
+		return fmt.Errorf("%w (there is no environment file yet to read them from)", err)
 	}
 	if dir == "" {
 		var err error
@@ -71,7 +71,7 @@ func runConfigInit(cmd *cobra.Command, dir string, force bool, charts string) er
 		value        any
 	}{
 		{config.CatalogFile, catalogHeader, catalog},
-		{config.EnvironmentFile, environmentHeader, config.SeedEnvironment(baseFlag, clusterFlag, tenantFlag, charts)},
+		{config.EnvironmentFile, environmentHeader, env},
 	}
 
 	if !force {

@@ -80,12 +80,12 @@ func fixtureChart(t *testing.T, base string) string {
 	if err := os.WriteFile(filepath.Join(configDir, "env_vars.yaml"), []byte(`LOG_LEVEL: {{ .Values.gosecAgent.general.log.level | quote }}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return "charts/gosec-agent"
+	return "gosec-agent"
 }
 
 func chartDiffOptions(t *testing.T, base string) Options {
 	return Options{
-		Base: base, Cluster: "eosdev", Tenant: "stratio",
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{
 			ID: "psql-gosec-agent", Rset: "apps/components/resourceset-apps-datastores.yaml",
 			Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent",
@@ -204,12 +204,12 @@ func deploymentWithEnv(t *testing.T, name, namespace, logLevel string) *appsv1.D
 	}
 }
 
-// TestDiff_ChartMode_ChartsBaseOverridesBase asserts a chart-mode app
-// resolves its chart under Options.ChartsBase, not Options.Base, when
-// ChartsBase is set — the chart deliberately doesn't exist anywhere under
+// TestDiff_ChartMode_ChartsRepoOutsideBase asserts a chart-mode app
+// resolves its chart under Options.Repos.Charts when the charts repo is
+// checked out outside base — the chart deliberately doesn't exist anywhere under
 // base, so this fails loudly (a "no such file" error from `helm`) if
-// chartPath ever regresses to preferring Base again.
-func TestDiff_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
+// chartPath ever regresses to resolving against base again.
+func TestDiff_ChartMode_ChartsRepoOutsideBase(t *testing.T) {
 	base := fixtureBase(t)
 	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "gosec-agent", "app", "overlays", "postgres", "S"), 0o755); err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestDiff_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
 	chartsRoot := t.TempDir() // the chart lives only here, never under base
 
 	opts := Options{
-		Base: base, ChartsBase: chartsRoot, Cluster: "eosdev", Tenant: "stratio",
+		Repos: chartsRepoAt(base, filepath.Join(chartsRoot, "charts")), Cluster: "eosdev", Tenant: "stratio",
 		App: config.App{
 			ID: "psql-gosec-agent", Rset: "apps/components/resourceset-apps-datastores.yaml",
 			Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent",
@@ -235,7 +235,7 @@ func TestDiff_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
 
 	result, err := Diff(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("Diff returned error (chart should resolve under ChartsBase, not Base): %v", err)
+		t.Fatalf("Diff returned error (chart should resolve under repos.charts, not base): %v", err)
 	}
 	if result.Patch == nil {
 		t.Fatal("Patch = nil, want a patch for the changed LOG_LEVEL")
@@ -271,4 +271,12 @@ func TestLiveChartWorkloads_NoneFoundErrors(t *testing.T) {
 	if _, err := LiveChartWorkloads(context.Background(), opts); err == nil {
 		t.Fatal("LiveChartWorkloads with no live workload present: got nil error, want non-nil")
 	}
+}
+
+// chartsRepoAt is the default layout under base, but with the charts
+// repository checked out at charts instead.
+func chartsRepoAt(base, charts string) config.RepoPaths {
+	repos := config.ReposUnder(base)
+	repos.Charts = charts
+	return repos
 }

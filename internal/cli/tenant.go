@@ -3,11 +3,11 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/tenantimport"
 )
@@ -56,7 +56,7 @@ func runTenantImport(cmd *cobra.Command, size, output string, force bool) error 
 	}
 	tenant := env.Tenant
 
-	cat, err := catalog.Load(filepath.Join(env.Base, "keos-use-cases"))
+	cat, err := catalog.Load(env.Repo(config.RepoUseCases))
 	if err != nil {
 		return err
 	}

@@ -77,7 +77,7 @@ func fixtureChart(t *testing.T, base, name string) string {
 	if err := os.MkdirAll(filepath.Join(chartDir, "charts"), 0o755); err != nil { // avoid a `helm dependency build` call
 		t.Fatal(err)
 	}
-	return "charts/" + name
+	return name
 }
 
 func deploymentWithEnv(name, namespace, logLevel string) *appsv1.Deployment {
@@ -122,7 +122,7 @@ func TestRun_ChartMode_SingleWorkload_WritesDeploymentAndEnvFile(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base,
+		Repos: config.ReposUnder(base),
 		App: config.App{
 			ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
 		},
@@ -190,7 +190,7 @@ func TestRun_ChartMode_MultiWorkload_MergesEveryWorkloadsEnv(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base,
+		Repos: config.ReposUnder(base),
 		App: config.App{
 			ID: "genai", Object: "genai", ChartPath: chartPath,
 		},
@@ -220,12 +220,12 @@ func TestRun_ChartMode_MultiWorkload_MergesEveryWorkloadsEnv(t *testing.T) {
 	}
 }
 
-// TestRun_ChartMode_ChartsBaseOverridesBase asserts a chart-mode app
-// resolves its chart under Options.ChartsBase, not Options.Base, when
-// ChartsBase is set — the chart deliberately doesn't exist anywhere under
+// TestRun_ChartMode_ChartsRepoOutsideBase asserts a chart-mode app
+// resolves its chart under Options.Repos.Charts when the charts repo is
+// checked out outside base — the chart deliberately doesn't exist anywhere under
 // base, so this fails loudly if the resolution ever regresses to
-// preferring Base again.
-func TestRun_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
+// resolving against base again.
+func TestRun_ChartMode_ChartsRepoOutsideBase(t *testing.T) {
 	base := fixtureBase(t)
 	chartsRoot := t.TempDir() // the chart lives only here, never under base
 	chartPath := fixtureChart(t, chartsRoot, "gosec-agent")
@@ -242,7 +242,7 @@ func TestRun_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base, ChartsBase: chartsRoot,
+		Repos: chartsRepoAt(base, filepath.Join(chartsRoot, "charts")),
 		App: config.App{
 			ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
 		},
@@ -258,7 +258,7 @@ func TestRun_ChartMode_ChartsBaseOverridesBase(t *testing.T) {
 
 	result, err := Run(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("Run returned error (chart should resolve under ChartsBase, not Base): %v", err)
+		t.Fatalf("Run returned error (chart should resolve under repos.charts, not base): %v", err)
 	}
 	wantFiles := map[string]bool{"deployment.yaml": true, "env-vars.env": true}
 	if len(result.Files) != 2 || !wantFiles[result.Files[0]] || !wantFiles[result.Files[1]] {
@@ -293,7 +293,7 @@ func TestRun_ChartMode_TemplatesWithAppObjectNotLiveHelmReleaseName(t *testing.T
 		"helm": {Stdout: []byte(helmTemplateOutputSingleWorkload)},
 	}}
 	opts := Options{
-		Base: base,
+		Repos: config.ReposUnder(base),
 		App: config.App{
 			ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
 			Live: []config.ObjectRef{{Namespace: "stratio-datastores", Name: "psql-agent"}},
@@ -340,7 +340,7 @@ func TestRun_ChartMode_NoLiveWorkloads_DegradesToHelmReleaseAndValues(t *testing
 	}
 
 	opts := Options{
-		Base: base,
+		Repos: config.ReposUnder(base),
 		App: config.App{
 			ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
 		},
@@ -397,7 +397,7 @@ func TestRun_ChartMode_HelmReleaseValuesFromConfigMap(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base,
+		Repos: config.ReposUnder(base),
 		App: config.App{
 			ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
 		},
@@ -437,7 +437,7 @@ func TestRun_ChartMode_LiveObjectNotFoundErrors(t *testing.T) {
 	}
 
 	opts := Options{
-		Base: base,
+		Repos: config.ReposUnder(base),
 		App: config.App{
 			ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
 		},
@@ -482,7 +482,7 @@ func TestRun_ChartMode_RenderedWorkloadsNotLive_WarningNamesThem(t *testing.T) {
 	}
 
 	opts := Options{
-		Base:  base,
+		Repos: config.ReposUnder(base),
 		App:   config.App{ID: "genai-litellm", Object: "genai-litellm", ChartPath: chartPath},
 		Index: idx,
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
@@ -513,4 +513,12 @@ spec: {}
 			t.Errorf("warning doesn't mention %q: %s", want, logbuf.String())
 		}
 	}
+}
+
+// chartsRepoAt is the default layout under base, but with the charts
+// repository checked out at charts instead.
+func chartsRepoAt(base, charts string) config.RepoPaths {
+	repos := config.ReposUnder(base)
+	repos.Charts = charts
+	return repos
 }

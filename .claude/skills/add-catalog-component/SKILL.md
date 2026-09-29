@@ -33,10 +33,11 @@ the same way the plugin does, and refer to it by placeholder from then on.
 | Placeholder | How to resolve it (first match wins) |
 |---|---|
 | **environment file** | `--env-config` → `$FLUX_STRATIO_ENV` → `~/.fluxcd/flux-stratio/environment.yaml` → `./flux-stratio-env.yaml` |
-| `<base>`, `<chartsBase>`, `<cluster>`, `<tenant>` | That file's `base`, `chartsBase` (defaults to `<base>`), `cluster` and `tenant`. Any `--base/--cluster/--tenant` the operator passes win |
+| `<cluster>`, `<tenant>` | That file's `cluster` and `tenant`. Any `--cluster/--tenant` the operator passes win |
+| `<keos-apps>`, `<keos-use-cases>`, `<keos-fleet>`, `<charts>` | Each repository's checkout: that file's `repos.<name>` (or a `--repo <name>=<path>` the operator passes), else `<base>/<name>` — `base` from that file or `--base` |
 | **catalog file** `<catalog>` | `--config` → `$FLUX_STRATIO_CONFIG` → `~/.fluxcd/flux-stratio/catalog.yaml` → `./flux-stratio.yaml` |
 | **backups** `<backups>` | `--dir`, else the `backups/` directory next to `<catalog>` |
-| **tenant file** `<tenantFile>` | `<base>/keos-fleet/clusters/<cluster>/tenants/config/<tenant>.yaml` |
+| **tenant file** `<tenantFile>` | `<keos-fleet>/clusters/<cluster>/tenants/config/<tenant>.yaml` |
 | **flux-stratio checkout** `<repo>` | `git rev-parse --show-toplevel` from where this skill runs |
 
 Confirm them with `flux stratio doctor`: the `environment`, `repo layout`, `chart paths` and
@@ -73,7 +74,7 @@ placeholders from Step 0.
 | **Coordinates** | Which component key, rset file and Kustomization name? Is the patch anchor the default, nested (`config.agent`-style), or not patchable (`patches: []`)? | The template block (below) | `component`, `rset`, `kustomization`, `anchor` |
 | **Renames** | Does the GitOps entry/object name differ from the live name? | The template's `name:` and `postBuild.substitute` (e.g. `*_NAME: << get $component "name" >>`, `-gosec-agent` suffixes) vs. the live name. Also `flux stratio tenant import` output | `entry`, `object` templates |
 | **Namespaces** | Does the render's `targetNamespace` differ from the live namespace? | The template's `targetNamespace` vs. the live object's namespace | Nothing to set: the resolver falls back to the live namespace. Record the check |
-| **Mode** | Is the rendered object a CR (manifest mode) or a HelmRelease (chart mode)? Which values root? | `<base>/keos-apps/components/<dir>/app/base/*.yaml`. For chart mode, the chart under `<chartsBase>` | `chart.path`, `chart.valuesRoot` |
+| **Mode** | Is the rendered object a CR (manifest mode) or a HelmRelease (chart mode)? Which values root? | `<keos-apps>/components/<dir>/app/base/*.yaml`. For chart mode, the chart under `<charts>` | `chart.path`, `chart.valuesRoot` |
 | **Dependencies** | Which spec fields reference another component the template substitutes? | The template's `$dependencies` and `postBuild.substitute`, then the matching fields in the diff | Candidates for `exclude` |
 | **Exclusions** | Which differing fields must GitOps own (identity, vault, governance, cluster references, maybe images and URLs)? | The first `--view patch` diff, field by field (Step 5) | `exclude` |
 | **Data identity** | Does the chart derive the identity its data is bound to (cert CN = DB user, Vault paths, gosec user) from the release name? Then renaming loses the data | The chart's `{{ .Release.Name }}.{{ .Release.Namespace }}` uses (secretsBundle, gosecUser/Policy, SERVICE_NAME) vs. the live identity | Keep the legacy name as the entry (default templates). The GitOps name must be configurable (keos-apps `${<NAME>:=<default>}`). **Never point the release at the legacy Vault keys**: a chart SecretsBundle owns `userland/passwords/<release>.<namespace>/` and deletes every key there it doesn't declare. Data encrypted with legacy secrets must be cleaned and re-created before cutover |
@@ -90,12 +91,12 @@ kubectl get <kind> -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.n
 kubectl get deploy,sts,<kind> -A -o custom-columns='KIND:.kind,NS:.metadata.namespace,NAME:.metadata.name,SVC:.metadata.annotations.cct\.stratio\.com/application_service,MODEL:.metadata.annotations.cct\.stratio\.com/application_model,OWNER:.metadata.ownerReferences[0].kind' | grep -i <service>
 
 # Which template block renders it, and how (list every component key, then find yours)
-grep -noE 'range \$component := \$[A-Za-z0-9]+' <base>/keos-use-cases/apps/components/resourceset-apps-*.yaml
-grep -nF 'range $component := $<componentKey>' <base>/keos-use-cases/apps/components/resourceset-apps-*.yaml
+grep -noE 'range \$component := \$[A-Za-z0-9]+' <keos-use-cases>/apps/components/resourceset-apps-*.yaml
+grep -nF 'range $component := $<componentKey>' <keos-use-cases>/apps/components/resourceset-apps-*.yaml
 #   → inside the block: name: apps-..., targetNamespace, path: components/<dir>/app/overlays/..., patches:, postBuild.substitute
 
 # Mode: CR or HelmRelease?
-grep -n '^kind:' <base>/keos-apps/components/<dir>/app/base/*.yaml
+grep -n '^kind:' <keos-apps>/components/<dir>/app/base/*.yaml
 
 # Tenant entry declared (not commented out)?  Collisions?  Backup?
 grep -n '<componentKey>:' -A6 <tenantFile>
@@ -124,13 +125,13 @@ anything that doesn't conform.
 |---|---|---|
 | `type` | yes | unique id; kebab-case; what `--as <type>/<entry>` takes |
 | `name` | yes | human-readable label |
-| `component` | yes | the tenant file's `components.<key>`, exactly as the template's `range $component := $<key>`. doctor checks it against `<base>/keos-use-cases` |
-| `rset` | yes | path relative to `<base>/keos-use-cases`, e.g. `apps/components/resourceset-apps-datastores.yaml`. **Use the file whose block you read.** Keys like `postgres` appear in several rset files |
+| `component` | yes | the tenant file's `components.<key>`, exactly as the template's `range $component := $<key>`. doctor checks it against `<keos-use-cases>` |
+| `rset` | yes | path relative to `<keos-use-cases>`, e.g. `apps/components/resourceset-apps-datastores.yaml`. **Use the file whose block you read.** Keys like `postgres` appear in several rset files |
 | `entry` | no | template, default `{{ .Live.Name }}`: the tenant entry the live object migrates into |
 | `object` | no | template, default `{{ .Entry }}`: the rendered HelmRelease/CR name |
 | `kustomization` | no | template, default `apps-{{ .Object }}` |
 | `anchor` | no | dotted path (e.g. `config.agent`). Almost never needed, since it's derived from the templates, and a wrong value fails loudly |
-| `chart.path` | chart mode | relative to `<chartsBase>` (`<base>` if unset); enables chart/env-var comparison |
+| `chart.path` | chart mode | relative to the charts repository root `<charts>`, e.g. `litellm` (never `charts/litellm`); enables chart/env-var comparison |
 | `chart.valuesRoot` | no | chart mode only: pins the `.Values` root when a chart has several flavors |
 | `match.kinds` | yes | list of `group/version/Kind` (`version/Kind` for the core group). The version isn't compared at match time |
 | `match.annotations` / `match.labels` | at least one | `matchLabels: {k: v}` and/or `matchExpressions: [{key, operator, values}]`. Operators: `In` or `NotIn` (with values), `Exists` or `DoesNotExist` (without) |
@@ -159,7 +160,7 @@ Copy-paste block:
     rset: apps/components/resourceset-apps-<file>.yaml
     # entry/object/kustomization/anchor: only if they differ from the defaults
     # chart:
-    #   path: charts/<chart>
+    #   path: <chart>
     #   valuesRoot: <root>
     match:
       kinds: [<group>/<version>/<Kind>]
@@ -275,7 +276,7 @@ Everything here is in `<repo>`:
 5. Verify:
    ```shell
    make fmt-check vet lint test build
-   FLUX_STRATIO_KEOS_USE_CASES=<base>/keos-use-cases GOWORK=off go test ./internal/components/ -run RealTemplates -count=1
+   FLUX_STRATIO_KEOS_USE_CASES=<keos-use-cases> GOWORK=off go test ./internal/components/ -run RealTemplates -count=1
    ```
    The integration test checks, against the real templates, that the component key exists and that
    the rendered Kustomization resolves to the expected anchor.
