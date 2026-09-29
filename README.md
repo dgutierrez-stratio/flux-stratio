@@ -184,8 +184,8 @@ actually want to know is whether anything has changed since a known-good snapsho
 auto-locates the app's most recent capture, and a partial path — an app's own backup directory, or
 the overall `backups/` root — resolves the same way. `--view` picks how the result is shown —
 `unified` (default, a terminal diff), `patch` (the raw patch YAML `apps migrate` would write;
-invalid with `--drift`), or `meld` (opens [meld](https://meldmerge.org/) instead) — independently
-of which comparison ran.
+invalid with `--drift`), or `meld` (opens [meld](https://meldmerge.org/) instead, even when there are no differences, so
+you can inspect both sides) — independently of which comparison ran.
 
 ### How `apps migrate` computes a patch — and why order matters
 

@@ -172,6 +172,10 @@ All notable changes to this project will be documented in this file.
   instead of a generic `before`/`after`, which meant something different depending on the comparison
   and read backwards for a pre-migration diff (the rendered GitOps state isn't chronologically
   "before" anything).
+* `apps diff --view meld` (both the desired-state comparison and `--drift`) now opens meld even
+  when there are no differences, after the "no differences"/"no drift" line, instead of silently
+  skipping it. When the tenant file already carries exactly the patch needed, the two sides still
+  differ by that patch (the base is rendered without it), so meld shows what it covers.
 * `config init --charts <path>` seeds an optional top-level `chartsBase` config field: when set, it
   overrides `base` for resolving a chart-mode app's `chartPath` into an on-disk Helm chart
   directory. Fixes chart-mode apps (`apps diff`/`--baseline`/`--drift`, `apps backup`,

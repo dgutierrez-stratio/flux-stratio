@@ -203,7 +203,7 @@ func newAppsDiffCommand() *cobra.Command {
 			"and with --view patch (see the command's --help)")
 	cmd.Flags().StringVar(&view, "view", viewUnified,
 		"how to display the comparison: unified (default, a terminal diff), patch (the raw patch YAML apps migrate "+
-			"would write; invalid with --drift), meld (open in meld instead — see flux stratio doctor)")
+			"would write; invalid with --drift), meld (open in meld instead, even when there are no differences — see flux stratio doctor)")
 	cmd.Flags().StringVar(&dir, "dir", "",
 		"backups root directory to resolve --baseline/--drift latest against (default: a backups/ directory next to "+
 			"the config file) — must match whatever --dir apps backup used, if any, or latest can't find it")
@@ -273,9 +273,23 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 		return err
 	}
 
+	// meld opens even when there's nothing to change, so both sides can be
+	// inspected: with UpToDate they still differ by the tenant file's own
+	// patch, which the base is rendered without.
+	openMeld := func() error {
+		liveLabel := "live cluster"
+		if resolvedBaseline != "" {
+			liveLabel = "backup"
+		}
+		return ui.Meld(cmd.Context(), runner.Exec{}, "desired state", result.Before, liveLabel, result.After)
+	}
+
 	warnFluxManaged(logger, app, result.FluxManagedBy)
 	if result.Patch == nil || result.UpToDate {
 		reportNoChange(logger, result.UpToDate, result.ObsoletePatches)
+		if view == viewMeld {
+			return openMeld()
+		}
 		return nil
 	}
 	logger.Successf("found a difference: %s", comparison)
@@ -288,11 +302,7 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 		}
 		return ui.Patch(cmd.OutOrStdout(), patchYAML)
 	case viewMeld:
-		liveLabel := "live cluster"
-		if resolvedBaseline != "" {
-			liveLabel = "backup"
-		}
-		return ui.Meld(cmd.Context(), runner.Exec{}, "desired state", result.Before, liveLabel, result.After)
+		return openMeld()
 	default:
 		return ui.FileDiff(cmd.OutOrStdout(), result.Before, result.After)
 	}
@@ -321,10 +331,12 @@ func runAppsDriftDiff(cmd *cobra.Command, app config.App, s *session, driftAgain
 
 	if result.Before == result.After {
 		logger.Successf("no drift: live now matches %s", against)
-		return nil
+	} else {
+		logger.Successf("found drift: live now differs from %s", against)
 	}
-	logger.Successf("found drift: live now differs from %s", against)
 
+	// meld opens even without drift, so both sides can be inspected; an
+	// empty unified diff has nothing to show.
 	if view == viewMeld {
 		return ui.Meld(cmd.Context(), runner.Exec{}, "backup", result.Before, "live now", result.After)
 	}
