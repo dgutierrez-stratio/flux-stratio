@@ -31,6 +31,10 @@ All notable changes to this project will be documented in this file.
   the legacy Deployment and Helm strips the CCT annotations the selectors need. A named lookup now
   falls back to a live object rendered by a HelmRelease deploying the type's chart and labelled as
   the run's tenant; `--all` still selects by the catalog's selectors alone.
+* Fix: `dg-agent`'s HelmRelease name is fixed by its storage-type overlay (`dg-hdfs-agent`,
+  `dg-s3-agent`), not derived from the tenant entry: mapping a live agent to a differently named
+  entry failed with "object not found". `object` is now the live name, `kustomization`
+  `apps-<entry>`.
 * An object CCT annotated as another tenant's (`cct.stratio.com/application_tenant`) is never an
   instance: eosdev's platform `opensearch1` (tenant `keos`, `keos-core`) no longer shadows the
   `stratio` tenant's own — name-only discovery had been backing up the `keos-core` copy.

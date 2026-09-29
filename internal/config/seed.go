@@ -144,6 +144,12 @@ func SeedCatalog() Catalog {
 			Name:      "Governance agent",
 			Component: "dgAgent",
 			Rset:      rsetDatastores,
+			// The HelmRelease's name isn't the entry's: each storage-type
+			// overlay fixes it (dg-hdfs-agent, dg-s3-agent), which is also
+			// the legacy Deployment's name, while the rset names the
+			// Kustomization apps-<entry>.
+			Object:        "{{ .Live.Name }}",
+			Kustomization: "apps-{{ .Entry }}",
 			Match: Match{
 				Kinds: []string{kindDeployment},
 				Annotations: &Selector{MatchExpressions: []SelectorRequirement{

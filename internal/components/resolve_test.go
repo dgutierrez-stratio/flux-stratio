@@ -372,3 +372,21 @@ func TestResolve_ManagedButUncataloguedChartExplained(t *testing.T) {
 		t.Errorf("Resolve error = %v, want it to say the object is already Helm-managed", err)
 	}
 }
+
+// TestResolve_DgAgentObjectIsLiveNameNotEntry: dg-agent's storage-type
+// overlay fixes the HelmRelease's name (dg-hdfs-agent) whatever the tenant
+// entry is called, while the Kustomization is named after the entry — so
+// mapping the live agent to entry dg-agent must still find dg-hdfs-agent
+// in apps-dg-agent.
+func TestResolve_DgAgentObjectIsLiveNameNotEntry(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	opts.As = "dg-agent/dg-agent"
+	app, err := Resolve(opts, "dg-hdfs-agent")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.Entry != "dg-agent" || app.Object != "dg-hdfs-agent" || app.Kustomization != "apps-dg-agent" {
+		t.Errorf("entry/object/kustomization = %q/%q/%q, want dg-agent/dg-hdfs-agent/apps-dg-agent", app.Entry, app.Object, app.Kustomization)
+	}
+}
