@@ -22,7 +22,11 @@ func TestConfirm(t *testing.T) {
 		{"garbage\n", false},
 	}
 	for _, c := range cases {
-		got, err := Confirm(strings.NewReader(c.input), "Proceed? ")
+		var out strings.Builder
+		got, err := Confirm(strings.NewReader(c.input), &out, "Proceed? ")
+		if out.String() != "Proceed? " {
+			t.Errorf("Confirm(%q) wrote %q to out, want the prompt", c.input, out.String())
+		}
 		if err != nil {
 			t.Errorf("Confirm(%q) returned error: %v", c.input, err)
 			continue

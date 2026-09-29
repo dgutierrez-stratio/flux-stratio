@@ -35,6 +35,15 @@ All notable changes to this project will be documented in this file.
   `dg-s3-agent`), not derived from the tenant entry: mapping a live agent to a differently named
   entry failed with "object not found". `object` is now the live name, `kustomization`
   `apps-<entry>`.
+* `apps migrate`'s prepare steps now plan before acting: every operation and the live manifest of
+  each object it touches are shown (`--dry-run` stops there), then exactly those run, each pinned to
+  the planned object's UID. Targets are the app's CCT objects (by `cct.stratio.com/application_id`),
+  never Flux-managed ones or hardcoded names. Fixes: `prepare-dlc` looked for the wrong Ingress name
+  (it deleted only the Deployment and left the colliding Ingress) and, like
+  `prepare-datamarket-agent`, could hit the same-named GitOps workload on a re-run;
+  `prepare-datamarket-agent` waited on a label its pods don't carry, so it never waited.
+* Fix: confirmation prompts were written to stdout, so with stdout redirected (e.g. to capture
+  manifests) the prompt landed in the file and the command waited unseen. They go to stderr.
 * An object CCT annotated as another tenant's (`cct.stratio.com/application_tenant`) is never an
   instance: eosdev's platform `opensearch1` (tenant `keos`, `keos-core`) no longer shadows the
   `stratio` tenant's own — name-only discovery had been backing up the `keos-core` copy.

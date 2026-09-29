@@ -5,11 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
@@ -17,78 +13,69 @@ import (
 
 var stepDatamarketAgent = Step{
 	Name:        "prepare-datamarket-agent",
-	Description: "suspend and scale down the legacy datamarket-agent HelmRelease before cutover",
+	Description: "suspend and scale down the legacy datamarket-agent before cutover",
 	Automated:   true,
-	Satisfied:   datamarketAgentSatisfied,
-	Run:         runDatamarketAgent,
+	Plan:        planDatamarketAgent,
 }
 
-// datamarketAgentGVK is the legacy Ansible-managed HelmRelease this step
-// suspends — tenant-aware, unlike the Python client's own version, which
-// hardcoded the "stratio-datastores" namespace regardless of --tenant.
-var datamarketAgentGVK = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"}
+// datamarketAgentHelmRelease is the name of the legacy Ansible-managed
+// HelmRelease some environments deploy datamarket-agent with; eosdev has
+// none (CCT deploys it as a plain Deployment).
+const datamarketAgentHelmRelease = "datamarket-agent"
 
-func datamarketAgentNamespace(tenantName string) string {
-	return tenantName + "-datastores"
-}
+// planDatamarketAgent suspends the legacy HelmRelease, if there is one and
+// it isn't already suspended (a HelmRelease Flux itself applies is the
+// GitOps side, never touched), then scales every legacy Deployment still
+// running to 0 and waits for its pods to go. The Deployments are kept.
+func planDatamarketAgent(ctx context.Context, opts Options) ([]Operation, error) {
+	var ops []Operation
 
-func datamarketAgentSatisfied(ctx context.Context, opts Options) (bool, error) {
-	ns := datamarketAgentNamespace(opts.TenantName)
-
-	var dep appsv1.Deployment
-	err := opts.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: "datamarket-agent"}, &dep)
-	if apierrors.IsNotFound(err) {
-		return true, nil // nothing left to suspend or scale down
-	}
-	if err != nil {
-		return false, fmt.Errorf("fetching Deployment %s/datamarket-agent: %w", ns, err)
-	}
-	return dep.Spec.Replicas != nil && *dep.Spec.Replicas == 0, nil
-}
-
-func runDatamarketAgent(ctx context.Context, opts Options) error {
-	ns := datamarketAgentNamespace(opts.TenantName)
-
-	hr, err := kubeclient.GetUnstructured(ctx, opts.Client, datamarketAgentGVK, ns, "datamarket-agent")
+	hr, err := kubeclient.GetUnstructured(ctx, opts.Client, gvkHelmRelease, opts.LiveNamespace, datamarketAgentHelmRelease)
 	switch {
 	case kubeclient.IsNotFound(err):
-		// no HelmRelease to suspend
 	case err != nil:
-		return fmt.Errorf("fetching HelmRelease %s/datamarket-agent: %w", ns, err)
+		return nil, fmt.Errorf("fetching HelmRelease %s/%s: %w", opts.LiveNamespace, datamarketAgentHelmRelease, err)
 	default:
-		if err := kubeclient.MergePatch(ctx, opts.Client, hr, map[string]any{"spec": map[string]any{"suspend": true}}); err != nil {
-			return fmt.Errorf("suspending HelmRelease %s/datamarket-agent: %w", ns, err)
+		suspended, _, _ := unstructured.NestedBool(hr.Object, "spec", "suspend")
+		if !suspended && !fluxManaged(hr) {
+			ops = append(ops, patchOp("suspend", hr, map[string]any{"suspend": true}))
 		}
 	}
 
-	var dep appsv1.Deployment
-	if err := opts.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: "datamarket-agent"}, &dep); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // nothing to scale down
+	deps, err := legacyObjects(ctx, opts, gvkDeployment)
+	if err != nil {
+		return nil, err
+	}
+	for _, dep := range deps {
+		if n, found, _ := unstructured.NestedInt64(dep.Object, "spec", "replicas"); found && n == 0 {
+			continue
 		}
-		return fmt.Errorf("fetching Deployment %s/datamarket-agent: %w", ns, err)
+		ops = append(ops, scaleToZeroOp(dep))
 	}
-	zero := int32(0)
-	dep.Spec.Replicas = &zero
-	if err := opts.Client.Update(ctx, &dep); err != nil {
-		return fmt.Errorf("scaling Deployment %s/datamarket-agent to 0: %w", ns, err)
-	}
-
-	return waitForNoPods(ctx, opts.Client, ns, "datamarket-agent", 2*time.Minute)
+	return ops, nil
 }
 
-// waitForNoPods polls until no pod labeled app.kubernetes.io/name=appLabel
-// remains in namespace, matching `kubectl wait pod --for=delete`.
-func waitForNoPods(ctx context.Context, c client.Client, namespace, appLabel string, timeout time.Duration) error {
-	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		var pods corev1.PodList
-		if err := c.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{"app.kubernetes.io/name": appLabel}); err != nil {
-			return false, err
+// scaleToZeroOp scales dep to 0 replicas and waits for the pods its own
+// selector matches to terminate. The Python client waited on
+// app.kubernetes.io/name=datamarket-agent, a label the CCT pods don't
+// carry, so it never actually waited.
+func scaleToZeroOp(dep *unstructured.Unstructured) Operation {
+	op := patchOp("scale to 0 replicas", dep, map[string]any{"replicas": 0})
+	patch := op.apply
+	op.apply = func(ctx context.Context, c client.Client) error {
+		// Checked before scaling: with no selector there's nothing to wait
+		// on, and a scale-down that can't be waited for isn't attempted.
+		selector, _, err := unstructured.NestedStringMap(dep.Object, "spec", "selector", "matchLabels")
+		if err != nil {
+			return fmt.Errorf("reading its pod selector: %w", err)
 		}
-		return len(pods.Items) == 0, nil
-	})
-	if err != nil {
-		return fmt.Errorf("waiting for %s pods in %s to terminate: %w", appLabel, namespace, err)
+		if len(selector) == 0 {
+			return fmt.Errorf("it has no spec.selector.matchLabels to wait for its pods by")
+		}
+		if err := patch(ctx, c); err != nil {
+			return err
+		}
+		return waitForNoPods(ctx, c, dep.GetNamespace(), selector, 2*time.Minute)
 	}
-	return nil
+	return op
 }

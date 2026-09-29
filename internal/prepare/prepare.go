@@ -1,25 +1,38 @@
-// Package prepare implements the four one-time, per-tenant preconditions
-// some apps require before they can be migrated (config.App.Prepare):
-// suspending the legacy datamarket-agent, removing ingresses that would
-// collide with their GitOps-managed replacements, and (the one step no
-// Kubernetes API can verify) a manual Postgres data rewrite for genai.
+// Package prepare implements the four one-time preconditions some apps
+// require before they can be migrated (config.App.Prepare): suspending the
+// legacy datamarket-agent, removing legacy objects that would collide with
+// their GitOps-managed replacements, and (the one step no Kubernetes API
+// can verify) a manual Postgres data rewrite for genai.
 //
-// Every automated step re-checks live cluster state — Satisfied — before
-// acting, never a persisted flag, matching flux-keos's own
-// internal/migrate idempotency model ("every step re-checks live cluster
-// state before acting, so running it more than once is always safe").
-// internal/appmigrate's caller (apps migrate) checks Satisfied first and
-// only calls Run when it returns false, under the same --dry-run/--yes
-// confirmation gate as the migration itself (design decision 5 in the
-// project plan) — except prepare-genai, whose confirmation is never
-// skipped by --yes, since silently proceeding against unrewritten data
-// risks real data corruption.
+// An automated step never acts blindly: Plan reads live cluster state —
+// never a persisted flag — and returns every Operation it would perform,
+// each carrying the exact live object it acts on, so apps migrate can show
+// them (and --dry-run stop there) before the operator confirms. An empty
+// plan means the precondition already holds, so re-running is always safe,
+// matching flux-keos's own internal/migrate idempotency model. Applying an
+// Operation is pinned to the object's UID: if the object was replaced
+// since it was planned, the operation fails instead of touching the new one.
+//
+// The legacy objects a step acts on are found by the CCT application id
+// label CCT puts on everything it deploys for an app (<live name>.<live
+// namespace>), never by a hardcoded name, and anything Flux manages is
+// skipped — so a step can't remove the GitOps objects replacing them.
 package prepare
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 
 	"github.com/Stratio/flux-stratio/internal/log"
 )
@@ -27,8 +40,12 @@ import (
 // Options carries what a prepare step needs.
 type Options struct {
 	TenantName string
-	Client     client.Client
-	Log        *log.Logger
+	// LiveName and LiveNamespace are the migrated app's primary live
+	// object's (config.App.LiveName/LiveNamespace): they identify the
+	// legacy objects a step acts on.
+	LiveName, LiveNamespace string
+	Client                  client.Client
+	Log                     *log.Logger
 }
 
 // Step is one precondition an app can require before migration
@@ -36,19 +53,56 @@ type Options struct {
 type Step struct {
 	Name        string
 	Description string
-	// Automated is true when Run performs the precondition itself; false
-	// for a step no automation can verify or safely perform
-	// (prepare-genai), whose Run only explains what the operator must do
-	// and never mutates anything — the actual gating decision belongs to
-	// the caller.
+	// Automated is true when Plan's operations perform the precondition;
+	// false for a step no automation can verify or safely perform
+	// (prepare-genai), which only has Instructions for the operator — the
+	// gating decision belongs to the caller.
 	Automated bool
-	// Satisfied reports whether this precondition already holds, without
-	// changing anything.
-	Satisfied func(ctx context.Context, opts Options) (bool, error)
-	// Run satisfies the precondition (if Automated) or explains what the
-	// operator must do (if not). Called only after Satisfied returns
-	// false.
-	Run func(ctx context.Context, opts Options) error
+	// Plan lists, without changing anything, every operation needed for
+	// the precondition to hold; empty when it already does. Nil for a
+	// step that isn't Automated.
+	Plan func(ctx context.Context, opts Options) ([]Operation, error)
+	// Instructions tells the operator what to do by hand (non-automated
+	// steps only); "<tenant>" stands for the tenant name.
+	Instructions string
+}
+
+// InstructionsFor returns Instructions for tenant.
+func (s Step) InstructionsFor(tenant string) string {
+	return strings.ReplaceAll(s.Instructions, "<tenant>", tenant)
+}
+
+// Operation is one change a step makes to one live object.
+type Operation struct {
+	// Action says what is done to Object, e.g. "delete".
+	Action string
+	// Object is the live object as Plan read it.
+	Object *unstructured.Unstructured
+	apply  func(ctx context.Context, c client.Client) error
+}
+
+// String renders the operation as "<action> <Kind> <namespace>/<name>".
+func (o Operation) String() string {
+	return fmt.Sprintf("%s %s %s/%s", o.Action, o.Object.GetKind(), o.Object.GetNamespace(), o.Object.GetName())
+}
+
+// Apply performs the operation.
+func (o Operation) Apply(ctx context.Context, c client.Client) error {
+	if err := o.apply(ctx, c); err != nil {
+		return fmt.Errorf("%s: %w", o, err)
+	}
+	return nil
+}
+
+// Manifest renders Object as YAML, without the server-side bookkeeping
+// (managedFields, status, last-applied-configuration) that says nothing
+// about which object it is.
+func (o Operation) Manifest() ([]byte, error) {
+	obj := o.Object.DeepCopy()
+	unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
+	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "kubectl.kubernetes.io/last-applied-configuration")
+	unstructured.RemoveNestedField(obj.Object, "status")
+	return yaml.Marshal(obj.Object)
 }
 
 // Steps are the four ported prepare preconditions, in no particular
@@ -66,6 +120,102 @@ func Find(name string) *Step {
 		if Steps[i].Name == name {
 			return &Steps[i]
 		}
+	}
+	return nil
+}
+
+var (
+	gvkIngress     = schema.GroupVersionKind{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress"}
+	gvkDeployment  = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
+	gvkHelmRelease = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"}
+)
+
+// cctAppIDLabel is the label CCT sets on every object it deploys for an
+// app, valued "<name>.<namespace>".
+const cctAppIDLabel = "cct.stratio.com/application_id"
+
+// fluxLabels are set on every object a Flux Kustomization or HelmRelease
+// applies — the GitOps side, which a prepare step must never touch.
+var fluxLabels = []string{"kustomize.toolkit.fluxcd.io/name", "helm.toolkit.fluxcd.io/name"}
+
+func fluxManaged(obj *unstructured.Unstructured) bool {
+	for _, l := range fluxLabels {
+		if _, ok := obj.GetLabels()[l]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyObjects lists the objects of kind gvk CCT deployed for the app
+// (by cctAppIDLabel) in its live namespace, leaving out anything Flux
+// manages.
+func legacyObjects(ctx context.Context, opts Options, gvk schema.GroupVersionKind) ([]*unstructured.Unstructured, error) {
+	if opts.LiveName == "" || opts.LiveNamespace == "" {
+		return nil, fmt.Errorf("no live object to identify the app's legacy objects by")
+	}
+	id := opts.LiveName + "." + opts.LiveNamespace
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
+	if err := opts.Client.List(ctx, list, client.InNamespace(opts.LiveNamespace), client.MatchingLabels{cctAppIDLabel: id}); err != nil {
+		return nil, fmt.Errorf("listing %ss labelled %s=%s in %s: %w", gvk.Kind, cctAppIDLabel, id, opts.LiveNamespace, err)
+	}
+	var out []*unstructured.Unstructured
+	for i := range list.Items {
+		obj := &list.Items[i]
+		if fluxManaged(obj) {
+			continue
+		}
+		obj.SetGroupVersionKind(gvk)
+		out = append(out, obj)
+	}
+	return out, nil
+}
+
+// deleteOp deletes obj — only that very object (UID precondition), in
+// the background, so a Deployment's ReplicaSets and pods go with it.
+func deleteOp(obj *unstructured.Unstructured) Operation {
+	return Operation{Action: "delete", Object: obj, apply: func(ctx context.Context, c client.Client) error {
+		uid := obj.GetUID()
+		target := &unstructured.Unstructured{}
+		target.SetGroupVersionKind(obj.GroupVersionKind())
+		target.SetNamespace(obj.GetNamespace())
+		target.SetName(obj.GetName())
+		return client.IgnoreNotFound(c.Delete(ctx, target,
+			client.Preconditions{UID: &uid}, client.PropagationPolicy("Background")))
+	}}
+}
+
+// patchOp merge-patches spec into obj, pinned to its UID: the API server
+// rejects the patch if the object has since been replaced.
+func patchOp(action string, obj *unstructured.Unstructured, spec map[string]any) Operation {
+	return Operation{Action: action, Object: obj, apply: func(ctx context.Context, c client.Client) error {
+		data, err := json.Marshal(map[string]any{
+			"metadata": map[string]any{"uid": string(obj.GetUID())},
+			"spec":     spec,
+		})
+		if err != nil {
+			return fmt.Errorf("marshaling merge patch: %w", err)
+		}
+		return c.Patch(ctx, obj.DeepCopy(), client.RawPatch(types.MergePatchType, data))
+	}}
+}
+
+// waitForNoPods polls until no pod matching selector remains in namespace,
+// matching `kubectl wait pod --for=delete`.
+func waitForNoPods(ctx context.Context, c client.Client, namespace string, selector map[string]string, timeout time.Duration) error {
+	if len(selector) == 0 {
+		return fmt.Errorf("no pod selector to wait on")
+	}
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		var pods corev1.PodList
+		if err := c.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels(selector)); err != nil {
+			return false, err
+		}
+		return len(pods.Items) == 0, nil
+	})
+	if err != nil {
+		return fmt.Errorf("waiting for pods %v in %s to terminate: %w", selector, namespace, err)
 	}
 	return nil
 }

@@ -226,9 +226,11 @@ non-default one. See [`docs/migration-runbook.md`](docs/migration-runbook.md) fo
 
 An app whose config declares a `prepare` step (see
 [`docs/config-reference.md`](docs/config-reference.md)) has that precondition checked — and, for an
-automated step, satisfied — as the first stage of `apps migrate`, before any diff or patch. A step
-requiring a manual action (`prepare-genai`'s Postgres data rewrite) prints what to do and always
-asks its own separate confirmation, never skipped by `--yes`.
+automated step, satisfied — as the first stage of `apps migrate`, before any diff or patch. An
+automated step first lists every operation it would perform (on stderr) and the live manifest of each
+object it acts on (on stdout), then asks before running exactly those; `--dry-run` stops after the
+list. A step requiring a manual action (`prepare-genai`'s Postgres data rewrite) prints what to do
+and always asks its own separate confirmation, never skipped by `--yes`.
 
 ## Build from source
 

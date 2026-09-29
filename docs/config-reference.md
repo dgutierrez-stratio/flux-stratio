@@ -172,9 +172,17 @@ here, run automatically as the first stage of `apps migrate` for that instance.
 
 | Step | What it does | Automated? |
 |---|---|---|
-| `prepare-datamarket-agent` | Suspends the legacy `datamarket-agent` HelmRelease and scales its Deployment to 0, waiting for its pods to terminate | yes |
-| `prepare-datarest` | Removes the legacy DataRest ingress that would collide with the GitOps-managed one | yes |
-| `prepare-dlc` | Removes the legacy DLC ingress and deployment (the chart changed an immutable selector label, so Flux must recreate it) | yes |
+| `prepare-datamarket-agent` | Suspends the legacy `datamarket-agent` HelmRelease (if there is one and Flux doesn't manage it) and scales the app's legacy Deployment to 0 (kept, not deleted), waiting for the pods its selector matches to terminate | yes |
+| `prepare-datarest` | Deletes the app's legacy Ingress, which would collide with the GitOps-managed one | yes |
+| `prepare-dlc` | Deletes the app's legacy Ingress and Deployment (the chart changed an immutable selector label, so Flux must recreate it) | yes |
+
+An automated step's "legacy" objects are those in the app's live namespace labelled
+`cct.stratio.com/application_id: <live name>.<live namespace>` (CCT's own app id), minus anything
+carrying a Flux `kustomize.toolkit.fluxcd.io/name` or `helm.toolkit.fluxcd.io/name` label. It never
+matches by a hardcoded object name, and it never touches the GitOps objects that replace them, even
+on a re-run after cutover. `apps migrate` lists every operation and prints each target's live
+manifest before asking, and `--dry-run` stops there. Each operation is pinned to the planned
+object's UID, so an object replaced in the meantime makes it fail rather than act on the new one.
 | `prepare-genai` | A Postgres data rewrite (renaming a stored component reference) — no Kubernetes API can verify this happened, so it's never auto-detected. `apps migrate` prints the exact SQL and always asks its own separate confirmation before proceeding, never skipped by `--yes` | no |
 
 Every automated step re-checks live cluster state each run rather than trusting a persisted

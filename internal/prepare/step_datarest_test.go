@@ -3,84 +3,29 @@ package prepare
 import (
 	"context"
 	"testing"
-
-	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func runtimeInfoConfigMap(domain string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "keos-runtime-info", Namespace: "flux-system"},
-		Data:       map[string]string{"CLUSTER_EXTERNAL_DOMAIN": domain},
-	}
-}
+var datarestOpts = Options{TenantName: "stratio", LiveName: "dg-datarest-pgi", LiveNamespace: "stratio-datastores"}
 
-func TestDatarestSatisfied_NoIngressIsSatisfied(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(runtimeInfoConfigMap("eosdev.int")).Build()
-	ok, err := datarestSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Error("Satisfied = false, want true (no legacy ingress present)")
-	}
-}
+// TestPlanDatarest_OnlyTheAppsLegacyIngresses mirrors eosdev: the admin
+// Ingress CCT deployed for dg-datarest-pgi is deleted; another app's, the
+// same app id in another namespace, and a Flux-managed one aren't.
+func TestPlanDatarest_OnlyTheAppsLegacyIngresses(t *testing.T) {
+	const id = "dg-datarest-pgi.stratio-datastores"
+	c := fakeClient(t,
+		object(gvkIngress, "stratio-datastores", "dg-datarest-pgi-admin.eosdev.int", cctAppIDLabel, id),
+		object(gvkIngress, "stratio-datastores", "other-app", cctAppIDLabel, "other.stratio-datastores"),
+		object(gvkIngress, "other-datastores", "dg-datarest-pgi-admin.eosdev.int", cctAppIDLabel, id),
+		object(gvkIngress, "stratio-datastores", "dg-datarest-pgi", cctAppIDLabel, id, "helm.toolkit.fluxcd.io/name", "dg-datarest-pgi"),
+		object(gvkDeployment, "stratio-datastores", "dg-datarest-pgi", cctAppIDLabel, id),
+	)
+	opts := datarestOpts
+	opts.Client = c
 
-func TestDatarestSatisfied_IngressPresentIsNotSatisfied(t *testing.T) {
-	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{
-		Name: "dg-datarest-pgi-admin.eosdev.int", Namespace: "stratio-datastores",
-	}}
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(runtimeInfoConfigMap("eosdev.int"), ing).Build()
-	ok, err := datarestSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Error("Satisfied = true, want false (legacy ingress still present)")
-	}
-}
+	ops, err := planDatarest(context.Background(), opts)
+	assertPlan(t, ops, err, "delete Ingress stratio-datastores/dg-datarest-pgi-admin.eosdev.int")
 
-func TestDatarestSatisfied_TenantAwareNamespace(t *testing.T) {
-	// Ingress lives in the OTHER tenant's namespace: must not satisfy this one.
-	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{
-		Name: "dg-datarest-pgi-admin.eosdev.int", Namespace: "other-datastores",
-	}}
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(runtimeInfoConfigMap("eosdev.int"), ing).Build()
-	ok, err := datarestSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Error("Satisfied = false, want true (ingress belongs to a different tenant's namespace)")
-	}
-}
-
-func TestDatarestSatisfied_MissingConfigMapErrors(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).Build()
-	if _, err := datarestSatisfied(context.Background(), Options{TenantName: "stratio", Client: c}); err == nil {
-		t.Fatal("datarestSatisfied with no keos-runtime-info ConfigMap: got nil error, want non-nil")
-	}
-}
-
-func TestRunDatarest_DeletesIngressIdempotently(t *testing.T) {
-	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{
-		Name: "dg-datarest-pgi-admin.eosdev.int", Namespace: "stratio-datastores",
-	}}
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(runtimeInfoConfigMap("eosdev.int"), ing).Build()
-
-	opts := Options{TenantName: "stratio", Client: c}
-	if err := runDatarest(context.Background(), opts); err != nil {
-		t.Fatalf("runDatarest returned error: %v", err)
-	}
-	ok, err := datarestSatisfied(context.Background(), opts)
-	if err != nil || !ok {
-		t.Errorf("Satisfied after Run = %v, err = %v, want true, nil", ok, err)
-	}
-
-	// Running again must be a no-op, not an error.
-	if err := runDatarest(context.Background(), opts); err != nil {
-		t.Errorf("second runDatarest returned error: %v", err)
-	}
+	applyAll(t, c, ops)
+	ops, err = planDatarest(context.Background(), opts)
+	assertPlan(t, ops, err) // satisfied: nothing left to do
 }

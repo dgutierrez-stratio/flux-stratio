@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -167,7 +168,7 @@ func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chart
 	}
 
 	if !yes {
-		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), fmt.Sprintf("Apply this patch to %q? [y/N] ", app.Name))
+		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("Apply this patch to %q? [y/N] ", app.Name))
 		if err != nil {
 			return err
 		}
@@ -189,48 +190,58 @@ func migrateOne(cmd *cobra.Command, app config.App, base, cluster, tenant, chart
 
 // ensurePrepared checks app's declared prepare precondition and, if it
 // doesn't already hold, satisfies it (design decision 5 in the project
-// plan): an automated step runs under the same --dry-run/--yes gate as
-// the migration itself; a non-automated step (prepare-genai) prints what
-// the operator must do and always asks its own separate confirmation,
-// never skipped by --yes — silently proceeding against unrewritten data
-// risks real data corruption.
+// plan). An automated step's plan — every operation, and the live
+// manifest of the object it acts on (stdout) — is shown first; --dry-run
+// stops there, and otherwise it runs under the same --yes gate as the
+// migration itself, applying exactly the operations shown. A
+// non-automated step (prepare-genai) prints what the operator must do and
+// always asks its own separate confirmation, never skipped by --yes —
+// silently proceeding against unrewritten data risks real data corruption.
 func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.Client, logger *log.Logger, dryRun, yes bool) error {
 	step := prepare.Find(app.Prepare)
 	if step == nil {
 		return fmt.Errorf("app %q declares unknown prepare step %q", app.ID, app.Prepare)
 	}
-	popts := prepare.Options{TenantName: tenant, Client: c, Log: logger}
 
-	satisfied, err := step.Satisfied(cmd.Context(), popts)
-	if err != nil {
-		return fmt.Errorf("checking prepare step %q: %w", step.Name, err)
+	if !step.Automated {
+		logger.Warningf("prepare step %q is required for %q: %s. Do it by hand:\n%s", step.Name, app.Name, step.Description, step.InstructionsFor(tenant))
+		if dryRun {
+			logger.Successf("dry run: would ask whether you have completed prepare step %q", step.Name)
+			return nil
+		}
+		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("Have you already completed %q? [y/N] ", step.Name))
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
+		}
+		return nil
 	}
-	if satisfied {
+
+	popts := prepare.Options{TenantName: tenant, LiveName: app.LiveName(), LiveNamespace: app.LiveNamespace(), Client: c, Log: logger}
+	ops, err := step.Plan(cmd.Context(), popts)
+	if err != nil {
+		return fmt.Errorf("planning prepare step %q: %w", step.Name, err)
+	}
+	if len(ops) == 0 {
 		logger.Debugf("prepare step %q already satisfied", step.Name)
 		return nil
 	}
 
-	if !step.Automated {
-		if err := step.Run(cmd.Context(), popts); err != nil {
-			return err
-		}
-		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), fmt.Sprintf("Have you already completed %q? [y/N] ", step.Name))
-		if err != nil {
-			return err
-		}
-		if !proceed {
-			return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
-		}
-		return nil
+	logger.Actionf("prepare step %q is required for %q: %s. It will:", step.Name, app.Name, step.Description)
+	for i, op := range ops {
+		logger.Actionf("  %d. %s", i+1, op)
 	}
-
-	logger.Actionf("prepare step %q is required for %q: %s", step.Name, app.Name, step.Description)
+	if err := writePrepareManifests(cmd.OutOrStdout(), ops); err != nil {
+		return err
+	}
 	if dryRun {
-		logger.Successf("dry run: would run prepare step %q", step.Name)
+		logger.Successf("dry run: would run prepare step %q (%d operation(s) above)", step.Name, len(ops))
 		return nil
 	}
 	if !yes {
-		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), fmt.Sprintf("Run prepare step %q for %q now? [y/N] ", step.Name, app.Name))
+		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("Run these %d operation(s) of prepare step %q now? [y/N] ", len(ops), step.Name))
 		if err != nil {
 			return err
 		}
@@ -238,9 +249,27 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 			return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
 		}
 	}
-	if err := step.Run(cmd.Context(), popts); err != nil {
-		return fmt.Errorf("running prepare step %q: %w", step.Name, err)
+	for i, op := range ops {
+		logger.Waitingf("%d/%d %s", i+1, len(ops), op)
+		if err := op.Apply(cmd.Context(), c); err != nil {
+			return fmt.Errorf("running prepare step %q: %w", step.Name, err)
+		}
 	}
 	logger.Successf("prepare step %q complete", step.Name)
+	return nil
+}
+
+// writePrepareManifests writes each operation's live object as a YAML
+// document, headed by a comment naming the operation.
+func writePrepareManifests(w io.Writer, ops []prepare.Operation) error {
+	for i, op := range ops {
+		manifest, err := op.Manifest()
+		if err != nil {
+			return fmt.Errorf("rendering %s: %w", op, err)
+		}
+		if _, err := fmt.Fprintf(w, "---\n# %d. %s\n%s", i+1, op, manifest); err != nil {
+			return err
+		}
+	}
 	return nil
 }

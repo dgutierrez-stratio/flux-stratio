@@ -4,98 +4,85 @@ import (
 	"context"
 	"testing"
 
-	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func replicas(n int32) *int32 { return &n }
+const datamarketID = "datamarket-agent.stratio-datastores"
 
-func deploymentWithReplicas(name, namespace string, n int32) *appsv1.Deployment {
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: replicas(n),
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
+var datamarketOpts = Options{TenantName: "stratio", LiveName: "datamarket-agent", LiveNamespace: "stratio-datastores"}
+
+func legacyHelmRelease(suspend bool, labels ...string) *unstructured.Unstructured {
+	hr := object(gvkHelmRelease, "stratio-datastores", "datamarket-agent", labels...)
+	_ = unstructured.SetNestedField(hr.Object, suspend, "spec", "suspend")
+	return hr
+}
+
+func TestPlanDatamarketAgent_SuspendsAndScalesDown(t *testing.T) {
+	c := fakeClient(t, legacyHelmRelease(false), legacyDeployment("stratio-datastores", "datamarket-agent", datamarketID, 2))
+	opts := datamarketOpts
+	opts.Client = c
+
+	ops, err := planDatamarketAgent(context.Background(), opts)
+	assertPlan(t, ops, err,
+		"suspend HelmRelease stratio-datastores/datamarket-agent",
+		"scale to 0 replicas Deployment stratio-datastores/datamarket-agent")
+
+	applyAll(t, c, ops)
+	ops, err = planDatamarketAgent(context.Background(), opts)
+	assertPlan(t, ops, err) // suspended and scaled down: satisfied
+}
+
+// TestPlanDatamarketAgent_EosdevHasNoHelmRelease: eosdev's datamarket-agent
+// is a plain CCT Deployment; only the scale-down is planned.
+func TestPlanDatamarketAgent_EosdevHasNoHelmRelease(t *testing.T) {
+	opts := datamarketOpts
+	opts.Client = fakeClient(t, legacyDeployment("stratio-datastores", "datamarket-agent", datamarketID, 1))
+	ops, err := planDatamarketAgent(context.Background(), opts)
+	assertPlan(t, ops, err, "scale to 0 replicas Deployment stratio-datastores/datamarket-agent")
+}
+
+func TestPlanDatamarketAgent_NeverTheGitOpsSide(t *testing.T) {
+	opts := datamarketOpts
+	opts.Client = fakeClient(t,
+		legacyHelmRelease(false, "kustomize.toolkit.fluxcd.io/name", "apps-governance-datamarket-agent"),
+		legacyDeployment("stratio-datastores", "datamarket-agent", datamarketID, 1, "helm.toolkit.fluxcd.io/name", "datamarket-agent"))
+	ops, err := planDatamarketAgent(context.Background(), opts)
+	assertPlan(t, ops, err)
+}
+
+func TestPlanDatamarketAgent_OtherNamespaceIgnored(t *testing.T) {
+	opts := datamarketOpts
+	opts.Client = fakeClient(t, legacyDeployment("other-datastores", "datamarket-agent", "datamarket-agent.other-datastores", 3))
+	ops, err := planDatamarketAgent(context.Background(), opts)
+	assertPlan(t, ops, err)
+}
+
+// TestScaleToZeroOp_NoSelectorFailsBeforePatching: without a pod selector
+// there's nothing to wait on, so the scale-down isn't attempted at all.
+func TestScaleToZeroOp_NoSelectorFailsBeforePatching(t *testing.T) {
+	dep := object(gvkDeployment, "stratio-datastores", "datamarket-agent", cctAppIDLabel, datamarketID)
+	_ = unstructured.SetNestedField(dep.Object, int64(1), "spec", "replicas")
+	patches := 0
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(dep).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
+			patches++
+			return c.Patch(ctx, o, p, opts...)
 		},
+	}).Build()
+	if err := scaleToZeroOp(dep).Apply(context.Background(), c); err == nil {
+		t.Error("scaling a Deployment with no pod selector: got nil error")
+	}
+	if patches != 0 {
+		t.Errorf("patched %d time(s) before failing, want 0", patches)
 	}
 }
 
-func TestDatamarketAgentSatisfied_NoDeploymentIsSatisfied(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).Build()
-	ok, err := datamarketAgentSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Error("Satisfied = false, want true (nothing to suspend)")
-	}
-}
-
-func TestDatamarketAgentSatisfied_ScaledToZeroIsSatisfied(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).
-		WithObjects(deploymentWithReplicas("datamarket-agent", "stratio-datastores", 0)).Build()
-	ok, err := datamarketAgentSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Error("Satisfied = false, want true (already scaled to 0)")
-	}
-}
-
-func TestDatamarketAgentSatisfied_StillRunningIsNotSatisfied(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).
-		WithObjects(deploymentWithReplicas("datamarket-agent", "stratio-datastores", 2)).Build()
-	ok, err := datamarketAgentSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Error("Satisfied = true, want false (still running with 2 replicas)")
-	}
-}
-
-func TestDatamarketAgentSatisfied_IsTenantAware(t *testing.T) {
-	// A Deployment in a DIFFERENT tenant's namespace must not satisfy this
-	// tenant's check — the Python client hardcoded "stratio-datastores".
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).
-		WithObjects(deploymentWithReplicas("datamarket-agent", "other-datastores", 3)).Build()
-	ok, err := datamarketAgentSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Error("Satisfied = false, want true (the running deployment belongs to a different tenant)")
-	}
-}
-
-func TestRunDatamarketAgent_SuspendsAndScalesDown(t *testing.T) {
-	hr := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
-		"metadata": map[string]any{"name": "datamarket-agent", "namespace": "stratio-datastores"},
-		"spec":     map[string]any{},
-	}}
-	dep := deploymentWithReplicas("datamarket-agent", "stratio-datastores", 2)
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(hr, dep).Build()
-
-	if err := runDatamarketAgent(context.Background(), Options{TenantName: "stratio", Client: c}); err != nil {
-		t.Fatalf("runDatamarketAgent returned error: %v", err)
-	}
-
-	ok, err := datamarketAgentSatisfied(context.Background(), Options{TenantName: "stratio", Client: c})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Error("Satisfied = false after Run, want true")
-	}
-}
-
-func TestRunDatamarketAgent_NothingToDoIsANoOp(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).Build()
-	if err := runDatamarketAgent(context.Background(), Options{TenantName: "stratio", Client: c}); err != nil {
-		t.Fatalf("runDatamarketAgent returned error: %v", err)
-	}
+func TestPlanDatamarketAgent_AlreadySuspendedHelmReleaseLeftAlone(t *testing.T) {
+	opts := datamarketOpts
+	opts.Client = fakeClient(t, legacyHelmRelease(true), legacyDeployment("stratio-datastores", "datamarket-agent", datamarketID, 1))
+	ops, err := planDatamarketAgent(context.Background(), opts)
+	assertPlan(t, ops, err, "scale to 0 replicas Deployment stratio-datastores/datamarket-agent")
 }

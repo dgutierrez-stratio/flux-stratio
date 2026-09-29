@@ -86,7 +86,9 @@ all is skipped with a warning. Nothing you answer is stored — pass `--as <type
 single-app run to answer up front, e.g. `flux stratio apps migrate kafka1 --as kafka/kafka`.
 
 For an app with a declared `prepare` step, read what that step actually does before your first run
-against production — `flux stratio apps migrate` runs it automatically, but a step like
+against production. Run `flux stratio apps migrate <name> --dry-run` first: it lists every operation
+the step would perform and prints the live manifest of each object it would touch, without
+changing anything. `flux stratio apps migrate` then asks before running exactly those, but a step like
 `prepare-datamarket-agent` suspends and scales down a live workload, which is disruptive by nature
 even though it's exactly what needs to happen before cutover. See
 [`config-reference.md`](config-reference.md#prepare) for what each of the four steps does.

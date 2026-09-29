@@ -271,11 +271,16 @@ convention, that repo is the reference:
   sorts `--all` by the dependency edges already declared in the tenant file itself (DFS post-order,
   cycle-safe), not catalog order.
 - **`internal/prepare`** — the four ported one-time preconditions (`prepare-datamarket-agent`,
-  `prepare-datarest`, `prepare-dlc`, `prepare-genai`), each a `Step{Satisfied, Run}` pair. No CLI
-  surface of its own — `internal/cli`'s `ensurePrepared` (in `apps_migrate.go`) is the only caller,
-  wired as the first stage of `apps migrate`. `prepare-genai` is a manual Postgres data rewrite no
-  Kubernetes API can verify; its `Satisfied` always returns `false`, and its confirmation is never
-  skipped by `--yes`.
+  `prepare-datarest`, `prepare-dlc`, `prepare-genai`). An automated step's `Plan` reads live state
+  and returns `[]Operation`, each carrying the live object it acts on (empty = already satisfied).
+  `ensurePrepared` (in `internal/cli/apps_migrate.go`, the only caller, and the first stage of
+  `apps migrate`) prints those operations and their manifests, stops there under `--dry-run`, and
+  otherwise applies exactly them. Targets are found by CCT's `cct.stratio.com/application_id` label
+  (`<App.LiveName()>.<App.LiveNamespace()>`), skipping Flux-labelled objects; there are no
+  hardcoded names, since the Python client's hardcoded DLC Ingress name was wrong on eosdev. Every
+  delete or patch is UID-pinned. `prepare-genai`, a manual Postgres data rewrite no Kubernetes API
+  can verify, has only `Instructions`, and its confirmation is never skipped by `--yes`, though
+  `--dry-run` doesn't ask it.
 - **`internal/tenantimport`** — `tenant import`'s live-cluster scan (CRD instances → Deployments →
   HelmReleases, three passes feeding one `Components` map), fixpoint-expanding mandatory
   dependencies, then rendering a tenant-file skeleton. Deliberately **not** reused by
@@ -346,5 +351,3 @@ being tested in a feature package first.
 - `docs/config-reference.md` and this file can drift from the actual `config.ComponentType` fields —
   if you add/remove one, update `docs/config-reference.md` and `internal/config/seed.go` in the
   same change.
-- `internal/prepare`'s steps still hardcode their legacy namespaces (`<tenant>-datastores`,
-  `<tenant>-dlc`); they could take the resolved `App.LiveNamespace()` instead.
