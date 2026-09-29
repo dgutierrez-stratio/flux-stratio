@@ -1,6 +1,6 @@
 ---
 name: add-catalog-component
-description: Add support for a new legacy Stratio component to flux-stratio's component catalog (catalog.yaml, seeded by `flux stratio config init`), so `apps diff/backup/migrate` can classify and migrate it. Use when `flux stratio apps diff <name>` fails with "none is selected by any catalog type", or when asked to support a component the catalog doesn't cover yet.
+description: Add support for a new legacy Stratio component to flux-stratio's component catalog (catalog.yaml, seeded by `flux stratio config init`), so `apps diff/backup/migrate` can classify and migrate it. Use when `flux stratio apps diff <name>` fails with "none is selected by any catalog type" for a not-yet-migrated (CCT-deployed) component, or when asked to support a component the catalog doesn't cover yet.
 ---
 
 # Add a component type to the flux-stratio catalog
@@ -51,6 +51,15 @@ You'll get `found <Kind> <ns>/<name>, ... live, but none is selected by any cata
 error lists every live object with that name, which is your first evidence for Step 2. Any other
 error (e.g. "commented out in the tenant file") isn't a catalog gap; fix that instead.
 
+If the error says the object "is rendered by HelmRelease …, already migrated", the component was
+migrated before a catalog type existed for it (or a type's `chart.path` doesn't name the chart the
+HelmRelease deploys). The CCT annotations the selector needs are gone from the live object: Helm
+rewrote its metadata when the HelmRelease adopted it. Take the selector evidence from the
+pre-migration backup (`<backups>/<name>/*/deployment.yaml` or `cr.yaml`) or from sibling objects
+CCT still manages, and make sure `chart.path`'s base name equals the HelmRelease's
+`spec.chart.spec.chart`, since that's what resolves the migrated workload by name
+(`ManagedMatches`). Also check the workload's `keos.stratio.com/tenant` label is the run's tenant.
+
 ## Step 2 — Gather evidence for every dimension (read-only)
 
 Answer each row and write down the answer, even when it's "none / default". Commands use the
@@ -67,6 +76,7 @@ placeholders from Step 0.
 | **Mode** | Is the rendered object a CR (manifest mode) or a HelmRelease (chart mode)? Which values root? | `<base>/keos-apps/components/<dir>/app/base/*.yaml`. For chart mode, the chart under `<chartsBase>` | `chart.path`, `chart.valuesRoot` |
 | **Dependencies** | Which spec fields reference another component the template substitutes? | The template's `$dependencies` and `postBuild.substitute`, then the matching fields in the diff | Candidates for `exclude` |
 | **Exclusions** | Which differing fields must GitOps own (identity, vault, governance, cluster references, maybe images and URLs)? | The first `--view patch` diff, field by field (Step 5) | `exclude` |
+| **Data identity** | Does the chart derive the identity its data is bound to (cert CN = DB user, Vault paths, gosec user) from the release name? Then renaming loses the data | The chart's `{{ .Release.Name }}.{{ .Release.Namespace }}` uses (secretsBundle, gosecUser/Policy, SERVICE_NAME) vs. the live identity | Keep the legacy name as the entry (default templates). The GitOps name must be configurable (keos-apps `${<NAME>:=<default>}`). **Never point the release at the legacy Vault keys**: a chart SecretsBundle owns `userland/passwords/<release>.<namespace>/` and deletes every key there it doesn't declare. Data encrypted with legacy secrets must be cleaned and re-created before cutover |
 | **Preconditions** | Would cutover collide with anything: an unowned legacy Ingress, an immutable selector, a legacy HelmRelease to suspend, a data rewrite? | Live Ingress, Service and HelmRelease objects for the component and who owns them; immutable fields | `prepare` (an existing step, or a new one in `<repo>/internal/prepare`), `notes` |
 | **Flux state / backup** | Is the live object already Flux-managed? Does a backup exist? | The `kustomize.toolkit.fluxcd.io/name` label, and `<backups>/<id>/` | Whether Step 4 diffs live or `--baseline latest` |
 
