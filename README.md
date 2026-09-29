@@ -199,7 +199,8 @@ A patch is the set of legacy values the GitOps render doesn't already produce. `
    what the existing patch already set.
 2. **Legacy side:** the live cluster, or a backup with `--baseline`.
 3. **Result:** if the tenant file already carries exactly that patch, there is nothing to do — so
-   running `apps migrate` twice converges. Otherwise the patch is written in full, replacing the old
+   running `apps migrate` twice converges (`apps diff --view meld` still shows the differences that
+   patch covers, labelling the desired side `desired state without tenant patch`). Otherwise the patch is written in full, replacing the old
    one, with every comment in the tenant file preserved.
 
 **Back up, then migrate each component *before* pushing it to the tenant file unpatched.** Once a

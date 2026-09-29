@@ -153,8 +153,8 @@ delta, and never trusting "already done."
 >
 > Then commit and push the tenant file: Flux re-applies the component with the patch, restoring the
 > legacy values (a changed replica count or resources roll the component's pods). Confirm with
-> `flux stratio apps diff pool-psql --baseline latest`, which should now report that the tenant file
-> already carries exactly the patch needed.
+> `flux stratio apps diff pool-psql --baseline latest`, which should now report nothing to migrate: the
+> tenant file's existing patch already covers every difference.
 
 ## 7. Migrate the rest
 

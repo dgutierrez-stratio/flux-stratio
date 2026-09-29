@@ -72,7 +72,9 @@ The patch is always the whole one: the desired side is rendered without
 the tenant file's existing patch for the object's kind (the one apps
 migrate would replace), so --view patch shows exactly what apps migrate
 would write. When the tenant file already carries exactly that patch,
-there's nothing to show.
+there's nothing to migrate — though --view meld still shows the
+differences that patch covers, labelling the desired side "desired state
+without tenant patch".
 
 When the live object is already reconciled by Flux (it carries Flux's
 kustomize.toolkit.fluxcd.io/name or helm.toolkit.fluxcd.io/name label),
@@ -275,13 +277,18 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 
 	// meld opens even when there's nothing to change, so both sides can be
 	// inspected: with UpToDate they still differ by the tenant file's own
-	// patch, which the base is rendered without.
+	// patch, which the base is rendered without — the desired side's label
+	// says so, or its differences read as contradicting "nothing to migrate".
 	openMeld := func() error {
+		desiredLabel := "desired state"
+		if result.ExistingPatches > 0 {
+			desiredLabel = "desired state without tenant patch"
+		}
 		liveLabel := "live cluster"
 		if resolvedBaseline != "" {
 			liveLabel = "backup"
 		}
-		return ui.Meld(cmd.Context(), runner.Exec{}, "desired state", result.Before, liveLabel, result.After)
+		return ui.Meld(cmd.Context(), runner.Exec{}, desiredLabel, result.Before, liveLabel, result.After)
 	}
 
 	warnFluxManaged(logger, app, result.FluxManagedBy)
@@ -382,7 +389,7 @@ func warnFluxManaged(logger *log.Logger, app config.App, managedBy string) {
 func reportNoChange(logger *log.Logger, upToDate bool, obsoletePatches int) {
 	switch {
 	case upToDate:
-		logger.Successf("no differences: the tenant file already carries exactly the patch needed")
+		logger.Successf("nothing to migrate: the tenant file's existing patch already covers every difference")
 	case obsoletePatches > 0:
 		logger.Warningf("no differences against the unpatched base, but the tenant file carries %d patch(es) for this object "+
 			"that Flux would apply on top — review or remove them", obsoletePatches)

@@ -175,7 +175,10 @@ All notable changes to this project will be documented in this file.
 * `apps diff --view meld` (both the desired-state comparison and `--drift`) now opens meld even
   when there are no differences, after the "no differences"/"no drift" line, instead of silently
   skipping it. When the tenant file already carries exactly the patch needed, the two sides still
-  differ by that patch (the base is rendered without it), so meld shows what it covers.
+  differ by that patch (the base is rendered without it), so meld shows what it covers; the desired
+  side is then labelled `desired state without tenant patch`, and the message reads "nothing to
+  migrate: the tenant file's existing patch already covers every difference" instead of the
+  misleading "no differences".
 * A chart-mode capture (`apps backup`, `apps diff --drift`) that finds none of the chart's workloads
   live now says why: the "declares no live workloads" warning names the workloads it looked for, the
   chart directory it rendered, and the chart version the release runs — the usual cause is a

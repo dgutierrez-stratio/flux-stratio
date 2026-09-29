@@ -65,6 +65,10 @@ type Result struct {
 	// the tenant file when Patch is nil — live already matches the base,
 	// so whatever they set would move live away from its current state.
 	ObsoletePatches int
+	// ExistingPatches counts the tenant file's patches for this object's
+	// kind, whatever Patch is: Before is rendered without them, so when it's
+	// non-zero Before is the unpatched base, not what Flux would apply.
+	ExistingPatches int
 	// FluxManagedBy is set (to "Kustomization <name>" or "HelmRelease
 	// <name>") when the live object compared against is already managed by
 	// Flux: its state then reflects the GitOps render, not the legacy
@@ -101,6 +105,7 @@ func Diff(ctx context.Context, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.ExistingPatches = len(rendered.ReplacedPatches)
 	switch {
 	case result.Patch == nil:
 		result.ObsoletePatches = len(rendered.ReplacedPatches)
