@@ -50,7 +50,7 @@ flux stratio doctor                            # preflight: binaries (+ optional
                                                  # chart paths, catalog types vs. templates, cluster, tenant file
 
 flux stratio config init --base --cluster --tenant [--charts] [--dir] [--force]
-                                                 # write catalog.yaml (18 seeded component types) + environment.yaml
+                                                 # write catalog.yaml (19 seeded component types) + environment.yaml
 
 flux stratio tenant import [--size] [--output] [--force]
                                                  # scan the live cluster → tenant RSIP skeleton

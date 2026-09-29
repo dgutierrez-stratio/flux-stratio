@@ -230,8 +230,9 @@ func SeedCatalog() Catalog {
 			Name:      "GenAI",
 			Component: "genai",
 			Rset:      rsetGenAI,
-			// genai-api is the chart's anchor workload; genai-gateway and
-			// genai-litellm are its siblings, fetched by chart templating.
+			// genai-api is the chart's anchor workload; genai-gateway is its
+			// sibling, fetched by chart templating. genai-litellm, the same
+			// CCT service's other model, is its own litellm component.
 			Match:   cctMatch(kindDeployment, "genai", "genai-api"),
 			Entry:   `{{ .Live.Name | trimSuffix "-api" }}`,
 			Chart:   &Chart{Path: "charts/genai"},
@@ -244,6 +245,43 @@ func SeedCatalog() Catalog {
 				"spec.values.genaiGateway.general.identity.approlename",
 				"spec.values.genaiUi.settings.externalDashboards.discoveryDatabase",
 			},
+		},
+		{
+			Type:      "litellm",
+			Name:      "LiteLLM",
+			Component: "litellm",
+			Rset:      rsetGenAI,
+			// CCT deployed it as the genai service's genai-litellm model. It
+			// migrates under that name — the GitOps name is configurable
+			// (keos-apps ${LITELLM_NAME}, defaulting to litellm) — so the
+			// chart's identity (cert CN = Postgres user, gosec user) is the
+			// legacy one and the patch points it at the legacy database; the
+			// chart's GosecPolicy grants whatever postgresDatabase names.
+			//
+			// The Vault secrets are NOT carried over: the chart's SecretsBundle
+			// owns userland/passwords/<release>.<namespace>/ and deletes every
+			// key there it doesn't declare, and the secrets operator only
+			// accepts hyphenated names, so the legacy underscored master_api_key,
+			// db_salt_key and keos_key_secret can't be kept. The release gets
+			// fresh ones; rows LiteLLM encrypted with the legacy salt (stored
+			// models and credentials) must be cleaned and re-registered from the
+			// tenant entry's config.models (see Notes).
+			//
+			// Excluded: the networking/SSO URLs (the chart's Ingress is always
+			// at its release path, so legacy URLs would point the app at the
+			// legacy Ingress's route) and the vault approlename (the chart's
+			// SecretsIdentity role). Kept: the legacy Postgres database/schema,
+			// gosec groups and autoUvicornWorkers.
+			Match: cctMatch(kindDeployment, "genai", "genai-litellm"),
+			Chart: &Chart{Path: "charts/litellm"},
+			Exclude: []string{
+				"spec.values.liteLlm.general.networking.ingressHost",
+				"spec.values.liteLlm.general.networking.ingressBasePath",
+				"spec.values.liteLlm.general.networking.oauth2ProxyExternalHost",
+				"spec.values.liteLlm.environment.sso.oauth2ProxyLogoutNextUrl",
+				"spec.values.liteLlm.general.identity.approlename",
+			},
+			Notes: "Migrate under the legacy name (tenant entry = live name) so the release keeps the legacy identity and database grants; the patch keeps the legacy Postgres database and schema. The legacy Vault secrets can't be kept: the release gets fresh ones, so before cutover delete the rows the legacy salt encrypted (LiteLLM_ProxyModelTable, LiteLLM_CredentialsTable) and declare the models in the entry's config.models to re-register them. Needs the litellm chart whose GosecPolicy follows postgresDatabase, and keos-apps with a configurable litellm name (LITELLM_NAME).",
 		},
 		{
 			Type:      "rocket",

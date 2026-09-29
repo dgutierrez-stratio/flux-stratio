@@ -200,7 +200,7 @@ Paths are rooted at the patch document itself, so a manifest-mode exclude starts
 
 ## Seeded types
 
-`config init` seeds 18 types, every selector taken from the CCT annotations on real legacy objects
+`config init` seeds 19 types, every selector taken from the CCT annotations on real legacy objects
 — captured backups and the live eosdev cluster (see `internal/components/testdata/live.yaml`).
 
 | Type | Component | Selects (kind, `application_service` / `application_model`) |
@@ -220,6 +220,7 @@ Paths are rooted at the patch document itself, so a manifest-mode exclude starts
 | `discovery` | `discovery` | Deployment, `discovery` |
 | `datamarket-agent` | `datamarketAgent` | Deployment, `data-marketplace` / `agent-default` |
 | `genai` | `genai` | Deployment, `genai` / `genai-api` |
+| `litellm` | `litellm` (migrates under its legacy name, so the release keeps its identity and data) | Deployment, `genai` / `genai-litellm` |
 | `rocket` | `rocket` | Deployment, `rocket` / `default` |
 | `intelligence` | `intelligence` | Deployment, `intelligence` |
 | `dlc-entity` | `dlcEntity` | Deployment, `dlc-entity` |

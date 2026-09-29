@@ -66,6 +66,7 @@ func TestClassify_SeededCatalogAgainstRealLegacyObjects(t *testing.T) {
 		"hdfs stratio-datastores/hdfs1 -> hdfs1",
 		"intelligence stratio-intelligence/intelligence -> intelligence",
 		"kafka stratio-datastores/kafka1 -> kafka1",
+		"litellm stratio-genai/genai-litellm -> genai-litellm",
 		"opendashboards stratio-datastores/opensearch1-dashboards -> opensearch1-dashboards",
 		"opensearch stratio-datastores/opensearch1 -> opensearch1",
 		"opensearch-gosec-agent stratio-datastores/opensearch1-agent -> opensearch1",

@@ -4,8 +4,8 @@ import "testing"
 
 func TestSeedCatalog_Valid(t *testing.T) {
 	cat := SeedCatalog()
-	if len(cat.Types) != 18 {
-		t.Fatalf("len(Types) = %d, want 18", len(cat.Types))
+	if len(cat.Types) != 19 {
+		t.Fatalf("len(Types) = %d, want 19", len(cat.Types))
 	}
 	if err := cat.validate(); err != nil {
 		t.Fatalf("validate() = %v, want nil", err)

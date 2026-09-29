@@ -194,8 +194,10 @@ func TestResolve_NoTenantDocSkipsEntryChecks(t *testing.T) {
 }
 
 func TestResolve_UnclassifiedLiveObjectExplained(t *testing.T) {
-	_, err := Resolve(baseOptions(t), "genai-litellm")
-	if err == nil || !strings.Contains(err.Error(), "none is selected") || !strings.Contains(err.Error(), "Deployment stratio-genai/genai-litellm") {
+	// genai-gateway is a genai chart sibling: genai's selector pins the
+	// genai-api model, so no type selects it.
+	_, err := Resolve(baseOptions(t), "genai-gateway")
+	if err == nil || !strings.Contains(err.Error(), "none is selected") || !strings.Contains(err.Error(), "Deployment stratio-genai/genai-gateway") {
 		t.Errorf("Resolve error = %v, want it to name the live object no type selects", err)
 	}
 }
@@ -272,8 +274,25 @@ func TestResolveAll_WithoutTenantDocResolvesEverything(t *testing.T) {
 	if err != nil || len(unresolved) > 0 {
 		t.Fatalf("ResolveAll returned error %v, unresolved %v", err, unresolved)
 	}
-	if len(apps) != 19 {
-		t.Errorf("len(apps) = %d, want 19 (one per stratio-tenant instance)", len(apps))
+	if len(apps) != 20 {
+		t.Errorf("len(apps) = %d, want 20 (one per stratio-tenant instance)", len(apps))
+	}
+}
+
+// TestResolve_LitellmKeepsItsLegacyName: litellm's data is bound to its
+// release name (cert CN, Vault paths, gosec identity), so it migrates under
+// the legacy genai-litellm name — entry, HelmRelease and Kustomization all
+// follow it, via the default templates.
+func TestResolve_LitellmKeepsItsLegacyName(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	app, err := Resolve(opts, "genai-litellm")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if app.Type != "litellm" || app.ID != "genai-litellm" || app.Entry != "genai-litellm" || app.Object != "genai-litellm" ||
+		app.Kustomization != "apps-genai-litellm" || app.ChartPath != "charts/litellm" || app.LiveNamespace() != "stratio-genai" {
+		t.Errorf("Resolve(genai-litellm) = %+v", app)
 	}
 }
 

@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
   writes `~/.fluxcd/flux-stratio/catalog.yaml` and `environment.yaml` (`--dir`, `--force`,
   `--charts`) instead of one `config.yaml` whose flat `apps:` list mixed static coordinates with
   per-environment instance values:
-  * `catalog.yaml` holds 18 **component types** — static facts only (`component`, `rset`, `chart`,
+  * `catalog.yaml` holds 19 **component types** — static facts only (`component`, `rset`, `chart`,
     `exclude`, `prepare`), `entry`/`object`/`kustomization` name templates, and `match` selectors
     (`kinds` + label/annotation selectors) that recognize a type's live legacy objects. Every
     seeded selector comes from the CCT `application_service`/`application_model` annotations on
@@ -26,6 +26,14 @@ All notable changes to this project will be documented in this file.
   * A pre-catalog `config.yaml` is recognized and rejected with a pointer to `config init --force`.
 * New seeded type `opendashboards` (OsDashboards, `Dashboards-Opensearch`): no excludes — the
   legacy image pin and `admin.<tenant>.<domain>` exposition host are deliberately kept.
+* New seeded type `litellm` (Deployment, `genai` / `genai-litellm`). It migrates under its legacy
+  name, so the chart's identity (cert CN = Postgres user, gosec user) is the legacy one, and the
+  patch keeps the legacy Postgres database/schema, gosec groups and `autoUvicornWorkers`; the
+  networking/SSO URLs and vault `approlename` are excluded. The legacy Vault secrets are not
+  reused — the chart's SecretsBundle prunes every undeclared key in its folder — so the rows
+  LiteLLM encrypted with the legacy salt are cleaned before cutover and the models re-registered
+  from the tenant entry's `config.models`. Needs keos-apps/keos-use-cases with a configurable
+  litellm name (`LITELLM_NAME`) and the litellm chart whose GosecPolicy follows `postgresDatabase`.
 * Fix: `apps diff`/`migrate <name>` failed with "none is selected by any catalog type" on a
   chart-mode component already migrated under its legacy name (virtualizer): the HelmRelease adopts
   the legacy Deployment and Helm strips the CCT annotations the selectors need. A named lookup now

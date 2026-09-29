@@ -154,7 +154,7 @@ Persistent flags on every command: `--config`, `--env-config`, `--base`, `--clus
 `--kube-context`, `-v`/`--verbose`.
 
 `config init` requires `--base`, `--cluster` and `--tenant` on the command line, since by
-definition there's no environment file yet to read them from. It writes an 18-type component
+definition there's no environment file yet to read them from. It writes a 19-type component
 catalog covering the application set the legacy Python migration client shipped, with every
 selector derived from real captured legacy objects — and refuses to overwrite either file without
 `--force`. Review the catalog, then edit it by hand from then on: it's the same for every
