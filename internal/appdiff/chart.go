@@ -88,28 +88,52 @@ func renderChart(ctx context.Context, opts Options, rendered *render.Result) ([]
 // workload a multi-workload chart declares, not just the one named after
 // the app itself.
 func FetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []*unstructured.Unstructured {
-	var workloadDocs []*unstructured.Unstructured
-	for _, kind := range workloadKinds {
-		workloadDocs = append(workloadDocs, yamldocs.FindByKind(renderedDocs, kind)...)
-	}
-
 	var live []*unstructured.Unstructured
-	for _, doc := range workloadDocs {
-		name := doc.GetName()
-		if name == opts.App.Object {
-			name = opts.App.LiveName()
-		}
-		namespace := doc.GetNamespace()
-		if namespace == "" {
-			namespace = hrNamespace
-		}
-		obj, err := fetchWorkload(ctx, opts, doc.GroupVersionKind(), namespace, name)
+	for _, t := range workloadTargets(opts, hrNamespace, renderedDocs) {
+		obj, err := fetchWorkload(ctx, opts, t.gvk, t.namespace, t.name)
 		if err != nil {
 			continue
 		}
 		live = append(live, obj)
 	}
 	return live
+}
+
+// RenderedWorkloadNames describes every workload renderedDocs declares as
+// "Kind namespace/name", after the same live-name translation
+// FetchLiveWorkloads applies — what it looked for, for explaining why it
+// found none of them live.
+func RenderedWorkloadNames(opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []string {
+	targets := workloadTargets(opts, hrNamespace, renderedDocs)
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
+		names = append(names, fmt.Sprintf("%s %s/%s", t.gvk.Kind, t.namespace, t.name))
+	}
+	return names
+}
+
+// workloadTarget is one rendered workload and where it's expected live.
+type workloadTarget struct {
+	gvk             schema.GroupVersionKind
+	namespace, name string
+}
+
+func workloadTargets(opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []workloadTarget {
+	var targets []workloadTarget
+	for _, kind := range workloadKinds {
+		for _, doc := range yamldocs.FindByKind(renderedDocs, kind) {
+			name := doc.GetName()
+			if name == opts.App.Object {
+				name = opts.App.LiveName()
+			}
+			namespace := doc.GetNamespace()
+			if namespace == "" {
+				namespace = hrNamespace
+			}
+			targets = append(targets, workloadTarget{gvk: doc.GroupVersionKind(), namespace: namespace, name: name})
+		}
+	}
+	return targets
 }
 
 func fetchWorkload(ctx context.Context, opts Options, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error) {

@@ -176,6 +176,12 @@ All notable changes to this project will be documented in this file.
   when there are no differences, after the "no differences"/"no drift" line, instead of silently
   skipping it. When the tenant file already carries exactly the patch needed, the two sides still
   differ by that patch (the base is rendered without it), so meld shows what it covers.
+* A chart-mode capture (`apps backup`, `apps diff --drift`) that finds none of the chart's workloads
+  live now says why: the "declares no live workloads" warning names the workloads it looked for, the
+  chart directory it rendered, and the chart version the release runs — the usual cause is a
+  `chartsBase` checkout that isn't that version and names its workloads differently. `--drift`
+  against a workload (`env-vars.env`) backup then points at that instead of reporting a shape
+  change, and every shape-mismatch error lists the files the backup actually has.
 * `config init --charts <path>` seeds an optional top-level `chartsBase` config field: when set, it
   overrides `base` for resolving a chart-mode app's `chartPath` into an on-disk Helm chart
   directory. Fixes chart-mode apps (`apps diff`/`--baseline`/`--drift`, `apps backup`,

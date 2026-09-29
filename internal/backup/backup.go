@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -291,7 +292,7 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 	aopts := appdiff.Options{App: opts.App, Client: opts.Client}
 	liveWorkloads := appdiff.FetchLiveWorkloads(ctx, aopts, hr.GetNamespace(), renderedDocs)
 	if len(liveWorkloads) == 0 {
-		opts.Log.Warningf("HelmRelease %q declares no live workloads; apps diff --baseline won't have env-vars.env for this app's capture", hr.GetName())
+		warnNoLiveWorkloads(opts, hr, chartDir, appdiff.RenderedWorkloadNames(aopts, hr.GetNamespace(), renderedDocs))
 		return writeHelmReleaseFiles(dir, hr, values, opts.Log)
 	}
 
@@ -306,6 +307,45 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 		return nil, err
 	}
 	return []string{"deployment.yaml", "env-vars.env"}, nil
+}
+
+// warnNoLiveWorkloads explains why a chart-mode capture degrades to the
+// HelmRelease and its values: either the chart renders no workload at all,
+// or none of the ones it renders exist live — most often because the chart
+// under chartsBase isn't the version the release runs, and names its
+// workloads differently.
+func warnNoLiveWorkloads(opts Options, hr *unstructured.Unstructured, chartDir string, rendered []string) {
+	const consequence = "capturing the HelmRelease and its values instead, so this capture has no env-vars.env " +
+		"to compare against a workload capture (apps diff --baseline/--drift)"
+	if len(rendered) == 0 {
+		opts.Log.Warningf("HelmRelease %q declares no live workloads: the chart at %s renders no Deployment/StatefulSet/DaemonSet; %s",
+			hr.GetName(), chartDir, consequence)
+		return
+	}
+	running := ""
+	if chart := releasedChart(hr); chart != "" {
+		running = fmt.Sprintf(" (the release runs %s)", chart)
+	}
+	opts.Log.Warningf("HelmRelease %q declares no live workloads: none of those the chart at %s renders exist live "+
+		"(looked for %s); if that directory doesn't hold the chart version the release runs%s, its workloads may be "+
+		"named differently; %s", hr.GetName(), chartDir, strings.Join(rendered, ", "), running, consequence)
+}
+
+// releasedChart is the chart hr last released, as "name@version", or ""
+// when its status doesn't say.
+func releasedChart(hr *unstructured.Unstructured) string {
+	history, _, _ := unstructured.NestedSlice(hr.Object, "status", "history")
+	if len(history) > 0 {
+		if latest, ok := history[0].(map[string]any); ok {
+			name, _ := latest["chartName"].(string)
+			version, _ := latest["chartVersion"].(string)
+			if name != "" && version != "" {
+				return name + "@" + version
+			}
+		}
+	}
+	revision, _, _ := unstructured.NestedString(hr.Object, "status", "lastAttemptedRevision")
+	return revision
 }
 
 func writeCR(dir string, cr *unstructured.Unstructured) ([]string, error) {

@@ -272,3 +272,21 @@ func TestRun_LiveObjectNotFound_Errors(t *testing.T) {
 		t.Fatal("Run with no live object: got nil error, want non-nil")
 	}
 }
+
+// A live HelmRelease whose workloads weren't found degrades to
+// helmrelease.yaml/values.yaml; against a workload backup that's not a
+// shape change, and the error says what to check instead.
+func TestCompare_DegradedHelmReleaseVsEnvBackup_PointsAtChart(t *testing.T) {
+	backupDir := t.TempDir()
+	writeBackupFile(t, backupDir, "deployment.yaml", "kind: Deployment\n")
+	writeBackupFile(t, backupDir, "env-vars.env", "A=1\n")
+
+	_, err := compare(backupDir, t.TempDir(), []string{"helmrelease.yaml", "values.yaml"})
+	if err == nil {
+		t.Fatal("compare: got nil error, want non-nil")
+	}
+	if strings.Contains(err.Error(), "changed shape") || !strings.Contains(err.Error(), "chartsBase") ||
+		!strings.Contains(err.Error(), "env-vars.env") {
+		t.Errorf("error = %v, want it to point at chartsBase and name the backup's files", err)
+	}
+}

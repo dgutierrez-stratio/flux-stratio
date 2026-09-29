@@ -362,8 +362,9 @@ func TestRun_ChartMode_NoLiveWorkloads_DegradesToHelmReleaseAndValues(t *testing
 	if len(result.Files) != 2 || !wantFiles[result.Files[0]] || !wantFiles[result.Files[1]] {
 		t.Errorf("Files = %v, want [helmrelease.yaml values.yaml] in some order", result.Files)
 	}
-	if !strings.Contains(logbuf.String(), "declares no live workloads") {
-		t.Errorf("expected a baseline-incompatibility warning, got: %s", logbuf.String())
+	if !strings.Contains(logbuf.String(), "declares no live workloads") ||
+		!strings.Contains(logbuf.String(), "renders no Deployment/StatefulSet/DaemonSet") {
+		t.Errorf("expected a baseline-incompatibility warning saying the chart renders no workload, got: %s", logbuf.String())
 	}
 	data, err := os.ReadFile(filepath.Join(result.Dir, "values.yaml"))
 	if err != nil {
@@ -457,5 +458,59 @@ func TestRun_ChartMode_LiveObjectNotFoundErrors(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("backupsDir has %d entries, want 0", len(entries))
+	}
+}
+
+// A charts repository checkout that isn't the version the release runs can
+// name its workloads differently from what's live: the warning names what
+// it looked for and the chart the release runs, so the mismatch is visible.
+func TestRun_ChartMode_RenderedWorkloadsNotLive_WarningNamesThem(t *testing.T) {
+	base := fixtureBase(t)
+	chartPath := fixtureChart(t, base, "litellm")
+	var logbuf bytes.Buffer
+	logger := log.New(&logbuf, false)
+
+	hr := helmRelease("genai-litellm", "stratio-genai", map[string]any{})
+	hr.Object["status"] = map[string]any{"history": []any{
+		map[string]any{"chartName": "litellm", "chartVersion": "15.1.0-PR257-SNAPSHOT"},
+	}}
+	live := deploymentWithEnv("genai-litellm", "stratio-genai", "DEBUG")
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(hr, live).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := Options{
+		Base:  base,
+		App:   config.App{ID: "genai-litellm", Object: "genai-litellm", ChartPath: chartPath},
+		Index: idx,
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			"helm": {Stdout: []byte(`
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-litellm-litellm
+spec: {}
+`)},
+		}},
+		Client: c,
+		Dir:    t.TempDir(),
+		Clock:  fixedClock,
+		Log:    logger,
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(result.Files) == 0 || result.Files[0] != "helmrelease.yaml" {
+		t.Errorf("Files = %v, want the HelmRelease fallback", result.Files)
+	}
+	for _, want := range []string{"Deployment stratio-genai/genai-litellm-litellm", "litellm@15.1.0-PR257-SNAPSHOT"} {
+		if !strings.Contains(logbuf.String(), want) {
+			t.Errorf("warning doesn't mention %q: %s", want, logbuf.String())
+		}
 	}
 }

@@ -88,10 +88,19 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 func compare(backupDir, liveDir string, liveFiles []string) (*Result, error) {
 	signal := primarySignal(liveFiles)
 	if signal == "" || !fileExists(backupDir, signal) {
+		backupFiles := listFiles(backupDir)
+		if (signal == "values.yaml" || signal == "helmrelease.yaml") && has(backupFiles, "env-vars.env") {
+			return nil, fmt.Errorf(
+				"live state was captured as %v because none of the live HelmRelease's workloads were found (see the "+
+					"warning above), but the backup at %s was captured as %v — make sure chartsBase holds the chart "+
+					"version the release runs, so its workloads are found and captured as env vars too",
+				liveFiles, backupDir, backupFiles,
+			)
+		}
 		return nil, fmt.Errorf(
-			"live state was captured as %v, but the backup at %s doesn't have a matching file — "+
+			"live state was captured as %v, but the backup at %s was captured as %v — "+
 				"the app may have changed shape (e.g. a CR became a HelmRelease) since that backup was taken",
-			liveFiles, backupDir,
+			liveFiles, backupDir, backupFiles,
 		)
 	}
 	if signal == "cr.yaml" || signal == "helmrelease.yaml" {
@@ -125,6 +134,21 @@ func has(files []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// listFiles is dir's file names, or nil when it can't be read.
+func listFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
 
 func fileExists(dir, name string) bool {
