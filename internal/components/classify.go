@@ -15,6 +15,7 @@ package components
 import (
 	"bytes"
 	"fmt"
+	"path"
 	"sort"
 	"text/template"
 
@@ -128,18 +129,70 @@ func ownedByTenant(obj *unstructured.Unstructured, tenant string) bool {
 // across an API version bump) and every set label/annotation selector
 // holds.
 func Matches(t *config.ComponentType, obj *unstructured.Unstructured) bool {
+	return kindMatches(t, obj) &&
+		selectorMatches(t.Match.Labels, obj.GetLabels()) &&
+		selectorMatches(t.Match.Annotations, obj.GetAnnotations())
+}
+
+func kindMatches(t *config.ComponentType, obj *unstructured.Unstructured) bool {
 	gvk := obj.GroupVersionKind()
-	kindOK := false
 	for _, k := range t.Match.Kinds {
 		want, err := config.ParseKind(k)
 		if err == nil && want.Group == gvk.Group && want.Kind == gvk.Kind {
-			kindOK = true
-			break
+			return true
 		}
 	}
-	return kindOK &&
-		selectorMatches(t.Match.Labels, obj.GetLabels()) &&
-		selectorMatches(t.Match.Annotations, obj.GetAnnotations())
+	return false
+}
+
+// Labels Flux's helm-controller sets on every object a HelmRelease renders,
+// and the tenant label keos puts on it — CCT's own annotations, including
+// TenantAnnotation, are gone once a HelmRelease has adopted an object.
+const (
+	helmReleaseNameLabel      = "helm.toolkit.fluxcd.io/name"
+	helmReleaseNamespaceLabel = "helm.toolkit.fluxcd.io/namespace"
+	keosTenantLabel           = "keos.stratio.com/tenant"
+)
+
+// ManagedHelmRelease returns the "<namespace>/<name>" of the Flux
+// HelmRelease that rendered obj, or "" when none did.
+func ManagedHelmRelease(obj *unstructured.Unstructured) string {
+	l := obj.GetLabels()
+	name, ns := l[helmReleaseNameLabel], l[helmReleaseNamespaceLabel]
+	if name == "" || ns == "" {
+		return ""
+	}
+	return ns + "/" + name
+}
+
+// ManagedMatches reports whether obj is an already-migrated workload of
+// the chart-mode type t: its group and kind are one of t.Match.Kinds, and
+// the HelmRelease that rendered it (charts maps "<namespace>/<name>" to its
+// spec.chart.spec.chart) deploys t's chart — the base name of Chart.Path.
+func ManagedMatches(t *config.ComponentType, obj *unstructured.Unstructured, charts map[string]string) bool {
+	if t.Chart == nil || !kindMatches(t, obj) {
+		return false
+	}
+	hr := ManagedHelmRelease(obj)
+	chart, ok := charts[hr]
+	return hr != "" && ok && chart == path.Base(t.Chart.Path)
+}
+
+// helmReleaseCharts maps every HelmRelease in objs ("<namespace>/<name>")
+// to the chart name it deploys. A HelmRelease referencing its chart via
+// spec.chartRef has no chart name and is left out.
+func helmReleaseCharts(objs []*unstructured.Unstructured) map[string]string {
+	charts := map[string]string{}
+	for _, obj := range objs {
+		gvk := obj.GroupVersionKind()
+		if gvk.Group != "helm.toolkit.fluxcd.io" || gvk.Kind != "HelmRelease" {
+			continue
+		}
+		if chart, _, _ := unstructured.NestedString(obj.Object, "spec", "chart", "spec", "chart"); chart != "" {
+			charts[obj.GetNamespace()+"/"+obj.GetName()] = chart
+		}
+	}
+	return charts
 }
 
 func selectorMatches(sel *config.Selector, values map[string]string) bool {

@@ -181,7 +181,12 @@ convention, that repo is the reference:
   object against every type (skipping anything with `ownerReferences`), renders its entry, and
   groups by (type, namespace, entry); an object CCT annotated as another tenant's
   (`cct.stratio.com/application_tenant`) is skipped too. `Resolve(opts, name)` picks the one instance `name` refers to
-  (live/object name first, entry name as fallback) and `ResolveAll` all of them; with a tenant file
+  (live/object name first, entry name as fallback, then an already-migrated workload: when a
+  same-named HelmRelease adopted the legacy object, Helm stripped the CCT annotations the selectors
+  need, so a live object named `name` whose `helm.toolkit.fluxcd.io/{name,namespace}` HelmRelease
+  deploys a chart-mode type's `path.Base(chart.path)`, labelled `keos.stratio.com/tenant` as the
+  run's tenant, is that type — `ManagedMatches`; types sharing a chart are asked about) and
+  `ResolveAll` all of them (selectors only — `--all` never sees that fallback); with a tenant file
   (`Options.Doc`, set for diff/migrate, nil for backup/drift) each entry must be declared under
   `components.<component>`, else the `Prompter` asks which declared entry it is (`--as` answers up
   front; `NonInteractive` — used by `migrate --yes` — fails naming `--as`; `ResolveAll` returns

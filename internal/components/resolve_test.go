@@ -306,3 +306,69 @@ func TestTerminal_ChoosesReaskAndEOF(t *testing.T) {
 		})
 	}
 }
+
+// TestResolve_MigratedChartInstance: after a same-name migration the
+// HelmRelease adopts the legacy Deployment and Helm drops its CCT
+// annotations; a named lookup still resolves it through the HelmRelease
+// deploying the type's chart.
+func TestResolve_MigratedChartInstance(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	opts.Objects = migrated(opts.Objects, "virtualizer", "stratio-apps", "virtualizer")
+	app, err := Resolve(opts, "virtualizer")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.Type != "virtualizer" || app.Object != "virtualizer" || app.ChartPath != "charts/virtualizer" || app.LiveNamespace() != "stratio-apps" {
+		t.Errorf("unexpected app: %+v", app)
+	}
+}
+
+// TestResolve_MigratedSharedChartAsksWhichType: both gosec agent types
+// deploy charts/gosec-agent, so with no legacy object left to anchor it a
+// migrated agent is asked about — or answered with --as.
+func TestResolve_MigratedSharedChartAsksWhichType(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	opts.Objects = append(opts.Objects,
+		managedDeployment("pg2-gosec-agent", "stratio-datastores", "pg2-gosec-agent", "stratio"),
+		helmRelease("pg2-gosec-agent", "stratio-datastores", "gosec-agent"))
+
+	if _, err := Resolve(opts, "pg2-gosec-agent"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("Resolve error = %v, want an unanswered ambiguity between the gosec agent types", err)
+	}
+
+	opts.As = "postgres-gosec-agent"
+	app, err := Resolve(opts, "pg2-gosec-agent")
+	if err != nil {
+		t.Fatalf("Resolve --as returned error: %v", err)
+	}
+	if app.Type != "postgres-gosec-agent" || app.Entry != "pg2" || app.Object != "pg2-gosec-agent" {
+		t.Errorf("unexpected app: %+v", app)
+	}
+}
+
+// TestResolve_MigratedOtherTenantsWorkloadExcluded: the platform's own
+// keos-core gosec agent carries keos's tenant label, not CCT's annotation;
+// it's still never an instance for the stratio tenant.
+func TestResolve_MigratedOtherTenantsWorkloadExcluded(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	opts.Objects = append(opts.Objects,
+		managedDeployment("opensearcher-gosec-agent", "keos-core", "opensearcher-gosec-agent", "keos"),
+		helmRelease("opensearcher-gosec-agent", "keos-core", "gosec-agent"))
+	if _, err := Resolve(opts, "opensearcher-gosec-agent"); err == nil || !strings.Contains(err.Error(), "none is selected") {
+		t.Errorf("Resolve error = %v, want the keos tenant's agent left unselected", err)
+	}
+}
+
+func TestResolve_ManagedButUncataloguedChartExplained(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Objects = append(opts.Objects,
+		managedDeployment("connectors", "stratio-apps", "connectors", "stratio"),
+		helmRelease("connectors", "stratio-apps", "connectors"))
+	_, err := Resolve(opts, "connectors")
+	if err == nil || !strings.Contains(err.Error(), "rendered by HelmRelease stratio-apps/connectors") {
+		t.Errorf("Resolve error = %v, want it to say the object is already Helm-managed", err)
+	}
+}

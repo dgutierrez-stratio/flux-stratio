@@ -71,6 +71,12 @@ func Resolve(opts Options, name string) (config.App, error) {
 		candidates = byEntry
 	}
 	if len(candidates) == 0 {
+		candidates, err = managedInstances(opts, name, asType)
+		if err != nil {
+			return config.App{}, err
+		}
+	}
+	if len(candidates) == 0 {
 		return config.App{}, noMatchError(opts, name, asType)
 	}
 
@@ -94,6 +100,47 @@ func Resolve(opts Options, name string) (config.App, error) {
 		return config.App{}, err
 	}
 	return toApp(chosen, opts.Tenant)
+}
+
+// managedInstances is Resolve's fallback for an app already migrated
+// under its legacy name: the HelmRelease adopted the legacy workload and
+// Helm rewrote its metadata, so the CCT annotations the selectors (and
+// the tenant check) rely on are gone. A live object named name, rendered
+// by a HelmRelease that deploys a chart-mode type's chart and labelled as
+// the run's tenant, is an instance of that type — one per type when
+// several share the chart (the gosec agents), for Resolve to ask about.
+//
+// Only a named lookup falls back like this: Classify, and so ResolveAll's
+// --all, still selects by the catalog's selectors alone.
+func managedInstances(opts Options, name, asType string) ([]Instance, error) {
+	charts := helmReleaseCharts(opts.Objects)
+	var out []Instance
+	for _, obj := range opts.Objects {
+		if obj.GetName() != name || len(obj.GetOwnerReferences()) > 0 || !managedByTenant(obj, opts.Tenant) {
+			continue
+		}
+		for ti := range opts.Catalog.Types {
+			t := &opts.Catalog.Types[ti]
+			if (asType != "" && t.Type != asType) || !ManagedMatches(t, obj, charts) {
+				continue
+			}
+			entry, err := render(t.EntryTemplate(), newTemplateData(obj, "", "", opts.Tenant))
+			if err != nil {
+				return nil, fmt.Errorf("type %q: rendering entry for %s %s/%s: %w", t.Type, obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+			}
+			opts.Log.Debugf("%s %s/%s: no selector matches; already migrated, rendered by HelmRelease %s deploying type %q's chart",
+				obj.GetKind(), obj.GetNamespace(), obj.GetName(), ManagedHelmRelease(obj), t.Type)
+			out = append(out, Instance{Type: t, Entry: entry, Live: []*unstructured.Unstructured{obj}})
+		}
+	}
+	return out, nil
+}
+
+// managedByTenant is ownedByTenant for a Helm-rendered object, which keeps
+// keos's tenant label but not CCT's tenant annotation.
+func managedByTenant(obj *unstructured.Unstructured, tenant string) bool {
+	owner, ok := obj.GetLabels()[keosTenantLabel]
+	return ownedByTenant(obj, tenant) && (!ok || owner == "" || tenant == "" || owner == tenant)
 }
 
 // ResolveAll resolves every instance Classify finds. With opts.Doc set, an
@@ -284,10 +331,13 @@ func parseAs(opts Options) (typ, entry string, err error) {
 }
 
 func noMatchError(opts Options, name, asType string) error {
-	var named []string
+	var named, managed []string
 	for _, obj := range opts.Objects {
 		if obj.GetName() == name {
 			named = append(named, fmt.Sprintf("%s %s/%s", obj.GetKind(), obj.GetNamespace(), obj.GetName()))
+			if hr := ManagedHelmRelease(obj); hr != "" {
+				managed = append(managed, fmt.Sprintf("%s %s/%s is rendered by HelmRelease %s", obj.GetKind(), obj.GetNamespace(), obj.GetName(), hr))
+			}
 		}
 	}
 	scope := "any catalog type"
@@ -296,6 +346,13 @@ func noMatchError(opts Options, name, asType string) error {
 	}
 	if len(named) == 0 {
 		return fmt.Errorf("no live component instance named %q matches %s", name, scope)
+	}
+	if len(managed) > 0 {
+		// Already migrated, yet managedInstances found nothing: no
+		// chart-mode type's chart.path names the HelmRelease's chart, or
+		// it's another tenant's.
+		return fmt.Errorf("found %s live, but none is selected by %s — %s (already migrated), but no chart-mode type's chart.path names its chart, or it's labelled %s other than %q",
+			strings.Join(named, ", "), scope, strings.Join(managed, "; "), keosTenantLabel, opts.Tenant)
 	}
 	return fmt.Errorf("found %s live, but none is selected by %s — check its labels/annotations (and ownerReferences) against the catalog's match selectors",
 		strings.Join(named, ", "), scope)

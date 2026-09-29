@@ -232,3 +232,84 @@ func deployment(name, namespace string, annotations map[string]string) *unstruct
 func expr(key, op string, values ...string) *config.Selector {
 	return &config.Selector{MatchExpressions: []config.SelectorRequirement{{Key: key, Operator: op, Values: values}}}
 }
+
+// managedDeployment is a Deployment as a Flux HelmRelease renders it: Helm
+// labels and keos's tenant label, no CCT annotations.
+func managedDeployment(name, namespace, helmRelease, tenant string) *unstructured.Unstructured {
+	u := deployment(name, namespace, nil)
+	u.SetLabels(map[string]string{
+		helmReleaseNameLabel:      helmRelease,
+		helmReleaseNamespaceLabel: namespace,
+		keosTenantLabel:           tenant,
+	})
+	return u
+}
+
+func helmRelease(name, namespace, chart string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	u.SetAPIVersion("helm.toolkit.fluxcd.io/v2")
+	u.SetKind("HelmRelease")
+	u.SetName(name)
+	u.SetNamespace(namespace)
+	if chart != "" {
+		_ = unstructured.SetNestedField(u.Object, chart, "spec", "chart", "spec", "chart")
+	}
+	return u
+}
+
+// migrated replaces the fixture's legacy Deployment name in namespace with
+// what a same-named HelmRelease leaves after adopting it.
+func migrated(objs []*unstructured.Unstructured, name, namespace, chart string) []*unstructured.Unstructured {
+	var out []*unstructured.Unstructured
+	for _, o := range objs {
+		if o.GetKind() == "Deployment" && o.GetName() == name && o.GetNamespace() == namespace {
+			continue
+		}
+		out = append(out, o)
+	}
+	return append(out, managedDeployment(name, namespace, name, "stratio"), helmRelease(name, namespace, chart))
+}
+
+func TestManagedMatches(t *testing.T) {
+	chartType := &config.ComponentType{Type: "virtualizer", Chart: &config.Chart{Path: "charts/virtualizer"},
+		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}}}
+	manifestType := &config.ComponentType{Type: "virtualizer",
+		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}}}
+	obj := managedDeployment("virtualizer", "stratio-apps", "virtualizer", "stratio")
+	charts := helmReleaseCharts([]*unstructured.Unstructured{helmRelease("virtualizer", "stratio-apps", "virtualizer")})
+
+	for _, c := range []struct {
+		name   string
+		t      *config.ComponentType
+		obj    *unstructured.Unstructured
+		charts map[string]string
+		want   bool
+	}{
+		{"chart matches", chartType, obj, charts, true},
+		{"other chart", chartType, obj, map[string]string{"stratio-apps/virtualizer": "discovery"}, false},
+		{"HelmRelease not live", chartType, obj, map[string]string{}, false},
+		{"not Helm-managed", chartType, deployment("virtualizer", "stratio-apps", nil), charts, false},
+		{"manifest-mode type", manifestType, obj, charts, false},
+		{"kind not selected", chartType, helmRelease("virtualizer", "stratio-apps", "virtualizer"), charts, false},
+	} {
+		if got := ManagedMatches(c.t, c.obj, c.charts); got != c.want {
+			t.Errorf("%s: ManagedMatches = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestClassify_IgnoresMigratedWorkloads: the HelmRelease fallback is a
+// named-lookup one (Resolve); Classify, and so --all, still selects by the
+// catalog's selectors alone.
+func TestClassify_IgnoresMigratedWorkloads(t *testing.T) {
+	objs := migrated(loadLiveFixture(t), "virtualizer", "stratio-apps", "virtualizer")
+	instances, err := Classify(seededCatalog(), objs, "stratio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inst := range instances {
+		if inst.Type.Type == "virtualizer" {
+			t.Errorf("Classify returned %s for a migrated workload", inst.Label())
+		}
+	}
+}

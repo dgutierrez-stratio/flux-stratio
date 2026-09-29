@@ -26,6 +26,11 @@ All notable changes to this project will be documented in this file.
   * A pre-catalog `config.yaml` is recognized and rejected with a pointer to `config init --force`.
 * New seeded type `opendashboards` (OsDashboards, `Dashboards-Opensearch`): no excludes — the
   legacy image pin and `admin.<tenant>.<domain>` exposition host are deliberately kept.
+* Fix: `apps diff`/`migrate <name>` failed with "none is selected by any catalog type" on a
+  chart-mode component already migrated under its legacy name (virtualizer): the HelmRelease adopts
+  the legacy Deployment and Helm strips the CCT annotations the selectors need. A named lookup now
+  falls back to a live object rendered by a HelmRelease deploying the type's chart and labelled as
+  the run's tenant; `--all` still selects by the catalog's selectors alone.
 * An object CCT annotated as another tenant's (`cct.stratio.com/application_tenant`) is never an
   instance: eosdev's platform `opensearch1` (tenant `keos`, `keos-core`) no longer shadows the
   `stratio` tenant's own — name-only discovery had been backing up the `keos-core` copy.
