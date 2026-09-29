@@ -94,9 +94,18 @@ All notable changes to this project will be documented in this file.
 * `apps migrate --all` orders apps by the dependency edges already declared in the tenant file
   (a dependency migrates before its dependent) instead of config-file order.
 * `apps migrate` runs an app's declared `prepare` step automatically, under the same
-  `--dry-run`/`--yes` gate as the migration itself; `prepare-genai` (a manual Postgres data
-  rewrite no Kubernetes API can verify) always asks its own separate confirmation instead, never
-  skipped by `--yes`.
+  `--dry-run`/`--yes` gate as the migration itself; `prepare-genai` (a Postgres data rewrite no
+  Kubernetes API can verify) finds the tenant's PgCluster primary pod by label and runs the SQL
+  there itself (via a new `kubeclient.Execer`, a `client-go/tools/remotecommand` wrapper — the Go
+  equivalent of `kubectl exec`, replacing a manual `kubectl exec -it <pod> -- psql` session), and
+  shows the real captured output — but always asks its own separate confirmation before proceeding,
+  never skipped by `--yes`. The step is declared as a `prepare.DBQuery` (namespace, pod selector,
+  container, command, SQL), a shape any future component's own manual DB-rewrite step can reuse.
+  Fix (found by running it for real for the first time, against eosdev): the SQL targeted the
+  wrong database (`psql`, the cluster's own database, instead of genai's own `genai` PgDatabase),
+  and its `genai-gateway` DELETE assumed that deprecated (now litellm-superseded) component is
+  always present — it's now guarded with `to_regclass(...) IS NOT NULL`, a no-op wherever genai has
+  already moved to litellm (or never had genai-gateway).
 * `apps diff --baseline <dir>` diffs against a previous `apps backup` capture instead of the live
   cluster.
 * `flux stratio doctor`: a single preflight pass over required binaries, the config file, the

@@ -196,10 +196,16 @@ matches by a hardcoded object name, and it never touches the GitOps objects that
 on a re-run after cutover. `apps migrate` lists every operation and prints each target's live
 manifest before asking, and `--dry-run` stops there. Each operation is pinned to the planned
 object's UID, so an object replaced in the meantime makes it fail rather than act on the new one.
-| `prepare-genai` | A Postgres data rewrite (renaming a stored component reference) — no Kubernetes API can verify this happened, so it's never auto-detected. `apps migrate` prints the exact SQL and always asks its own separate confirmation before proceeding, never skipped by `--yes` | no |
+| `prepare-genai` | A Postgres data rewrite (renaming a stored component reference) — no Kubernetes API can verify this happened, so `apps migrate` never claims to on its own. It finds the tenant's PgCluster primary pod (labelled `pgcluster.stratio.com/pgcluster-name`/`-role`), execs the SQL there itself, and shows the real output — then always asks its own separate confirmation before proceeding, never skipped by `--yes` | runs itself, confirmed |
 
 Every automated step re-checks live cluster state each run rather than trusting a persisted
-record — running `apps migrate` again once a precondition holds is a no-op for that step.
+record — running `apps migrate` again once a precondition holds is a no-op for that step. A Query
+step (`prepare-genai` today) is likewise safe to re-run: its SQL is idempotent, so running it again
+after a declined confirmation, or on a retried `apps migrate`, changes nothing further.
+
+A future component's own manual-data-rewrite prepare step doesn't need new exec plumbing — it
+declares a `prepare.DBQuery` (namespace, pod selector, container, command, SQL) in a new
+`internal/prepare/step_<name>.go`, the same shape `prepare-genai` uses.
 
 ## Exclude
 

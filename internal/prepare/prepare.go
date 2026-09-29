@@ -1,8 +1,9 @@
 // Package prepare implements the four one-time preconditions some apps
 // require before they can be migrated (config.App.Prepare): suspending the
 // legacy datamarket-agent, removing legacy objects that would collide with
-// their GitOps-managed replacements, and (the one step no Kubernetes API
-// can verify) a manual Postgres data rewrite for genai.
+// their GitOps-managed replacements, and (the one step whose verification
+// still needs a human, even though the tool runs it) a Postgres data
+// rewrite for genai.
 //
 // An automated step never acts blindly: Plan reads live cluster state —
 // never a persisted flag — and returns every Operation it would perform,
@@ -17,6 +18,15 @@
 // label CCT puts on everything it deploys for an app (<live name>.<live
 // namespace>), never by a hardcoded name, and anything Flux manages is
 // skipped — so a step can't remove the GitOps objects replacing them.
+//
+// A Query step (DBQuery) is the odd one out: a live-data rewrite no
+// Kubernetes API can perform or verify. RunQuery finds its target pod by
+// label the same way legacyObjects finds an app's legacy objects, execs
+// the query, and returns the real captured output — apps migrate always
+// asks its own confirmation of that output before proceeding, never
+// skipped by --yes, because the Python client this was ported from had an
+// automated version of this same check that exited 0 unconditionally,
+// marking the step migrated on faith whether or not the SQL was ever run.
 package prepare
 
 import (
@@ -34,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
+	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
 )
 
@@ -45,7 +56,10 @@ type Options struct {
 	// legacy objects a step acts on.
 	LiveName, LiveNamespace string
 	Client                  client.Client
-	Log                     *log.Logger
+	// Execer runs a Query step's command in its target pod; nil unless a
+	// step with a Query is actually invoked.
+	Execer kubeclient.Execer
+	Log    *log.Logger
 }
 
 // Step is one precondition an app can require before migration
@@ -54,22 +68,77 @@ type Step struct {
 	Name        string
 	Description string
 	// Automated is true when Plan's operations perform the precondition;
-	// false for a step no automation can verify or safely perform
-	// (prepare-genai), which only has Instructions for the operator — the
-	// gating decision belongs to the caller.
+	// false for a step that only has Instructions for the operator to
+	// follow by hand — the gating decision belongs to the caller.
 	Automated bool
 	// Plan lists, without changing anything, every operation needed for
 	// the precondition to hold; empty when it already does. Nil for a
 	// step that isn't Automated.
 	Plan func(ctx context.Context, opts Options) ([]Operation, error)
-	// Instructions tells the operator what to do by hand (non-automated
-	// steps only); "<tenant>" stands for the tenant name.
+	// Instructions tells the operator what to do by hand (non-automated,
+	// non-Query steps only); "<tenant>" stands for the tenant name.
 	Instructions string
+	// Query, when set, is a live-data rewrite no Kubernetes API can
+	// verify (prepare-genai): RunQuery finds its target pod and execs it,
+	// and apps migrate shows the operator the real captured output before
+	// asking its own confirmation, never skipped by --yes. Mutually
+	// exclusive with Automated/Plan and Instructions.
+	Query *DBQuery
+}
+
+// DBQuery is a SQL statement a Query step runs against a live pod — the
+// generalized shape any component's own manual-data-rewrite prepare step
+// can declare, without writing new pod-discovery or exec plumbing.
+type DBQuery struct {
+	// Namespace returns the namespace to run in, given the tenant name.
+	Namespace func(tenant string) string
+	// PodSelector finds the one target pod within that namespace.
+	PodSelector map[string]string
+	// Container is the pod's container to exec into.
+	Container string
+	// Command is exec'd with SQL (tenant-substituted) piped to its stdin.
+	Command []string
+	// SQL is the statement(s) to run; "<tenant>" stands for the tenant name.
+	SQL string
 }
 
 // InstructionsFor returns Instructions for tenant.
 func (s Step) InstructionsFor(tenant string) string {
 	return strings.ReplaceAll(s.Instructions, "<tenant>", tenant)
+}
+
+// RunQuery resolves Query's target pod in opts and, unless dryRun, execs
+// Command with SQL (tenant-substituted) piped to its stdin. It returns the
+// resolved pod even under dryRun or on an exec error, so the caller can
+// always show what it acted (or would act) on. Zero or more than one
+// matching pod is a clear error rather than a guess.
+func (s Step) RunQuery(ctx context.Context, opts Options, tenant string, dryRun bool) (pod *corev1.Pod, stdout, stderr string, err error) {
+	q := s.Query
+	if q == nil {
+		return nil, "", "", fmt.Errorf("prepare step %q has no query", s.Name)
+	}
+	namespace := q.Namespace(tenant)
+	var pods corev1.PodList
+	if err := opts.Client.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels(q.PodSelector)); err != nil {
+		return nil, "", "", fmt.Errorf("finding %s's target pod in %s: %w", s.Name, namespace, err)
+	}
+	switch len(pods.Items) {
+	case 1:
+		pod = &pods.Items[0]
+	case 0:
+		return nil, "", "", fmt.Errorf("prepare step %q: no pod matching %v found in %s", s.Name, q.PodSelector, namespace)
+	default:
+		return nil, "", "", fmt.Errorf("prepare step %q: %d pods matching %v found in %s, expected exactly one", s.Name, len(pods.Items), q.PodSelector, namespace)
+	}
+	if dryRun {
+		return pod, "", "", nil
+	}
+	sql := strings.ReplaceAll(q.SQL, "<tenant>", tenant)
+	stdout, stderr, err = opts.Execer.Exec(ctx, namespace, pod.Name, q.Container, q.Command, strings.NewReader(sql))
+	if err != nil {
+		return pod, stdout, stderr, fmt.Errorf("running prepare step %q against pod %s/%s: %w", s.Name, namespace, pod.Name, err)
+	}
+	return pod, stdout, stderr, nil
 }
 
 // Operation is one change a step makes to one live object.

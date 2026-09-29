@@ -237,7 +237,7 @@ func SeedCatalog() Catalog {
 			Entry:   `{{ .Live.Name | trimSuffix "-api" }}`,
 			Chart:   &Chart{Path: "genai"},
 			Prepare: "prepare-genai",
-			Notes:   "prepare-genai is a manual Postgres data rewrite apps migrate cannot verify itself; it always asks its own confirmation before proceeding, never skipped by --yes.",
+			Notes:   "prepare-genai is a Postgres data rewrite apps migrate cannot verify itself; it runs the SQL via pod exec and shows the result, but always asks its own confirmation before proceeding, never skipped by --yes.",
 			Exclude: []string{
 				"spec.values.genaiUi.settings.generalProperties.governanceUrl",
 				"spec.values.genaiUi.general.governanceRegistration.governanceDeployment",

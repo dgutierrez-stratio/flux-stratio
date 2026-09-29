@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -77,8 +78,8 @@ type prepareRun struct {
 }
 
 // runPrepare runs ensurePrepared for app against objs, answering prompts
-// from stdin.
-func runPrepare(t *testing.T, app config.App, stdin io.Reader, dryRun, yes bool, deleteErr error, objs ...client.Object) (*prepareRun, error) {
+// from stdin. execer is nil unless the step under test has a Query.
+func runPrepare(t *testing.T, app config.App, stdin io.Reader, dryRun, yes bool, deleteErr error, execer kubeclient.Execer, objs ...client.Object) (*prepareRun, error) {
 	t.Helper()
 	scheme, err := kubeclient.NewScheme()
 	if err != nil {
@@ -91,7 +92,7 @@ func runPrepare(t *testing.T, app config.App, stdin io.Reader, dryRun, yes bool,
 	cmd.SetIn(stdin)
 	cmd.SetOut(&r.stdout)
 	cmd.SetErr(&r.stderr)
-	err = ensurePrepared(cmd, app, "stratio", r.c, log.New(&r.stderr, true), dryRun, yes)
+	err = ensurePrepared(cmd, app, "stratio", r.c, execer, log.New(&r.stderr, true), dryRun, yes)
 	return r, err
 }
 
@@ -109,7 +110,7 @@ func (r *prepareRun) ingressExists(t *testing.T) bool {
 // sees every operation (stderr) and each target's live manifest (stdout),
 // and nothing is asked or touched.
 func TestEnsurePrepared_DryRunShowsThePlanAndChangesNothing(t *testing.T) {
-	r, err := runPrepare(t, datarestApp, noRead{t}, true, false, nil, legacyIngress())
+	r, err := runPrepare(t, datarestApp, noRead{t}, true, false, nil, nil, legacyIngress())
 	if err != nil {
 		t.Fatalf("ensurePrepared: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestEnsurePrepared_DryRunShowsThePlanAndChangesNothing(t *testing.T) {
 
 func TestEnsurePrepared_DeclinedChangesNothing(t *testing.T) {
 	for _, answer := range []string{"n\n", "\n", ""} {
-		r, err := runPrepare(t, datarestApp, strings.NewReader(answer), false, false, nil, legacyIngress())
+		r, err := runPrepare(t, datarestApp, strings.NewReader(answer), false, false, nil, nil, legacyIngress())
 		if err == nil || !strings.Contains(err.Error(), "not confirmed") {
 			t.Errorf("answer %q: err = %v, want not confirmed", answer, err)
 		}
@@ -144,7 +145,7 @@ func TestEnsurePrepared_DeclinedChangesNothing(t *testing.T) {
 }
 
 func TestEnsurePrepared_ConfirmedRunsExactlyThePlan(t *testing.T) {
-	r, err := runPrepare(t, datarestApp, strings.NewReader("y\n"), false, false, nil, legacyIngress())
+	r, err := runPrepare(t, datarestApp, strings.NewReader("y\n"), false, false, nil, nil, legacyIngress())
 	if err != nil {
 		t.Fatalf("ensurePrepared: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestEnsurePrepared_ConfirmedRunsExactlyThePlan(t *testing.T) {
 // TestEnsurePrepared_YesSkipsTheAutomatedPrompt: --yes answers the
 // automated step's confirmation, but the plan is still shown first.
 func TestEnsurePrepared_YesSkipsTheAutomatedPrompt(t *testing.T) {
-	r, err := runPrepare(t, datarestApp, noRead{t}, false, true, nil, legacyIngress())
+	r, err := runPrepare(t, datarestApp, noRead{t}, false, true, nil, nil, legacyIngress())
 	if err != nil {
 		t.Fatalf("ensurePrepared: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestEnsurePrepared_YesSkipsTheAutomatedPrompt(t *testing.T) {
 }
 
 func TestEnsurePrepared_SatisfiedIsSilent(t *testing.T) {
-	r, err := runPrepare(t, datarestApp, noRead{t}, false, false, nil)
+	r, err := runPrepare(t, datarestApp, noRead{t}, false, false, nil, nil)
 	if err != nil {
 		t.Fatalf("ensurePrepared: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestEnsurePrepared_FailedOperationStopsTheRest(t *testing.T) {
 	dep.SetUID("uid-dep")
 	unstructured.RemoveNestedField(dep.Object, "spec")
 
-	r, err := runPrepare(t, app, noRead{t}, false, true, errors.New("admission webhook denied"), ing, dep)
+	r, err := runPrepare(t, app, noRead{t}, false, true, errors.New("admission webhook denied"), nil, ing, dep)
 	if err == nil || !strings.Contains(err.Error(), "delete Ingress stratio-dlc/dlc-entity-dlc-entity.stratio.eosdev.int") {
 		t.Fatalf("err = %v, want it to name the failed operation", err)
 	}
@@ -211,29 +212,50 @@ func TestEnsurePrepared_FailedOperationStopsTheRest(t *testing.T) {
 	}
 }
 
-// TestEnsurePrepared_GenaiAlwaysAsks: the manual step's confirmation is
-// never skipped by --yes, a no stops the migration, and --dry-run shows
-// the SQL without asking.
+// genaiMasterPod is the tenant's PgCluster primary, carrying the same
+// labels the live eosdev cluster's psql-0 pod does.
+func genaiMasterPod() *corev1.Pod {
+	pod := &corev1.Pod{}
+	pod.Namespace, pod.Name = "stratio-datastores", "psql-0"
+	pod.Labels = map[string]string{
+		"pgcluster.stratio.com/pgcluster-name": "psql",
+		"pgcluster.stratio.com/pgcluster-role": "master",
+	}
+	return pod
+}
+
+// TestEnsurePrepared_GenaiAlwaysAsks: apps migrate runs the query itself
+// (against the resolved pod) and shows the real output, but the
+// confirmation is never skipped by --yes, a no stops the migration, and
+// --dry-run resolves the pod and shows the SQL without running anything.
 func TestEnsurePrepared_GenaiAlwaysAsks(t *testing.T) {
 	app := config.App{ID: "genai", Name: "GenAI genai", Prepare: "prepare-genai"}
+	execer := &kubeclient.FakeExecer{Response: kubeclient.FakeExecResponse{Stdout: "UPDATE 1\nDELETE 1\n"}}
 
-	r, err := runPrepare(t, app, noRead{t}, true, false, nil)
+	r, err := runPrepare(t, app, noRead{t}, true, false, nil, execer, genaiMasterPod())
 	if err != nil || !strings.Contains(r.stderr.String(), `UPDATE "genai-api.stratio-genai".chain`) {
 		t.Errorf("dry run: err = %v, want the tenant's SQL shown and no question asked:\n%s", err, r.stderr.String())
 	}
+	if len(execer.Calls) != 0 {
+		t.Errorf("dry run: execer was called: %v", execer.Calls)
+	}
 
-	if _, err := runPrepare(t, app, strings.NewReader("n\n"), false, true, nil); err == nil || !strings.Contains(err.Error(), "not confirmed") {
+	if _, err := runPrepare(t, app, strings.NewReader("n\n"), false, true, nil, execer, genaiMasterPod()); err == nil || !strings.Contains(err.Error(), "not confirmed") {
 		t.Errorf("--yes with a no: err = %v, want not confirmed (--yes must not answer it)", err)
 	}
-	if _, err := runPrepare(t, app, strings.NewReader("y\n"), false, true, nil); err != nil {
+	r, err = runPrepare(t, app, strings.NewReader("y\n"), false, true, nil, execer, genaiMasterPod())
+	if err != nil {
 		t.Errorf("confirmed: err = %v", err)
+	}
+	if !strings.Contains(r.stdout.String(), "UPDATE 1") {
+		t.Errorf("stdout lacks the real query output:\n%s", r.stdout.String())
 	}
 }
 
 func TestEnsurePrepared_UnknownStepFails(t *testing.T) {
 	app := datarestApp
 	app.Prepare = "prepare-nothing"
-	if _, err := runPrepare(t, app, noRead{t}, false, true, nil); err == nil || !strings.Contains(err.Error(), "unknown prepare step") {
+	if _, err := runPrepare(t, app, noRead{t}, false, true, nil, nil); err == nil || !strings.Contains(err.Error(), "unknown prepare step") {
 		t.Errorf("err = %v, want unknown prepare step", err)
 	}
 }

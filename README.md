@@ -231,8 +231,9 @@ An app whose config declares a `prepare` step (see
 automated step, satisfied — as the first stage of `apps migrate`, before any diff or patch. An
 automated step first lists every operation it would perform (on stderr) and the live manifest of each
 object it acts on (on stdout), then asks before running exactly those; `--dry-run` stops after the
-list. A step requiring a manual action (`prepare-genai`'s Postgres data rewrite) prints what to do
-and always asks its own separate confirmation, never skipped by `--yes`.
+list. A step that runs a database query (`prepare-genai`'s Postgres data rewrite) finds its target
+pod, runs it, and shows the real output — then always asks its own separate confirmation before
+proceeding, never skipped by `--yes`.
 
 ## Build from source
 

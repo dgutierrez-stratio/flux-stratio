@@ -12,6 +12,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/catalog"
 	"github.com/Stratio/flux-stratio/internal/components"
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/runner"
@@ -99,7 +100,7 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 
 	var failed []string
 	for _, app := range apps {
-		err := migrateOne(cmd, app, repos, cluster, tenant, cat, c, logger, dryRun, yes, baseline, dirFlag)
+		err := migrateOne(cmd, app, repos, cluster, tenant, cat, c, s.execer, logger, dryRun, yes, baseline, dirFlag)
 		if err == nil {
 			continue
 		}
@@ -126,7 +127,7 @@ func runAppsMigrate(cmd *cobra.Command, args []string, all, dryRun, yes, continu
 	return nil
 }
 
-func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, cluster, tenant string, cat *catalog.Catalog, c client.Client, logger *log.Logger, dryRun, yes bool, baseline, dirFlag string) error {
+func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, cluster, tenant string, cat *catalog.Catalog, c client.Client, execer kubeclient.Execer, logger *log.Logger, dryRun, yes bool, baseline, dirFlag string) error {
 	resolvedBaseline := ""
 	if baseline != "" {
 		var err error
@@ -136,7 +137,7 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	}
 
 	if app.Prepare != "" {
-		if err := ensurePrepared(cmd, app, tenant, c, logger, dryRun, yes); err != nil {
+		if err := ensurePrepared(cmd, app, tenant, c, execer, logger, dryRun, yes); err != nil {
 			return err
 		}
 	}
@@ -192,14 +193,21 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 // plan). An automated step's plan — every operation, and the live
 // manifest of the object it acts on (stdout) — is shown first; --dry-run
 // stops there, and otherwise it runs under the same --yes gate as the
-// migration itself, applying exactly the operations shown. A
-// non-automated step (prepare-genai) prints what the operator must do and
-// always asks its own separate confirmation, never skipped by --yes —
-// silently proceeding against unrewritten data risks real data corruption.
-func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.Client, logger *log.Logger, dryRun, yes bool) error {
+// migration itself, applying exactly the operations shown. A Query step
+// (prepare-genai) runs itself against the resolved target pod and shows
+// the real captured output, then always asks its own separate
+// confirmation, never skipped by --yes — no Kubernetes API can verify a
+// data rewrite happened correctly, so apps migrate never claims to on its
+// own. A non-automated, non-Query step prints what the operator must do
+// by hand and always asks the same way.
+func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.Client, execer kubeclient.Execer, logger *log.Logger, dryRun, yes bool) error {
 	step := prepare.Find(app.Prepare)
 	if step == nil {
 		return fmt.Errorf("app %q declares unknown prepare step %q", app.ID, app.Prepare)
+	}
+
+	if step.Query != nil {
+		return ensurePreparedQuery(cmd, *step, app, tenant, c, execer, logger, dryRun)
 	}
 
 	if !step.Automated {
@@ -255,6 +263,50 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 		}
 	}
 	logger.Successf("prepare step %q complete", step.Name)
+	return nil
+}
+
+// ensurePreparedQuery runs step's Query against tenant's live cluster and
+// shows the operator the real captured output, then always asks its own
+// confirmation before proceeding — never skipped by --yes. The Python
+// client's own version of this same check exited 0 unconditionally,
+// marking the step migrated on faith whether or not the SQL was ever run;
+// running it and showing the real result is strictly better evidence than
+// that, but still short of something apps migrate can verify itself.
+func ensurePreparedQuery(cmd *cobra.Command, step prepare.Step, app config.App, tenant string, c client.Client, execer kubeclient.Execer, logger *log.Logger, dryRun bool) error {
+	popts := prepare.Options{TenantName: tenant, LiveName: app.LiveName(), LiveNamespace: app.LiveNamespace(), Client: c, Execer: execer, Log: logger}
+
+	if dryRun {
+		pod, _, _, err := step.RunQuery(cmd.Context(), popts, tenant, true)
+		if err != nil {
+			return fmt.Errorf("resolving prepare step %q's target pod: %w", step.Name, err)
+		}
+		logger.Warningf("prepare step %q is required for %q: %s. It will run against pod %s/%s:\n%s",
+			step.Name, app.Name, step.Description, pod.Namespace, pod.Name, strings.ReplaceAll(step.Query.SQL, "<tenant>", tenant))
+		logger.Successf("dry run: would run prepare step %q against pod %s/%s", step.Name, pod.Namespace, pod.Name)
+		return nil
+	}
+
+	logger.Actionf("prepare step %q is required for %q: %s. Running it now:", step.Name, app.Name, step.Description)
+	pod, stdout, stderr, err := step.RunQuery(cmd.Context(), popts, tenant, false)
+	if err != nil {
+		return fmt.Errorf("running prepare step %q: %w", step.Name, err)
+	}
+	if _, err := fmt.Fprint(cmd.OutOrStdout(), stdout); err != nil {
+		return err
+	}
+	if stderr != "" {
+		logger.Warningf("prepare step %q's stderr:\n%s", step.Name, stderr)
+	}
+
+	proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(),
+		fmt.Sprintf("prepare step %q ran against pod %s/%s; does the output above look correct? [y/N] ", step.Name, pod.Namespace, pod.Name))
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
+	}
 	return nil
 }
 

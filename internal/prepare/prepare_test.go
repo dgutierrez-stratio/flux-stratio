@@ -100,23 +100,35 @@ func TestFind(t *testing.T) {
 	}
 }
 
-func TestSteps_AutomatedStepsPlanOthersInstruct(t *testing.T) {
-	want := map[string]bool{
-		"prepare-datamarket-agent": true,
-		"prepare-datarest":         true,
-		"prepare-dlc":              true,
-		"prepare-genai":            false,
+func TestSteps_ExactlyOneShapePerStep(t *testing.T) {
+	want := map[string]string{
+		"prepare-datamarket-agent": "automated",
+		"prepare-datarest":         "automated",
+		"prepare-dlc":              "automated",
+		"prepare-genai":            "query",
 	}
-	for name, wantAutomated := range want {
+	for name, wantShape := range want {
 		step := Find(name)
 		if step == nil {
 			t.Fatalf("Find(%q) = nil", name)
 		}
-		if step.Automated != wantAutomated {
-			t.Errorf("%s.Automated = %v, want %v", name, step.Automated, wantAutomated)
+		shapes := map[string]bool{
+			"automated": step.Automated && step.Plan != nil,
+			"manual":    !step.Automated && step.Instructions != "",
+			"query":     !step.Automated && step.Query != nil,
 		}
-		if step.Automated != (step.Plan != nil) || step.Automated == (step.Instructions != "") {
-			t.Errorf("%s: an automated step needs a Plan and no Instructions, a manual one the reverse", name)
+		if !shapes[wantShape] {
+			t.Errorf("%s: not shaped as %s (Automated=%v Plan=%v Instructions=%q Query=%v)",
+				name, wantShape, step.Automated, step.Plan != nil, step.Instructions, step.Query)
+		}
+		n := 0
+		for _, is := range shapes {
+			if is {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s: exactly one of automated/manual/query should hold, got %d", name, n)
 		}
 	}
 }

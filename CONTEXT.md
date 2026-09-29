@@ -278,9 +278,14 @@ convention, that repo is the reference:
   otherwise applies exactly them. Targets are found by CCT's `cct.stratio.com/application_id` label
   (`<App.LiveName()>.<App.LiveNamespace()>`), skipping Flux-labelled objects; there are no
   hardcoded names, since the Python client's hardcoded DLC Ingress name was wrong on eosdev. Every
-  delete or patch is UID-pinned. `prepare-genai`, a manual Postgres data rewrite no Kubernetes API
-  can verify, has only `Instructions`, and its confirmation is never skipped by `--yes`, though
-  `--dry-run` doesn't ask it.
+  delete or patch is UID-pinned. `prepare-genai`, a Postgres data rewrite no Kubernetes API can
+  verify, has a `Query` (`DBQuery`): `RunQuery` finds the tenant's PgCluster primary pod by label
+  (`pgcluster.stratio.com/pgcluster-name`/`-role`, the same idiom `legacyObjects` uses for CCT's app
+  id) and execs the SQL there via `kubeclient.Execer` (a thin `client-go/tools/remotecommand`
+  wrapper — the Go equivalent of `kubectl exec`, avoiding a shell-out). Its confirmation shows the
+  real captured output and is never skipped by `--yes`, though `--dry-run` only resolves the pod and
+  shows the SQL, asking nothing. A future component's own manual DB rewrite reuses this shape
+  (a new `DBQuery` value) rather than one-off exec code.
 - **`internal/tenantimport`** — `tenant import`'s live-cluster scan (CRD instances → Deployments →
   HelmReleases, three passes feeding one `Components` map), fixpoint-expanding mandatory
   dependencies, then rendering a tenant-file skeleton. Deliberately **not** reused by
@@ -340,6 +345,7 @@ being tested in a feature package first.
 | `_output_patch` silently returned empty output on a missing `kubectl`, read by the caller as "no diff, migrated" | Every failure is a real Go `error`, propagated, never swallowed |
 | Rendered vs. live numeric decoding used different conventions (float64 vs int64), causing spurious integer diffs | `internal/yamldocs.Decode`'s `*Unstructured` unmarshal target (§6) |
 | `apps backup` (this plugin's own earlier version) required the tenant file to declare a component before it could find the live object — backwards for a pre-migration capture tool | `internal/discovery`, decoupling backup/drift from any render (this was a regression introduced *during* the Go port itself, not inherited from Python — see git history around "restore legacy backup behavior" for the full story) |
+| `prepare-genai`'s own SQL (`internal/prepare/step_genai.go`), never actually executed before it was automated, connected to the wrong database (`psql`, the cluster's own database) — genai's schemas live in its own `genai` PgDatabase. Only found by running it for real against eosdev: both statements failed with "relation ... does not exist" | `Command`'s database arg fixed to `genai`; the DELETE for `genai-gateway` (a deprecated component superseded by litellm) is also now guarded with `to_regclass(...) IS NOT NULL` — a migration whose genai already moved to litellm has no such schema at all, and that's not an error |
 
 ## 10. Known rough edges / good first tasks
 

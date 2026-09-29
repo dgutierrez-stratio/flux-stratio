@@ -21,6 +21,9 @@ type session struct {
 	cat    *config.Catalog
 	env    config.Environment
 	client client.Client
+	// execer runs a prepare Query step's command in its target pod; built
+	// from the same kubeconfig flags as client.
+	execer kubeclient.Execer
 	index  *discovery.Index
 	log    *log.Logger
 }
@@ -39,6 +42,10 @@ func openSession(cmd *cobra.Command) (*session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the cluster: %w", err)
 	}
+	execer, err := kubeclient.NewExecer(kubeconfigArgs)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to the cluster: %w", err)
+	}
 
 	logger.Actionf("scanning the live cluster")
 	idx, err := discovery.Scan(cmd.Context(), c, logger, cat.Kinds()...)
@@ -46,7 +53,7 @@ func openSession(cmd *cobra.Command) (*session, error) {
 		return nil, fmt.Errorf("scanning the live cluster: %w", err)
 	}
 	logger.Successf("scan complete")
-	return &session{cat: cat, env: env, client: c, index: idx, log: logger}, nil
+	return &session{cat: cat, env: env, client: c, execer: execer, index: idx, log: logger}, nil
 }
 
 // resolveOptions builds components.Options for this session. withTenant
