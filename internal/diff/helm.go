@@ -13,6 +13,19 @@ import (
 	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
 
+// ReleaseName returns hr's actual Helm release name: spec.releaseName when
+// set (as every chart-mode HelmRelease keos-apps renders does — needed the
+// moment a component's GitOps object name and release name diverge, e.g.
+// litellm's legacy-identity release under its generic "litellm" object),
+// otherwise fallback (hr's own name, matching Flux's own default when
+// releaseName is unset).
+func ReleaseName(hr *unstructured.Unstructured, fallback string) string {
+	if name, _, _ := unstructured.NestedString(hr.Object, "spec", "releaseName"); name != "" {
+		return name
+	}
+	return fallback
+}
+
 // HelmTemplate renders chartPath the way Flux's helm-controller would for
 // this HelmRelease: hrValues (the rendered HelmRelease's own spec.values)
 // becomes the release's values file, and `helm dependency build` runs

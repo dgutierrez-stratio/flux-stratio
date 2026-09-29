@@ -280,9 +280,15 @@ func TestResolveAll_WithoutTenantDocResolvesEverything(t *testing.T) {
 }
 
 // TestResolve_LitellmKeepsItsLegacyName: litellm's data is bound to its
-// release name (cert CN, Vault paths, gosec identity), so it migrates under
-// the legacy genai-litellm name — entry, HelmRelease and Kustomization all
-// follow it, via the default templates.
+// Helm *release* name (cert CN, Vault paths, gosec identity), so its tenant
+// entry stays the legacy genai-litellm name — that's what keos-use-cases
+// substitutes into LITELLM_NAME, which only sets spec.releaseName. The
+// GitOps object itself (HelmRelease/Kustomization, and so ID, which is
+// derived from Object) is decoupled from that and stays the fixed, generic
+// "litellm", uniform with every other component: Object is pinned rather
+// than following the default templates. The live object is still found by
+// its legacy name (Resolve("genai-litellm") below) even though the
+// instance now identifies itself as "litellm" going forward.
 func TestResolve_LitellmKeepsItsLegacyName(t *testing.T) {
 	opts := baseOptions(t)
 	opts.Doc = nil
@@ -290,8 +296,8 @@ func TestResolve_LitellmKeepsItsLegacyName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if app.Type != "litellm" || app.ID != "genai-litellm" || app.Entry != "genai-litellm" || app.Object != "genai-litellm" ||
-		app.Kustomization != "apps-genai-litellm" || app.ChartPath != "litellm" || app.LiveNamespace() != "stratio-genai" {
+	if app.Type != "litellm" || app.ID != "litellm" || app.Entry != "genai-litellm" || app.Object != "litellm" ||
+		app.Kustomization != "apps-litellm" || app.ChartPath != "litellm" || app.LiveNamespace() != "stratio-genai" {
 		t.Errorf("Resolve(genai-litellm) = %+v", app)
 	}
 }

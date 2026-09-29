@@ -63,14 +63,17 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 }
 
 // renderChart runs `helm template` for opts.App's chart against the
-// rendered HelmRelease's own values and namespace.
+// rendered HelmRelease's own values, namespace and release name (spec.
+// releaseName, when the object's GitOps name and release name diverge —
+// see diff.ReleaseName).
 func renderChart(ctx context.Context, opts Options, rendered *render.Result) ([]*unstructured.Unstructured, string, error) {
 	hrValues, _, err := unstructured.NestedMap(rendered.Object.Object, "spec", "values")
 	if err != nil {
 		return nil, "", fmt.Errorf("reading rendered HelmRelease spec.values: %w", err)
 	}
 	namespace := rendered.Object.GetNamespace()
-	docs, err := diff.HelmTemplate(ctx, opts.Runner, chartPath(opts), opts.App.Object, namespace, hrValues)
+	releaseName := diff.ReleaseName(rendered.Object, opts.App.Object)
+	docs, err := diff.HelmTemplate(ctx, opts.Runner, chartPath(opts), releaseName, namespace, hrValues)
 	if err != nil {
 		return nil, "", err
 	}

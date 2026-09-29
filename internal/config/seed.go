@@ -251,12 +251,21 @@ func SeedCatalog() Catalog {
 			Name:      "LiteLLM",
 			Component: "litellm",
 			Rset:      rsetGenAI,
-			// CCT deployed it as the genai service's genai-litellm model. It
-			// migrates under that name — the GitOps name is configurable
-			// (keos-apps ${LITELLM_NAME}, defaulting to litellm) — so the
-			// chart's identity (cert CN = Postgres user, gosec user) is the
-			// legacy one and the patch points it at the legacy database; the
-			// chart's GosecPolicy grants whatever postgresDatabase names.
+			// CCT deployed it as the genai service's genai-litellm model.
+			// The GitOps object (Kustomization "apps-litellm", HelmRelease
+			// "litellm") is always the generic name, uniform with every
+			// other component — only the Helm *release* itself (spec.
+			// releaseName, decoupled in keos-apps) is the legacy name, so
+			// the chart's identity (cert CN = Postgres user, gosec user)
+			// derived from it is the legacy one and the patch points it at
+			// the legacy database; the chart's GosecPolicy grants whatever
+			// postgresDatabase names. Object is pinned to the fixed literal
+			// "litellm" (not the default {{ .Entry }}) precisely because
+			// Entry stays the legacy live name ("genai-litellm") — it's
+			// still what the tenant file's own components.litellm[].name
+			// must be, since keos-use-cases substitutes that value into
+			// LITELLM_NAME (the release name), but it no longer names the
+			// GitOps object.
 			//
 			// The Vault secrets are NOT carried over: the chart's SecretsBundle
 			// owns userland/passwords/<release>.<namespace>/ and deletes every
@@ -272,8 +281,9 @@ func SeedCatalog() Catalog {
 			// legacy Ingress's route) and the vault approlename (the chart's
 			// SecretsIdentity role). Kept: the legacy Postgres database/schema,
 			// gosec groups and autoUvicornWorkers.
-			Match: cctMatch(kindDeployment, "genai", "genai-litellm"),
-			Chart: &Chart{Path: "litellm"},
+			Match:  cctMatch(kindDeployment, "genai", "genai-litellm"),
+			Object: "litellm",
+			Chart:  &Chart{Path: "litellm"},
 			Exclude: []string{
 				"spec.values.liteLlm.general.networking.ingressHost",
 				"spec.values.liteLlm.general.networking.ingressBasePath",
@@ -281,7 +291,7 @@ func SeedCatalog() Catalog {
 				"spec.values.liteLlm.environment.sso.oauth2ProxyLogoutNextUrl",
 				"spec.values.liteLlm.general.identity.approlename",
 			},
-			Notes: "Migrate under the legacy name (tenant entry = live name) so the release keeps the legacy identity and database grants; the patch keeps the legacy Postgres database and schema. The legacy Vault secrets can't be kept: the release gets fresh ones, so before cutover delete the rows the legacy salt encrypted (LiteLLM_ProxyModelTable, LiteLLM_CredentialsTable) and declare the models in the entry's config.models to re-register them. Needs the litellm chart whose GosecPolicy follows postgresDatabase, and keos-apps with a configurable litellm name (LITELLM_NAME).",
+			Notes: "The tenant entry's name stays the legacy live name (genai-litellm): keos-use-cases substitutes it into LITELLM_NAME, which only sets the Helm release name (spec.releaseName), so the release keeps the legacy identity and database grants while the GitOps object (Kustomization/HelmRelease) stays the generic 'litellm', uniform with every other component. The patch keeps the legacy Postgres database and schema. The legacy Vault secrets can't be kept: the release gets fresh ones, so before cutover delete the rows the legacy salt encrypted (LiteLLM_ProxyModelTable, LiteLLM_CredentialsTable) and declare the models in the entry's config.models to re-register them. Needs the litellm chart whose GosecPolicy follows postgresDatabase, and keos-apps/keos-use-cases with releaseName decoupled from the GitOps object name (LITELLM_NAME only substitutes releaseName).",
 		},
 		{
 			Type:      "rocket",

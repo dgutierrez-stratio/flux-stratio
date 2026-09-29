@@ -271,13 +271,15 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 	}
 
 	chartDir := filepath.Join(opts.Repos.Charts, opts.App.ChartPath)
-	// opts.App.Object, not hr.GetName() (the live, maybe-renamed name) — the
-	// same release name internal/appdiff's own renderChart uses, so a
+	// hr's own spec.releaseName (falling back to opts.App.Object, not
+	// hr.GetName() — the live, maybe-renamed name) — the same release name
+	// internal/appdiff's own renderChart uses (diff.ReleaseName), so a
 	// chart whose rendered resource names derive from .Release.Name
 	// produces the same names here as it would for a desired-state
 	// render, letting FetchLiveWorkloads' live-name translation apply
 	// identically in both places.
-	renderedDocs, err := diff.HelmTemplate(ctx, opts.Runner, chartDir, opts.App.Object, hr.GetNamespace(), values)
+	releaseName := diff.ReleaseName(hr, opts.App.Object)
+	renderedDocs, err := diff.HelmTemplate(ctx, opts.Runner, chartDir, releaseName, hr.GetNamespace(), values)
 	if err != nil {
 		return nil, err
 	}
