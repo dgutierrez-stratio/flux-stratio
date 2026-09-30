@@ -387,6 +387,99 @@ func TestResolve_MigratedOtherTenantsWorkloadExcluded(t *testing.T) {
 	}
 }
 
+// migratedGenai is eosdev's genai after migration: the genai HelmRelease
+// adopted both legacy workloads, and Helm stripped their CCT annotations.
+func migratedGenai(objs []*unstructured.Unstructured) []*unstructured.Unstructured {
+	var out []*unstructured.Unstructured
+	for _, o := range objs {
+		if o.GetKind() == "Deployment" && o.GetNamespace() == "stratio-genai" && o.GetName() == "genai-api" {
+			continue
+		}
+		out = append(out, o)
+	}
+	return append(out,
+		managedDeployment("genai-api", "stratio-genai", "genai", "stratio"),
+		managedDeployment("genai-ui", "stratio-genai", "genai", "stratio"),
+		helmRelease("genai", "stratio-genai", "genai"))
+}
+
+// TestResolve_MigratedChartInstanceByAnyOfItsWorkloads: any workload a
+// migrated instance's HelmRelease renders, or the HelmRelease itself,
+// resolves to that one instance — its object the HelmRelease's name, its
+// entry the declared one whose object that is, inferred without asking.
+func TestResolve_MigratedChartInstanceByAnyOfItsWorkloads(t *testing.T) {
+	for _, name := range []string{"genai-ui", "genai-api", "genai"} {
+		t.Run(name, func(t *testing.T) {
+			opts := baseOptions(t)
+			opts.Objects = migratedGenai(opts.Objects)
+			prompter := &scripted{}
+			opts.Prompter = prompter
+
+			app, err := Resolve(opts, name)
+			if err != nil {
+				t.Fatalf("Resolve returned error: %v", err)
+			}
+			if len(prompter.questions) != 0 {
+				t.Errorf("asked %v, want the entry inferred", prompter.questions)
+			}
+			if app.Type != "genai" || app.ID != "genai" || app.Object != "genai" || app.Entry != "genai" || app.Kustomization != "apps-genai" {
+				t.Errorf("unexpected app: %+v", app)
+			}
+			var live []string
+			for _, ref := range app.Live {
+				live = append(live, ref.Name)
+			}
+			if len(live) != 2 || (name != "genai" && live[0] != name) {
+				t.Errorf("Live = %v, want both workloads, %q first", live, name)
+			}
+		})
+	}
+}
+
+// TestResolve_MigratedChartInstanceWithoutTenantFile: backup and drift
+// resolve without a tenant file; the object still comes from the
+// HelmRelease, so a capture lands under the same app ID as the legacy one.
+func TestResolve_MigratedChartInstanceWithoutTenantFile(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	opts.Objects = migratedGenai(opts.Objects)
+	app, err := Resolve(opts, "genai-ui")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if app.ID != "genai" || app.Object != "genai" {
+		t.Errorf("unexpected app: %+v", app)
+	}
+}
+
+// TestResolve_SiblingNotesOnlyForTheResolvedType: virtualizer on eosdev —
+// its anchor migrated, its -monitor/-ui siblings left legacy. Resolving an
+// unrelated app says nothing about them; resolving virtualizer says what
+// they are.
+func TestResolve_SiblingNotesOnlyForTheResolvedType(t *testing.T) {
+	var buf bytes.Buffer
+	opts := baseOptions(t)
+	opts.Doc = nil
+	opts.Log = log.New(&buf, false)
+	opts.Objects = migrated(opts.Objects, "virtualizer", "stratio-apps", "virtualizer")
+
+	if _, err := Resolve(opts, "psql"); err != nil {
+		t.Fatalf("Resolve(psql) returned error: %v", err)
+	}
+	if strings.Contains(buf.String(), "virtualizer") {
+		t.Errorf("resolving psql logged %q, want nothing about virtualizer", buf.String())
+	}
+
+	buf.Reset()
+	if _, err := Resolve(opts, "virtualizer"); err != nil {
+		t.Fatalf("Resolve(virtualizer) returned error: %v", err)
+	}
+	want := "Deployment stratio-apps/virtualizer-monitor is still a legacy CCT workload, but HelmRelease stratio-apps/virtualizer, which migrated virtualizer, doesn't render it"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("resolving virtualizer logged %q, want it to contain %q", buf.String(), want)
+	}
+}
+
 func TestResolve_ManagedButUncataloguedChartExplained(t *testing.T) {
 	opts := baseOptions(t)
 	opts.Objects = append(opts.Objects,

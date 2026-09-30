@@ -33,6 +33,10 @@ type Instance struct {
 	Type  *config.ComponentType
 	Entry string
 	Live  []*unstructured.Unstructured
+	// object, when set, is the instance's GitOps object name as found live
+	// (an already-migrated instance's HelmRelease), rather than rendered
+	// from the type's Object template.
+	object string
 }
 
 // Primary is the instance's first (anchor) live object.
@@ -58,12 +62,29 @@ func (i Instance) Label() string {
 // A chart type's siblings (Chart.Siblings — genai's genai-ui next to its
 // genai-api anchor) never start an instance: each joins the one instance
 // of its type in its namespace, after the anchors, so Primary stays the
-// anchor. A sibling with no such instance, or several, joins none, and
-// warn (when set) says why.
+// anchor. A sibling with no such instance, or several, joins none (see
+// SiblingNote; Resolve and ResolveAll report the ones relevant to what
+// they resolve).
 //
 // Instances come back sorted by catalog type order, then entry, then
 // namespace — deterministic regardless of the API's own list order.
-func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant string, warn func(format string, a ...any)) ([]Instance, error) {
+func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant string) ([]Instance, error) {
+	instances, _, err := classify(cat, objs, tenant)
+	return instances, err
+}
+
+// SiblingNote is a live object a chart type selects as a sibling
+// (Chart.Siblings) that joined no instance: Candidates are the instances
+// of Type in its namespace — none (its anchor isn't a legacy instance:
+// never deployed, or already migrated) or several (nothing says whose it
+// is).
+type SiblingNote struct {
+	Type       *config.ComponentType
+	Object     *unstructured.Unstructured
+	Candidates []*Instance
+}
+
+func classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant string) ([]Instance, []SiblingNote, error) {
 	type key struct {
 		typeIdx          int
 		namespace, entry string
@@ -82,7 +103,7 @@ func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant str
 			}
 			entry, err := render(t.EntryTemplate(), newTemplateData(obj, "", "", tenant))
 			if err != nil {
-				return nil, fmt.Errorf("type %q: rendering entry for %s %s/%s: %w", t.Type, obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+				return nil, nil, fmt.Errorf("type %q: rendering entry for %s %s/%s: %w", t.Type, obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 			}
 			k := key{ti, obj.GetNamespace(), entry}
 			inst, ok := byKey[k]
@@ -95,7 +116,7 @@ func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant str
 		}
 	}
 
-	siblings := attachSiblings(cat, objs, tenant, byKey, keys, warn)
+	siblings, notes := attachSiblings(cat, objs, tenant, byKey, keys)
 
 	sort.Slice(keys, func(a, b int) bool {
 		ka, kb := keys[a], keys[b]
@@ -116,17 +137,16 @@ func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant str
 		inst.Live = append(inst.Live, sibs...)
 		out = append(out, *inst)
 	}
-	return out, nil
+	return out, notes, nil
 }
 
 // attachSiblings finds every object one of cat's chart types selects as a
 // sibling (Chart.Siblings) and returns, per instance, the siblings that
-// join it: an object joins the one instance of that type in its own
-// namespace. With none there's no anchor for it to belong to (the anchor
-// isn't live); with several, nothing says which one it belongs to — either
-// way it joins none, and warn says so.
-func attachSiblings[K comparable](cat *config.Catalog, objs []*unstructured.Unstructured, tenant string, byKey map[K]*Instance, keys []K, warn func(string, ...any)) map[*Instance][]*unstructured.Unstructured {
+// join it — an object joins the one instance of that type in its own
+// namespace — and a SiblingNote for every one that joins none.
+func attachSiblings[K comparable](cat *config.Catalog, objs []*unstructured.Unstructured, tenant string, byKey map[K]*Instance, keys []K) (map[*Instance][]*unstructured.Unstructured, []SiblingNote) {
 	out := map[*Instance][]*unstructured.Unstructured{}
+	var notes []SiblingNote
 	for _, obj := range objs {
 		if len(obj.GetOwnerReferences()) > 0 || !ownedByTenant(obj, tenant) {
 			continue
@@ -142,26 +162,59 @@ func attachSiblings[K comparable](cat *config.Catalog, objs []*unstructured.Unst
 					candidates = append(candidates, inst)
 				}
 			}
-			label := fmt.Sprintf("%s %s/%s", obj.GetKind(), obj.GetNamespace(), obj.GetName())
-			switch len(candidates) {
-			case 1:
+			if len(candidates) == 1 {
 				out[candidates[0]] = append(out[candidates[0]], obj)
-			case 0:
-				warnf(warn, "%s is a %s sibling, but no %s instance is live in namespace %s to attach it to; "+
-					"it won't be captured or compared as part of one", label, t.Type, t.Type, obj.GetNamespace())
-			default:
-				entries := make([]string, len(candidates))
-				for i, c := range candidates {
-					entries[i] = c.Entry
-				}
-				sort.Strings(entries)
-				warnf(warn, "%s is a %s sibling, but %d %s instances are live in namespace %s (entries %s) "+
-					"and nothing says which it belongs to; it won't be captured or compared as part of either",
-					label, t.Type, len(candidates), t.Type, obj.GetNamespace(), strings.Join(entries, ", "))
+				continue
 			}
+			notes = append(notes, SiblingNote{Type: t, Object: obj, Candidates: candidates})
 		}
 	}
-	return out
+	return out, notes
+}
+
+// Message explains n for the operator. charts is helmReleaseCharts'
+// result: a sibling with no instance to join next to a HelmRelease that
+// deploys its type's chart is a legacy leftover of an already-migrated
+// instance — that HelmRelease doesn't render it (a rendered one would
+// carry Helm's labels, not CCT's annotations the sibling selector matched).
+func (n SiblingNote) Message(charts map[string]string) string {
+	label := fmt.Sprintf("%s %s/%s", n.Object.GetKind(), n.Object.GetNamespace(), n.Object.GetName())
+	if len(n.Candidates) > 1 {
+		entries := make([]string, len(n.Candidates))
+		for i, c := range n.Candidates {
+			entries[i] = c.Entry
+		}
+		sort.Strings(entries)
+		return fmt.Sprintf("%s is a %s sibling, but %d %s instances are live in namespace %s (entries %s) "+
+			"and nothing says which it belongs to; it won't be captured or compared as part of either",
+			label, n.Type.Type, len(n.Candidates), n.Type.Type, n.Object.GetNamespace(), strings.Join(entries, ", "))
+	}
+	if hr := chartHelmRelease(n.Type, n.Object.GetNamespace(), charts); hr != "" {
+		return fmt.Sprintf("%s is still a legacy CCT workload, but HelmRelease %s, which migrated %s, doesn't render it: "+
+			"its values aren't carried over — enable it in the chart's values, or remove it if it's no longer needed",
+			label, hr, n.Type.Type)
+	}
+	return fmt.Sprintf("%s is a %s sibling, but no %s instance is live in namespace %s to attach it to; "+
+		"it won't be captured or compared as part of one", label, n.Type.Type, n.Type.Type, n.Object.GetNamespace())
+}
+
+// chartHelmRelease is the "<namespace>/<name>" of a HelmRelease in
+// namespace that deploys t's chart, or "".
+func chartHelmRelease(t *config.ComponentType, namespace string, charts map[string]string) string {
+	if t.Chart == nil {
+		return ""
+	}
+	var found []string
+	for hr, chart := range charts {
+		if ns, _, _ := strings.Cut(hr, "/"); ns == namespace && chart == path.Base(t.Chart.Path) {
+			found = append(found, hr)
+		}
+	}
+	sort.Strings(found)
+	if len(found) == 0 {
+		return ""
+	}
+	return found[0]
 }
 
 func hasObject(objs []*unstructured.Unstructured, obj *unstructured.Unstructured) bool {
@@ -171,12 +224,6 @@ func hasObject(objs []*unstructured.Unstructured, obj *unstructured.Unstructured
 		}
 	}
 	return false
-}
-
-func warnf(warn func(string, ...any), format string, a ...any) {
-	if warn != nil {
-		warn(format, a...)
-	}
 }
 
 // SiblingMatches reports whether obj is one of t's chart siblings

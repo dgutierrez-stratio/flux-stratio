@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/Stratio/flux-stratio/internal/appdiff"
@@ -45,6 +46,8 @@ import (
 // (BackupManager.create_backup_dir): UTC, colon-free so it's a valid path
 // component on every OS.
 const timestampFormat = "2006-01-02T15-04-05Z"
+
+var helmReleaseGVK = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"}
 
 // Options configures backing up one app.
 type Options struct {
@@ -211,6 +214,25 @@ func classifiedLive(opts Options) (*unstructured.Unstructured, bool) {
 	return opts.Index.Get(ref.GVK, ref.Namespace, ref.Name)
 }
 
+// managingHelmRelease is the HelmRelease that rendered opts.App's primary
+// live workload, per the labels helm-controller stamps on what it renders
+// — for an already-migrated app, whose HelmRelease is rarely named like
+// the workload it was resolved by (genai's "genai" renders genai-api and
+// genai-ui). Capturing through it templates the chart, so every workload
+// it renders is captured, not just the one the app was resolved by.
+func managingHelmRelease(opts Options) (*unstructured.Unstructured, bool) {
+	live, ok := classifiedLive(opts)
+	if !ok || !isWorkload(live) {
+		return nil, false
+	}
+	labels := live.GetLabels()
+	name, namespace := labels["helm.toolkit.fluxcd.io/name"], labels["helm.toolkit.fluxcd.io/namespace"]
+	if name == "" || namespace == "" {
+		return nil, false
+	}
+	return opts.Index.Get(helmReleaseGVK, namespace, name)
+}
+
 // classifiedSiblings are the live workloads besides its primary one that
 // opts.App was classified from — a chart type's siblings (Chart.Siblings,
 // genai's genai-ui next to its genai-api anchor), which a legacy CCT
@@ -260,6 +282,9 @@ func isWorkload(obj *unstructured.Unstructured) bool {
 // own values (never the flux-rendered desired ones), falling back
 // progressively when there's no live HelmRelease under this identity.
 func captureChartMode(ctx context.Context, opts Options, dir, name string) ([]string, error) {
+	if hr, ok := managingHelmRelease(opts); ok {
+		return captureChartFromHelmRelease(ctx, opts, dir, hr)
+	}
 	if hr, ok := opts.Index.FindHelmRelease(name, opts.Log); ok {
 		return captureChartFromHelmRelease(ctx, opts, dir, hr)
 	}

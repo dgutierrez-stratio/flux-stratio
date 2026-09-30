@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/Stratio/flux-stratio/internal/config"
@@ -268,6 +269,61 @@ func TestRun_ChartMode_MultiWorkload_WritesEachWorkloadsOwnEnvFile(t *testing.T)
 		if string(data) != want {
 			t.Errorf("%s = %q, want %q", file, data, want)
 		}
+	}
+}
+
+// TestRun_ChartMode_MigratedAppCapturedThroughItsManagingHelmRelease: a
+// migrated genai resolved by one of its workloads has no HelmRelease named
+// like its primary live object (genai-ui). The capture finds the
+// HelmRelease through that workload's Helm labels instead, and templates
+// the chart, so every workload it renders is captured — genai-api too,
+// although the app's live refs don't list it.
+func TestRun_ChartMode_MigratedAppCapturedThroughItsManagingHelmRelease(t *testing.T) {
+	base := fixtureBase(t)
+	chartPath := fixtureChart(t, base, "genai")
+	logger := log.New(io.Discard, false)
+
+	managed := func(name string) *appsv1.Deployment {
+		dep := deploymentWithEnv(name, "stratio-genai", name+"-role")
+		dep.Spec.Template.Spec.Containers[0].Env[0].Name = "VAULT_ROLE"
+		dep.Labels = map[string]string{"helm.toolkit.fluxcd.io/name": "genai", "helm.toolkit.fluxcd.io/namespace": "stratio-genai"}
+		return dep
+	}
+	hr := helmRelease("genai", "stratio-genai", map[string]any{})
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(managed("genai-api"), managed("genai-ui"), hr).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(context.Background(), Options{
+		Repos: config.ReposUnder(base),
+		App: config.App{
+			ID: "genai", Type: "genai", Object: "genai", ChartPath: chartPath,
+			Live: []config.ObjectRef{{GVK: schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "stratio-genai", Name: "genai-ui"}},
+		},
+		Index: idx,
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{"helm": {Stdout: []byte(`
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-api
+  namespace: stratio-genai
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-ui
+  namespace: stratio-genai
+`)}}},
+		Client: c, Dir: t.TempDir(), Clock: fixedClock, Log: logger,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-ui.env"}
+	if !equalStrings(result.Files, wantFiles) {
+		t.Errorf("Files = %v, want %v", result.Files, wantFiles)
 	}
 }
 

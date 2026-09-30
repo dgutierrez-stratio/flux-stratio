@@ -247,7 +247,11 @@ func SeedCatalog() Catalog {
 			}},
 			Prepare: "prepare-genai",
 			Notes:   "prepare-genai is a Postgres data rewrite apps migrate cannot verify itself; it runs the SQL via pod exec and shows the result, but always asks its own confirmation before proceeding, never skipped by --yes.",
+			// Every workload's vault approlename is excluded, as for the
+			// other chart components: each uses the chart's own GitOps role
+			// (its SecretsIdentity), never the legacy CCT one.
 			Exclude: []string{
+				"spec.values.genaiApi.general.identity.approlename",
 				"spec.values.genaiUi.settings.generalProperties.governanceUrl",
 				"spec.values.genaiUi.general.governanceRegistration.governanceDeployment",
 				"spec.values.genaiUi.general.governanceRegistration.governanceBaseUri",

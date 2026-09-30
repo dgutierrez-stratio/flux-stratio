@@ -109,7 +109,7 @@ workload reads its ConfigMaps through `envFrom`. For example, Deployment `genai-
 - **CLI**: `apps diff`/`apps migrate` list the unmapped differences, missing workloads and live-only
   count, and no longer say "no differences" when some need manual review.
 - **Catalog**: Vault roles follow the GitOps naming. The genaiUi/genaiGateway approlename excludes
-  stay, and `genaiDeveloperProxy…approlename` is added.
+  stay, and `genaiApi…approlename` and `genaiDeveloperProxy…approlename` are added.
 
 Checked against a local render of each catalog chart (placeholder values): every env-vars ConfigMap
 is attributed to exactly one file. The one exception is bdl-datarest's oracle/oracle11 flavors, which

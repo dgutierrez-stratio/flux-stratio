@@ -1,7 +1,6 @@
 package components
 
 import (
-	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -51,7 +50,7 @@ func instanceKeys(instances []Instance) []string {
 // PgDatabase, an owned sub-workload, a legacy workload the chart no longer
 // renders (genai-gateway) — classifies as nothing at all.
 func TestClassify_SeededCatalogAgainstRealLegacyObjects(t *testing.T) {
-	instances, err := Classify(seededCatalog(), loadLiveFixture(t), "stratio", nil)
+	instances, err := Classify(seededCatalog(), loadLiveFixture(t), "stratio")
 	if err != nil {
 		t.Fatalf("Classify returned error: %v", err)
 	}
@@ -101,7 +100,7 @@ func TestClassify_OtherTenantsObjectsExcluded(t *testing.T) {
 		{"stratio", "stratio-datastores"},
 		{"keos", "keos-core"},
 	} {
-		instances, err := Classify(seededCatalog(), loadLiveFixture(t), c.tenant, nil)
+		instances, err := Classify(seededCatalog(), loadLiveFixture(t), c.tenant)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -130,7 +129,7 @@ func TestClassify_GroupsSameEntryInOneNamespace(t *testing.T) {
 		deployment("genai-api", "stratio-genai", map[string]string{"svc": "genai"}),
 		deployment("genai-api", "other-genai", map[string]string{"svc": "genai"}),
 	}
-	instances, err := Classify(cat, objs, "stratio", nil)
+	instances, err := Classify(cat, objs, "stratio")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,14 +160,12 @@ func siblingCatalog() *config.Catalog {
 }
 
 func TestClassify_SiblingsJoinTheirNamespacesInstance(t *testing.T) {
-	var warnings []string
-	warn := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
 	objs := []*unstructured.Unstructured{
 		deployment("genai-ui", "stratio-genai", map[string]string{"model": "genai-ui"}),
 		deployment("genai-developer-proxy", "stratio-genai", map[string]string{"model": "genai-developer-proxy"}),
 		deployment("genai-api", "stratio-genai", map[string]string{"model": "genai-api"}),
 	}
-	instances, err := Classify(siblingCatalog(), objs, "stratio", warn)
+	instances, notes, err := classify(siblingCatalog(), objs, "stratio")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,8 +174,8 @@ func TestClassify_SiblingsJoinTheirNamespacesInstance(t *testing.T) {
 	if got := instanceKeys(instances); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("instances = %v, want %v", got, want)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("warnings = %v, want none", warnings)
+	if len(notes) != 0 {
+		t.Errorf("notes = %+v, want none", notes)
 	}
 }
 
@@ -187,7 +184,7 @@ func TestClassify_SiblingWithoutOneInstanceJoinsNone(t *testing.T) {
 		name        string
 		objs        []*unstructured.Unstructured
 		want        []string
-		wantWarning string
+		wantMessage string
 	}{
 		{
 			name: "no anchor live in its namespace",
@@ -196,7 +193,7 @@ func TestClassify_SiblingWithoutOneInstanceJoinsNone(t *testing.T) {
 				deployment("genai-ui", "other-genai", map[string]string{"model": "genai-ui"}),
 			},
 			want:        []string{"genai stratio-genai/genai-api -> genai"},
-			wantWarning: "no genai instance is live in namespace other-genai",
+			wantMessage: "no genai instance is live in namespace other-genai",
 		},
 		{
 			name: "two instances in its namespace",
@@ -206,22 +203,35 @@ func TestClassify_SiblingWithoutOneInstanceJoinsNone(t *testing.T) {
 				deployment("genai-ui", "stratio-genai", map[string]string{"model": "genai-ui"}),
 			},
 			want:        []string{"genai stratio-genai/genai-api -> genai", "genai stratio-genai/genai2-api -> genai2"},
-			wantWarning: "2 genai instances are live in namespace stratio-genai (entries genai, genai2)",
+			wantMessage: "2 genai instances are live in namespace stratio-genai (entries genai, genai2)",
+		},
+		{
+			// virtualizer on eosdev: the anchor already migrated (Helm
+			// stripped its CCT annotations), its siblings left legacy.
+			name: "anchor already migrated",
+			objs: []*unstructured.Unstructured{
+				managedDeployment("genai-api", "stratio-genai", "genai", "stratio"),
+				helmRelease("genai", "stratio-genai", "genai"),
+				deployment("genai-ui", "stratio-genai", map[string]string{"model": "genai-ui"}),
+			},
+			wantMessage: "Deployment stratio-genai/genai-ui is still a legacy CCT workload, but HelmRelease stratio-genai/genai, " +
+				"which migrated genai, doesn't render it",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var warnings []string
-			warn := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
-			instances, err := Classify(siblingCatalog(), c.objs, "stratio", warn)
+			instances, notes, err := classify(siblingCatalog(), c.objs, "stratio")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got := instanceKeys(instances); strings.Join(got, "\n") != strings.Join(c.want, "\n") {
 				t.Errorf("instances = %v, want %v", got, c.want)
 			}
-			if len(warnings) != 1 || !strings.Contains(warnings[0], c.wantWarning) {
-				t.Errorf("warnings = %v, want one containing %q", warnings, c.wantWarning)
+			if len(notes) != 1 {
+				t.Fatalf("notes = %+v, want one", notes)
+			}
+			if msg := notes[0].Message(helmReleaseCharts(c.objs)); !strings.Contains(msg, c.wantMessage) {
+				t.Errorf("message = %q, want it to contain %q", msg, c.wantMessage)
 			}
 		})
 	}
@@ -283,7 +293,7 @@ func TestClassify_TemplateCanReadAnnotations(t *testing.T) {
 		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}},
 	}}}
 	objs := []*unstructured.Unstructured{deployment("x", "ns", map[string]string{"cct.stratio.com/application_service": "rocket"})}
-	instances, err := Classify(cat, objs, "acme", nil)
+	instances, err := Classify(cat, objs, "acme")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +308,7 @@ func TestClassify_EmptyRenderedEntryIsAnError(t *testing.T) {
 		Entry: `{{ .Live.Annotation "missing" }}`,
 		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}},
 	}}}
-	if _, err := Classify(cat, []*unstructured.Unstructured{deployment("x", "ns", nil)}, "t", nil); err == nil {
+	if _, err := Classify(cat, []*unstructured.Unstructured{deployment("x", "ns", nil)}, "t"); err == nil {
 		t.Error("Classify returned nil error for an empty rendered entry, want an error")
 	}
 }
@@ -389,7 +399,7 @@ func TestManagedMatches(t *testing.T) {
 // catalog's selectors alone.
 func TestClassify_IgnoresMigratedWorkloads(t *testing.T) {
 	objs := migrated(loadLiveFixture(t), "virtualizer", "stratio-apps", "virtualizer")
-	instances, err := Classify(seededCatalog(), objs, "stratio", nil)
+	instances, err := Classify(seededCatalog(), objs, "stratio")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,13 +17,21 @@ All notable changes to this project will be documented in this file.
   * backups also write `env-vars.<kind>.<name>.env` per live workload, which `--baseline` and
     drift checks compare when present. Older backups keep working through `env-vars.env`, with
     shared names reported as ambiguous;
-  * the seeded genai type also excludes `genaiDeveloperProxy.general.identity.approlename`, so
-    Vault roles follow the GitOps naming.
+  * the seeded genai type also excludes `genaiApi`'s and `genaiDeveloperProxy`'s
+    `general.identity.approlename`, like the other chart components, so every genai workload uses
+    the chart's GitOps Vault role.
   * new catalog field `chart.siblings` declares a chart's other workloads that legacy CCT deployed
     as separate apps. They join the anchor's instance, so backups of a CCT install capture them and
     `--baseline`/`--drift` compare each with its own rendered workload. It's seeded for genai
     (`genai-ui`, `genai-developer-proxy`) and virtualizer (`virtualizer-monitor`,
     `virtualizer-ui`), whose siblings `apps backup --all` no longer captures as separate apps.
+  * an already-migrated chart app resolves from its HelmRelease, by any workload it renders or by
+    the HelmRelease's own name:
+    * `apps diff genai-ui` finds genai with its tenant entry inferred, instead of asking for it;
+    * its backup and drift captures go through that HelmRelease, found from the workload's Helm
+      labels, so every workload it renders is captured, not just the named one;
+    * a sibling that joins no instance is only warned about while working on its type, as a legacy
+      leftover when its type's HelmRelease doesn't render it.
 * **Config split into a typed component catalog and an environment file.** `config init` now
   writes `~/.fluxcd/flux-stratio/catalog.yaml` and `environment.yaml` (`--dir`, `--force`)
   instead of one `config.yaml` whose flat `apps:` list mixed static coordinates with

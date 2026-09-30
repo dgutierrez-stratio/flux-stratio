@@ -185,15 +185,20 @@ convention, that repo is the reference:
   each joins the one instance of its type in its namespace, appended to `Live` after the anchor —
   which is how a legacy CCT backup (no HelmRelease to enumerate the chart's workloads by) captures
   them. `Resolve(opts, name)` picks the one instance `name` refers to
-  (live/object name first, entry name as fallback, then an already-migrated workload: when a
-  same-named HelmRelease adopted the legacy object, Helm stripped the CCT annotations the selectors
-  need, so a live object named `name` whose `helm.toolkit.fluxcd.io/{name,namespace}` HelmRelease
-  deploys a chart-mode type's `path.Base(chart.path)`, labelled `keos.stratio.com/tenant` as the
-  run's tenant, is that type — `ManagedMatches`; types sharing a chart are asked about) and
+  (live/object name first, entry name as fallback, then an already-migrated instance: when a
+  HelmRelease adopted the legacy workloads, Helm stripped the CCT annotations the selectors need,
+  so `name` — the HelmRelease itself, or any workload its `helm.toolkit.fluxcd.io/{name,namespace}`
+  labels say it renders (genai-ui finds the same instance genai-api does) — resolves to that
+  HelmRelease's instance of every chart-mode type whose `path.Base(chart.path)` it deploys
+  (`ManagedMatches`; types sharing a chart are asked about), labelled `keos.stratio.com/tenant` as
+  the run's tenant: object = the HelmRelease's name, entry = the declared one whose object renders to
+  it (inferred when exactly one does), live = every workload of the type it renders) and
   `ResolveAll` all of them (selectors only — `--all` never sees that fallback); with a tenant file
   (`Options.Doc`, set for diff/migrate, nil for backup/drift) each entry must be declared under
   `components.<component>`, else the `Prompter` asks which declared entry it is (`--as` answers up
-  front; `NonInteractive` — used by `migrate --yes` — fails naming `--as`; `ResolveAll` returns
+  front; `NonInteractive` — used by `migrate --yes` — fails naming `--as`; siblings that joined no
+  instance are warned about only for the type being resolved, including a migrated type's legacy
+  leftovers its HelmRelease doesn't render; `ResolveAll` returns
   such instances as `unresolved` instead of aborting, so `--all` reports them all as failed apps).
   Nothing is persisted.
   Its fixtures (`testdata/live.yaml`) are metadata-only copies of real captured legacy objects,

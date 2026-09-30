@@ -3,6 +3,7 @@ package components
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -42,7 +43,7 @@ type Options struct {
 // than one instance (several types, or the same entry live in several
 // namespaces), the operator is asked which one.
 func Resolve(opts Options, name string) (config.App, error) {
-	instances, err := Classify(opts.Catalog, opts.Objects, opts.Tenant, opts.Log.Warningf)
+	instances, notes, err := classify(opts.Catalog, opts.Objects, opts.Tenant)
 	if err != nil {
 		return config.App{}, err
 	}
@@ -93,6 +94,7 @@ func Resolve(opts Options, name string) (config.App, error) {
 		chosen = candidates[i]
 	}
 
+	reportSiblingNotes(opts, notes, map[string]bool{chosen.Type.Type: true})
 	if asEntry != "" {
 		chosen.Entry = asEntry
 	}
@@ -102,38 +104,142 @@ func Resolve(opts Options, name string) (config.App, error) {
 	return toApp(chosen, opts.Tenant)
 }
 
-// managedInstances is Resolve's fallback for an app already migrated
-// under its legacy name: the HelmRelease adopted the legacy workload and
-// Helm rewrote its metadata, so the CCT annotations the selectors (and
-// the tenant check) rely on are gone. A live object named name, rendered
-// by a HelmRelease that deploys a chart-mode type's chart and labelled as
-// the run's tenant, is an instance of that type — one per type when
-// several share the chart (the gosec agents), for Resolve to ask about.
+// reportSiblingNotes warns about the siblings that joined no instance, for
+// the types being worked on (types); the rest only at debug level, since
+// they're unrelated to what was asked for.
+func reportSiblingNotes(opts Options, notes []SiblingNote, types map[string]bool) {
+	if len(notes) == 0 {
+		return
+	}
+	charts := helmReleaseCharts(opts.Objects)
+	for _, n := range notes {
+		if types[n.Type.Type] {
+			opts.Log.Warningf("%s", n.Message(charts))
+		} else {
+			opts.Log.Debugf("%s", n.Message(charts))
+		}
+	}
+}
+
+// managedInstances is Resolve's fallback for an app already migrated:
+// its HelmRelease adopted the legacy workloads and Helm rewrote their
+// metadata, so the CCT annotations the selectors (and the tenant check)
+// rely on are gone. name is then either the HelmRelease itself or one of
+// the workloads it renders (labelled as the run's tenant) — any of them,
+// anchor or sibling: genai-ui finds the same genai instance genai-api
+// does. The instance is that HelmRelease's, for every chart-mode type
+// whose chart it deploys (one per type when several share the chart — the
+// gosec agents — for Resolve to ask about):
+//   - its object is the HelmRelease's own name;
+//   - its entry is the tenant-file entry whose object renders to that
+//     name, when exactly one does (else the one the type's Entry template
+//     derives, and resolveEntry asks as usual);
+//   - its live objects are every workload of the type the HelmRelease
+//     renders, the one named name (or else named like the HelmRelease)
+//     first.
 //
 // Only a named lookup falls back like this: Classify, and so ResolveAll's
 // --all, still selects by the catalog's selectors alone.
 func managedInstances(opts Options, name, asType string) ([]Instance, error) {
 	charts := helmReleaseCharts(opts.Objects)
-	var out []Instance
+	var releases []string
+	seen := map[string]bool{}
 	for _, obj := range opts.Objects {
-		if obj.GetName() != name || len(obj.GetOwnerReferences()) > 0 || !managedByTenant(obj, opts.Tenant) {
+		if obj.GetName() != name {
 			continue
 		}
+		hr := ""
+		switch {
+		case isHelmRelease(obj):
+			hr = obj.GetNamespace() + "/" + obj.GetName()
+		case len(obj.GetOwnerReferences()) == 0 && managedByTenant(obj, opts.Tenant):
+			hr = ManagedHelmRelease(obj)
+		}
+		if _, ok := charts[hr]; ok && !seen[hr] {
+			seen[hr] = true
+			releases = append(releases, hr)
+		}
+	}
+	sort.Strings(releases)
+
+	var out []Instance
+	for _, hr := range releases {
+		_, hrName, _ := strings.Cut(hr, "/")
 		for ti := range opts.Catalog.Types {
 			t := &opts.Catalog.Types[ti]
-			if (asType != "" && t.Type != asType) || !ManagedMatches(t, obj, charts) {
+			if asType != "" && t.Type != asType {
 				continue
 			}
-			entry, err := render(t.EntryTemplate(), newTemplateData(obj, "", "", opts.Tenant))
-			if err != nil {
-				return nil, fmt.Errorf("type %q: rendering entry for %s %s/%s: %w", t.Type, obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+			var live []*unstructured.Unstructured
+			for _, obj := range opts.Objects {
+				if ManagedHelmRelease(obj) == hr && len(obj.GetOwnerReferences()) == 0 && managedByTenant(obj, opts.Tenant) && ManagedMatches(t, obj, charts) {
+					live = append(live, obj)
+				}
 			}
-			opts.Log.Debugf("%s %s/%s: no selector matches; already migrated, rendered by HelmRelease %s deploying type %q's chart",
-				obj.GetKind(), obj.GetNamespace(), obj.GetName(), ManagedHelmRelease(obj), t.Type)
-			out = append(out, Instance{Type: t, Entry: entry, Live: []*unstructured.Unstructured{obj}})
+			if len(live) == 0 {
+				continue
+			}
+			sort.SliceStable(live, func(a, b int) bool {
+				if ra, rb := primaryRank(live[a], name, hrName), primaryRank(live[b], name, hrName); ra != rb {
+					return ra < rb
+				}
+				return live[a].GetName() < live[b].GetName()
+			})
+			entry, err := managedEntry(opts, t, live[0], hrName)
+			if err != nil {
+				return nil, err
+			}
+			opts.Log.Debugf("%s: no selector matches; already migrated by HelmRelease %s deploying type %q's chart (%d workload(s))",
+				name, hr, t.Type, len(live))
+			out = append(out, Instance{Type: t, Entry: entry, Live: live, object: hrName})
 		}
 	}
 	return out, nil
+}
+
+// primaryRank orders an already-migrated instance's workloads: the one the
+// operator named, then the one named like its HelmRelease, then the rest.
+func primaryRank(obj *unstructured.Unstructured, name, hrName string) int {
+	switch obj.GetName() {
+	case name:
+		return 0
+	case hrName:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// managedEntry is an already-migrated instance's tenant-file entry: the
+// one declared entry whose object name renders to its HelmRelease's name —
+// inferred without asking when exactly one does — or else what the type's
+// Entry template derives from primary, which resolveEntry checks (and asks
+// about) as for any instance.
+func managedEntry(opts Options, t *config.ComponentType, primary *unstructured.Unstructured, hrName string) (string, error) {
+	if opts.Doc != nil {
+		names, err := tenantfile.EntryNames(opts.Doc, t.Component)
+		if err != nil {
+			return "", err
+		}
+		var matches []string
+		for _, e := range names {
+			if object, err := render(t.ObjectTemplate(), newTemplateData(primary, e, "", opts.Tenant)); err == nil && object == hrName {
+				matches = append(matches, e)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0], nil
+		}
+	}
+	entry, err := render(t.EntryTemplate(), newTemplateData(primary, "", "", opts.Tenant))
+	if err != nil {
+		return "", fmt.Errorf("type %q: rendering entry for %s %s/%s: %w", t.Type, primary.GetKind(), primary.GetNamespace(), primary.GetName(), err)
+	}
+	return entry, nil
+}
+
+func isHelmRelease(obj *unstructured.Unstructured) bool {
+	return obj.GroupVersionKind().Group == "helm.toolkit.fluxcd.io" && obj.GetKind() == "HelmRelease"
 }
 
 // managedByTenant is ownedByTenant for a Helm-rendered object, which keeps
@@ -158,10 +264,15 @@ func managedByTenant(obj *unstructured.Unstructured, tenant string) bool {
 // per-app failure — whether the resolvable apps still go ahead. Any other
 // error is fatal.
 func ResolveAll(opts Options) (apps []config.App, unresolved []error, err error) {
-	instances, err := Classify(opts.Catalog, opts.Objects, opts.Tenant, opts.Log.Warningf)
+	instances, notes, err := classify(opts.Catalog, opts.Objects, opts.Tenant)
 	if err != nil {
 		return nil, nil, err
 	}
+	types := map[string]bool{}
+	for _, inst := range instances {
+		types[inst.Type.Type] = true
+	}
+	reportSiblingNotes(opts, notes, types)
 
 	type key struct{ typ, entry string }
 	var order []key
@@ -274,9 +385,13 @@ func undeclaredReason(doc *tenantfile.Doc, componentKey string) string {
 func toApp(inst Instance, tenant string) (config.App, error) {
 	t := inst.Type
 	primary := inst.Primary()
-	object, err := render(t.ObjectTemplate(), newTemplateData(primary, inst.Entry, "", tenant))
-	if err != nil {
-		return config.App{}, fmt.Errorf("type %q: rendering object: %w", t.Type, err)
+	object := inst.object
+	if object == "" {
+		var err error
+		object, err = render(t.ObjectTemplate(), newTemplateData(primary, inst.Entry, "", tenant))
+		if err != nil {
+			return config.App{}, fmt.Errorf("type %q: rendering object: %w", t.Type, err)
+		}
 	}
 	kustomization, err := render(t.KustomizationTemplate(), newTemplateData(primary, inst.Entry, object, tenant))
 	if err != nil {
@@ -314,6 +429,9 @@ func (i Instance) namedAs(name, tenant string) bool {
 		if obj.GetName() == name {
 			return true
 		}
+	}
+	if i.object != "" {
+		return i.object == name
 	}
 	object, err := render(i.Type.ObjectTemplate(), newTemplateData(i.Primary(), i.Entry, "", tenant))
 	return err == nil && object == name

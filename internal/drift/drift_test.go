@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/Stratio/flux-stratio/internal/config"
@@ -222,9 +223,13 @@ spec:
 // TestRun_ChartMode_CCTBackupVsMigratedSiblings is drift after a genai
 // migration: the backup was taken from the legacy CCT install (anchor and
 // sibling captured per workload), live is now the HelmRelease's render.
-// Only genai-ui's VAULT_ROLE changed; genai-api sets the same name and
-// wins both sides' merged env-vars.env, so only a per-workload comparison
-// can show it.
+// The app is shaped as components.Resolve resolves a migrated genai named
+// by one of its workloads (`apps diff genai-ui --drift`): object "genai",
+// primary live object genai-ui — no HelmRelease is named like it, so the
+// live capture must find it through the workload's own Helm labels to
+// capture every workload the chart renders. Only genai-ui's VAULT_ROLE
+// changed; genai-api sets the same name and wins both sides' merged
+// env-vars.env, so only a per-workload comparison can show it.
 func TestRun_ChartMode_CCTBackupVsMigratedSiblings(t *testing.T) {
 	logger := log.New(io.Discard, false)
 	chartsRoot := t.TempDir()
@@ -237,7 +242,9 @@ func TestRun_ChartMode_CCTBackupVsMigratedSiblings(t *testing.T) {
 	}}
 	workload := func(name, role string) *appsv1.Deployment {
 		return &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "stratio-genai"},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "stratio-genai", Labels: map[string]string{
+				"helm.toolkit.fluxcd.io/name": "genai", "helm.toolkit.fluxcd.io/namespace": "stratio-genai",
+			}},
 			Spec: appsv1.DeploymentSpec{
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
 				Template: corev1.PodTemplateSpec{
@@ -265,7 +272,13 @@ func TestRun_ChartMode_CCTBackupVsMigratedSiblings(t *testing.T) {
 
 	result, err := Run(context.Background(), Options{
 		Repos: chartsRepoAt(t.TempDir(), filepath.Join(chartsRoot, "charts")),
-		App:   config.App{ID: "genai", Object: "genai", ChartPath: chartPath},
+		App: config.App{
+			ID: "genai", Object: "genai", ChartPath: chartPath,
+			Live: []config.ObjectRef{
+				{GVK: schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "stratio-genai", Name: "genai-ui"},
+				{GVK: schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "stratio-genai", Name: "genai-api"},
+			},
+		},
 		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
 			// genai-ui renders first, so genai-api's VAULT_ROLE wins the merge.
 			"helm": {Stdout: []byte(`
