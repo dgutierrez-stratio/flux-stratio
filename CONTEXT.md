@@ -365,3 +365,9 @@ being tested in a feature package first.
   excluding the affected paths one at a time; the collision itself isn't fixed. See
   `docs/TASK-multi-workload-env-var-collision.md` for the full writeup and investigation starting
   points.
+- `tenant import`'s `ExtraConfig` scaffolding (`internal/catalog.Schema.ExtraConfig`) only
+  understands a flat scalar read directly off `$componentConfig`, with an optional quoted-string
+  default — a nested sub-config (a variable assigned from `$componentConfig` and read for several
+  leaf keys elsewhere, e.g. genai's own `llmModels.{chat,governance,translate}`) is silently
+  dropped from the generated skeleton with no warning, not just under-scaffolded. See
+  `docs/TASK-tenant-import-nested-config-scaffolding.md`.
