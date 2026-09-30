@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/log"
@@ -71,5 +73,39 @@ func TestReportUnresolvedDeps(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestConfirmWarnings(t *testing.T) {
+	app := config.App{Name: "Rocket rocket"}
+	tests := []struct {
+		name                 string
+		warned, dryRun, yes  bool
+		stdin                string
+		wantProceed, prompts bool
+	}{
+		{name: "no warnings", wantProceed: true},
+		{name: "accepted", warned: true, stdin: "y\n", wantProceed: true, prompts: true},
+		{name: "declined", warned: true, stdin: "n\n", prompts: true},
+		{name: "dry run never asks", warned: true, dryRun: true, wantProceed: true},
+		{name: "yes never asks", warned: true, yes: true, wantProceed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetIn(strings.NewReader(tt.stdin))
+			cmd.SetErr(&stderr)
+			proceed, err := confirmWarnings(cmd, log.New(&stderr, false), app, tt.warned, tt.dryRun, tt.yes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if proceed != tt.wantProceed {
+				t.Errorf("proceed = %v, want %v", proceed, tt.wantProceed)
+			}
+			if asked := strings.Contains(stderr.String(), "Review the warnings above"); asked != tt.prompts {
+				t.Errorf("prompted = %v, want %v:\n%s", asked, tt.prompts, stderr.String())
+			}
+		})
 	}
 }

@@ -46,6 +46,9 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		Rendered: renderedDocs, Live: live, Files: files,
 		ValuesRoot: opts.App.ValuesRoot, HRName: opts.App.Object, Exclude: opts.App.Exclude,
 	})
+	if result.Patch != nil && len(result.UnmappedDiffs) > 0 {
+		result.UnmappedDiffs = settleUnmapped(ctx, opts, rendered, result)
+	}
 	before, after := formatComparisons(result.Workloads)
 	return &Result{
 		Patch:             result.Patch,
@@ -146,14 +149,38 @@ func appendNonEmpty(parts []string, s string) []string {
 	return append(parts, s)
 }
 
+// settleUnmapped renders the chart again with result's patch applied
+// and drops the unmapped diffs that render already settles (see
+// diff.SettledByPatch), so review only lists what the patch really
+// leaves different. If that render fails, every diff is kept.
+func settleUnmapped(ctx context.Context, opts Options, rendered *render.Result, result *diff.ChartDiffResult) []diff.UnmappedDiff {
+	patched, _, err := renderChartWith(ctx, opts, rendered, diff.PatchValues(result.Patch))
+	if err != nil {
+		if opts.Log != nil {
+			opts.Log.Debugf("rendering %s with its patch applied: %v; keeping every unmapped difference", opts.App.Object, err)
+		}
+		return result.UnmappedDiffs
+	}
+	return diff.SettledByPatch(result.UnmappedDiffs, patched)
+}
+
 // renderChart runs `helm template` for opts.App's chart against the
 // rendered HelmRelease's own values, namespace and release name (spec.
 // releaseName, when the object's GitOps name and release name diverge —
 // see diff.ReleaseName).
 func renderChart(ctx context.Context, opts Options, rendered *render.Result) ([]*unstructured.Unstructured, string, error) {
+	return renderChartWith(ctx, opts, rendered, nil)
+}
+
+// renderChartWith is renderChart with extraValues deep-merged over the
+// rendered HelmRelease's spec.values, as a tenant patch would be.
+func renderChartWith(ctx context.Context, opts Options, rendered *render.Result, extraValues map[string]any) ([]*unstructured.Unstructured, string, error) {
 	hrValues, _, err := unstructured.NestedMap(rendered.Object.Object, "spec", "values")
 	if err != nil {
 		return nil, "", fmt.Errorf("reading rendered HelmRelease spec.values: %w", err)
+	}
+	if extraValues != nil {
+		hrValues = diff.MergeValues(hrValues, extraValues)
 	}
 	namespace := rendered.Object.GetNamespace()
 	releaseName := diff.ReleaseName(rendered.Object, opts.App.Object)

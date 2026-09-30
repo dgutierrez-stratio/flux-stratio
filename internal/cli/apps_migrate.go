@@ -165,6 +165,11 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		return nil
 	}
 
+	warned := planned.FluxManagedBy != "" || review.hasWarnings() || len(planned.UnresolvedDeps) > 0
+	if proceed, err := confirmWarnings(cmd, logger, app, warned, dryRun, yes); err != nil || !proceed {
+		return err
+	}
+
 	if err := ui.FileDiff(cmd.OutOrStdout(), planned.Before, planned.After); err != nil {
 		return err
 	}
@@ -193,6 +198,24 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		logger.Successf("migrated %q", app.Name)
 	}
 	return nil
+}
+
+// confirmWarnings stops on the warnings migrate printed before showing
+// the patch: they'd otherwise scroll away behind a long diff, and a
+// migration they rule out never gets as far as its apply prompt. Nothing
+// to confirm without warnings, and --dry-run and --yes never ask.
+func confirmWarnings(cmd *cobra.Command, logger *log.Logger, app config.App, warned, dryRun, yes bool) (bool, error) {
+	if !warned || dryRun || yes {
+		return true, nil
+	}
+	proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("Review the warnings above. Show the patch for %q? [y/N] ", app.Name))
+	if err != nil {
+		return false, err
+	}
+	if !proceed {
+		logger.Warningf("skipped %q (warnings not accepted)", app.Name)
+	}
+	return proceed, nil
 }
 
 // reportUnresolvedDeps warns about each of app's tenant-file dependencies

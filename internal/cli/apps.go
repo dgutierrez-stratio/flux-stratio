@@ -431,6 +431,11 @@ type chartReview struct {
 	Source string
 }
 
+// hasWarnings reports whether reportChartReview prints anything for r.
+func (r chartReview) hasWarnings() bool {
+	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || r.LiveOnly > 0
+}
+
 // reportChartReview warns about everything a chart-mode diff/migrate
 // leaves out of its patch, so none of it is lost silently: rendered
 // workloads it had nothing to compare against, differences it couldn't

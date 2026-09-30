@@ -8,6 +8,14 @@ All notable changes to this project will be documented in this file.
   `dgAgent: dg-agent` blocked `apps-rocket` on `apps-dg-agent` when the tenant's agent is
   `dg-hdfs-agent`. Migrate now names each such dependency and the entries that are declared.
   Dependency keys that aren't component keys (`governancePostgres`) aren't checked.
+* **`apps migrate` stops on its warnings before showing the patch.** Warnings (unmapped
+  differences, dropped live variables, unresolved dependencies, a Flux-managed live object) scrolled
+  away behind a long patch. Migrate now asks to continue first. `--dry-run` and `--yes` never ask.
+* **Review no longer lists differences the patch already settles.** A variable built from several
+  templates has no single `.Values` path. rocket's `ROCKET_API_DOCKER_IMAGE` is
+  `<registry>/rocket-api:<image tag>`, and it was listed for manual review even though the patch
+  sets the image tag (through `ROCKET_VERSION`). The chart is now rendered again with the patch
+  applied, and a difference that render already settles is dropped.
 * **Chart-mode diffs match env vars per workload.** A chart rendering sibling workloads (genai's
   genai-api/genai-ui/genai-developer-proxy) had every workload's variables merged by name, so a value
   from one sibling could be patched into another's `.Values` path. `apps migrate genai` wrote
