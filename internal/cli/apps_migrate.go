@@ -16,6 +16,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/tenantfile"
 	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
@@ -158,6 +159,7 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		Source: liveSource(resolvedBaseline),
 	}
 	reportChartReview(logger, review)
+	reportUnresolvedDeps(logger, app, planned.UnresolvedDeps)
 	if !planned.Migrated {
 		reportNoChange(logger, planned.UpToDate, planned.ObsoletePatches, review)
 		return nil
@@ -191,6 +193,22 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		logger.Successf("migrated %q", app.Name)
 	}
 	return nil
+}
+
+// reportUnresolvedDeps warns about each of app's tenant-file dependencies
+// that names an entry the tenant file doesn't declare. The patch is still
+// written (the missing entry may be added in the same change), but Flux
+// holds the app's Kustomization back on the missing apps-<name> until
+// the name is fixed.
+func reportUnresolvedDeps(logger *log.Logger, app config.App, deps []tenantfile.UnresolvedDependency) {
+	for _, d := range deps {
+		declared := "none declared"
+		if len(d.Declared) > 0 {
+			declared = "declared: " + strings.Join(d.Declared, ", ")
+		}
+		logger.Warningf("%s depends on %s %q, which the tenant file doesn't declare (%s) — Flux will hold %s back on apps-%s until it's fixed",
+			app.Object, d.Key, d.Name, declared, app.Kustomization, d.Name)
+	}
 }
 
 // ensurePrepared checks app's declared prepare precondition and, if it

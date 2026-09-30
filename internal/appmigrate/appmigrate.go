@@ -60,6 +60,10 @@ type Result struct {
 	UnmappedDiffs    []diff.UnmappedDiff
 	LiveOnlyCount    int
 	MissingWorkloads []string
+	// UnresolvedDeps are the app's tenant-file dependencies naming an
+	// entry the tenant file doesn't declare: migrating writes nothing
+	// wrong itself, but Flux won't reconcile the app until they're fixed.
+	UnresolvedDeps []tenantfile.UnresolvedDependency
 }
 
 // Plan computes what migrating opts.App would do, without writing
@@ -109,6 +113,9 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 		Before: string(before), After: string(before),
 		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnlyCount: diffResult.LiveOnlyCount, MissingWorkloads: diffResult.MissingWorkloads,
 	}
+	if result.UnresolvedDeps, err = unresolvedDeps(doc, opts.Catalog, opts.App); err != nil {
+		return nil, nil, "", err
+	}
 	if diffResult.Patch == nil || diffResult.UpToDate {
 		return result, doc, tenantPath, nil
 	}
@@ -122,4 +129,25 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	}
 	result.Migrated, result.After = true, string(after)
 	return result, doc, tenantPath, nil
+}
+
+// unresolvedDeps checks app's tenant-file entry, found the way OrderApps
+// finds it, for dependencies the tenant file can't satisfy. An app whose
+// entry isn't in the tenant file yet has nothing to check.
+func unresolvedDeps(doc *tenantfile.Doc, cat *catalog.Catalog, app config.App) ([]tenantfile.UnresolvedDependency, error) {
+	if cat == nil {
+		return nil, nil
+	}
+	anchor, err := cat.ResolveAnchor(app.Kustomization)
+	if err != nil {
+		return nil, nil
+	}
+	entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerName(app.Kustomization, anchor))
+	if err != nil {
+		return nil, nil
+	}
+	return tenantfile.UnresolvedDependencies(doc, entry, func(key string) bool {
+		_, ok := cat.Schemas[key]
+		return ok
+	})
 }

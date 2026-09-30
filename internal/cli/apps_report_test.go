@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/log"
+	"github.com/Stratio/flux-stratio/internal/tenantfile"
 )
 
 func TestReportChartReview(t *testing.T) {
@@ -51,5 +53,23 @@ func TestReportNoChange_UnmappedIsNotNoDifferences(t *testing.T) {
 	reportNoChange(log.New(&buf, false), false, 0, chartReview{Unmapped: []diff.UnmappedDiff{{Name: "X"}}})
 	if out := buf.String(); strings.Contains(out, "no differences") || !strings.Contains(out, "need manual review") {
 		t.Errorf("output = %q, want a manual-review warning, not \"no differences\"", out)
+	}
+}
+
+func TestReportUnresolvedDeps(t *testing.T) {
+	var buf bytes.Buffer
+	app := config.App{Object: "rocket", Kustomization: "apps-rocket"}
+	reportUnresolvedDeps(log.New(&buf, false), app, []tenantfile.UnresolvedDependency{
+		{Key: "dgAgent", Name: "dg-agent", Declared: []string{"dg-hdfs-agent"}},
+		{Key: "virtualizer", Name: "virtualizer"},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		`rocket depends on dgAgent "dg-agent", which the tenant file doesn't declare (declared: dg-hdfs-agent) — Flux will hold apps-rocket back on apps-dg-agent until it's fixed`,
+		`rocket depends on virtualizer "virtualizer", which the tenant file doesn't declare (none declared)`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 }

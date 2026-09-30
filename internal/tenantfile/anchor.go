@@ -2,6 +2,7 @@ package tenantfile
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -132,6 +133,40 @@ func DependencyNames(entry *yaml.Node) map[string]string {
 		}
 	}
 	return out
+}
+
+// UnresolvedDependency is a config.dependencies.<Key>.name that no
+// components.<Key>[] entry in the tenant file carries: the ResourceSets
+// render it into a dependsOn on Kustomization apps-<Name>, which then
+// never exists, so Flux blocks the dependent app forever.
+type UnresolvedDependency struct {
+	Key, Name string
+	// Declared is every entry name components.<Key> does declare.
+	Declared []string
+}
+
+// UnresolvedDependencies returns entry's dependencies whose names the
+// tenant file doesn't declare, sorted by key. Only keys isComponentKey
+// accepts are checked: a dependency key names the component key it points
+// at (dgAgent, hdfs, postgres, ...), the same assumption `tenant import`
+// resolves dependencies by, while a key that isn't a component
+// (governancePostgres) can't be checked this way and is skipped.
+func UnresolvedDependencies(d *Doc, entry *yaml.Node, isComponentKey func(string) bool) ([]UnresolvedDependency, error) {
+	var out []UnresolvedDependency
+	for key, name := range DependencyNames(entry) {
+		if !isComponentKey(key) {
+			continue
+		}
+		declared, err := EntryNames(d, key)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(declared, name) {
+			out = append(out, UnresolvedDependency{Key: key, Name: name, Declared: declared})
+		}
+	}
+	slices.SortFunc(out, func(a, b UnresolvedDependency) int { return strings.Compare(a.Key, b.Key) })
+	return out, nil
 }
 
 // ResolveAnchorNode navigates from a component entry to the node whose

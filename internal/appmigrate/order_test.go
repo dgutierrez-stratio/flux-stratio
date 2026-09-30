@@ -1,10 +1,14 @@
 package appmigrate
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/tenantfile"
 )
 
 func TestOrderApps_DependencyBeforeDependent(t *testing.T) {
@@ -102,5 +106,41 @@ func TestTopoSort_CycleDoesNotHang(t *testing.T) {
 	got := topoSort(apps, graph)
 	if len(got) != 2 {
 		t.Errorf("len(got) = %d, want 2 (a cycle must not drop apps or hang)", len(got))
+	}
+}
+
+func TestUnresolvedDeps(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	cat := loadCatalog(t, base)
+	path := tenantfile.Path(filepath.Join(base, "keos-fleet"), "eosdev", "stratio")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// psql's entry gains a postgres dependency naming an entry the tenant
+	// doesn't declare; its pgbackuprepository one isn't a component key in
+	// the fixture catalog, so it's never reported.
+	data = []byte(strings.Replace(string(data),
+		"            pgbackuprepository:\n              name: pgbackuprepository\n",
+		"            pgbackuprepository:\n              name: pgbackuprepository\n            postgres:\n              name: psql-old\n", 1))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := loadTenantDoc(t, base, "eosdev", "stratio")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := unresolvedDeps(doc, cat, config.App{ID: "psql", Kustomization: "apps-psql", Object: "psql"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []tenantfile.UnresolvedDependency{{Key: "postgres", Name: "psql-old", Declared: []string{"psql"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("unresolvedDeps = %+v, want %+v", got, want)
+	}
+
+	if got, err := unresolvedDeps(doc, cat, config.App{ID: "rocket", Kustomization: "apps-rocket", Object: "rocket"}); err != nil || got != nil {
+		t.Errorf("an app not in the tenant file: unresolvedDeps = %+v, %v; want nothing", got, err)
 	}
 }

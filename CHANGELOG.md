@@ -2,6 +2,12 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`apps migrate` warns about dependencies the tenant file can't satisfy.** An entry whose
+  `config.dependencies.<key>.name` names no `components.<key>` entry renders a `dependsOn` on a
+  Kustomization that never exists, and Flux holds the app back forever. rocket's hand-written
+  `dgAgent: dg-agent` blocked `apps-rocket` on `apps-dg-agent` when the tenant's agent is
+  `dg-hdfs-agent`. Migrate now names each such dependency and the entries that are declared.
+  Dependency keys that aren't component keys (`governancePostgres`) aren't checked.
 * **Chart-mode diffs match env vars per workload.** A chart rendering sibling workloads (genai's
   genai-api/genai-ui/genai-developer-proxy) had every workload's variables merged by name, so a value
   from one sibling could be patched into another's `.Values` path. `apps migrate genai` wrote
