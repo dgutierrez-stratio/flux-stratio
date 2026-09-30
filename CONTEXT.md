@@ -357,3 +357,11 @@ being tested in a feature package first.
 - `docs/config-reference.md` and this file can drift from the actual `config.ComponentType` fields —
   if you add/remove one, update `docs/config-reference.md` and `internal/config/seed.go` in the
   same change.
+- Chart-mode diffing (`internal/diff`/`internal/appdiff`) collapses env vars into a flat
+  `map[string]string` keyed only by name, cluster-wide across every sibling workload a chart
+  renders — a live value found for one sibling can get mis-attributed to a *different* sibling's
+  `.Values` path when two of them name an env var identically (confirmed live: `genai`'s
+  `VAULT_ROLE`, shared by `genai-api`/`genai-ui`/`genai-developer-proxy`). Worked around today by
+  excluding the affected paths one at a time; the collision itself isn't fixed. See
+  `docs/TASK-multi-workload-env-var-collision.md` for the full writeup and investigation starting
+  points.
