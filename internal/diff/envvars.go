@@ -12,12 +12,18 @@ var workloadKinds = map[string]bool{"Deployment": true, "StatefulSet": true, "Da
 // renderedVar is one env var a rendered workload's containers would see:
 // its value, and where it came from — the rendered ConfigMap it was read
 // from and its key there (before any envFrom prefix), or no ConfigMap for
-// a container's own env value.
+// a container's own env value, which then names its Container.
 type renderedVar struct {
 	Value     string
 	ConfigMap string
 	Key       string
+	Container string
 }
+
+// inline reports whether v is a container's own env value rather than a
+// ConfigMap's: no chart env file sets it, and it overrides any envFrom
+// ConfigMap setting the same name.
+func (v renderedVar) inline() bool { return v.ConfigMap == "" }
 
 // renderedEnv is a chart's rendered output, indexed for resolving each
 // workload's env vars.
@@ -109,7 +115,11 @@ func (r renderedEnv) workloadEnv(workload *unstructured.Unstructured) map[string
 			if name == "" {
 				continue
 			}
-			set(name, r.envEntryValue(name, entry))
+			v := r.envEntryValue(name, entry)
+			if v.inline() {
+				v.Container, _ = container["name"].(string)
+			}
+			set(name, v)
 		}
 	}
 	return out

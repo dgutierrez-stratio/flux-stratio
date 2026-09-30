@@ -467,6 +467,9 @@ func describeUnmapped(u diff.UnmappedDiff) string {
 		line += " between " + strings.Join(u.Candidates, ", ")
 	case diff.UnmappedConflict:
 		line += " for " + strings.Join(u.Candidates, ", ")
+		if len(u.Shared) > 0 {
+			line += ", which also sets " + strings.Join(u.Shared, ", ")
+		}
 	}
 	return line
 }

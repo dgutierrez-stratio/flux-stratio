@@ -21,10 +21,15 @@ const (
 	// baseline that doesn't record which sibling workload a value came
 	// from, or a ConfigMap no chart file could be matched to.
 	UnmappedAmbiguous UnmappedReason = "ambiguous"
-	// UnmappedConflict means sibling workloads read the variable from the same
-	// .Values path (Candidates[0]) but have different live values, and one
-	// path can carry only one of them.
+	// UnmappedConflict means variables read from the same .Values path
+	// (Candidates[0]) have different live values — sibling workloads, or
+	// another variable that already matches (Shared) — and one path can
+	// carry only one of them.
 	UnmappedConflict UnmappedReason = "conflicting live values"
+	// UnmappedInline means a container sets the variable in its own env,
+	// overriding the chart's ConfigMaps, and no values env entry renders
+	// it as-is (a hardcoded or templated env value).
+	UnmappedInline UnmappedReason = "set inline in the container env"
 )
 
 // UnmappedDiff is a variable whose rendered and live values differ but
@@ -41,6 +46,10 @@ type UnmappedDiff struct {
 	// Reason is UnmappedAmbiguous, the shared one when it's
 	// UnmappedConflict.
 	Candidates []string
+	// Shared, for an UnmappedConflict, are the variables that already
+	// match live through the same path ("NAME=live", workload-prefixed
+	// when there are several), which patching it would change.
+	Shared []string
 }
 
 // LiveWorkloadEnv is one live workload's already-resolved env vars (e.g.
@@ -75,6 +84,10 @@ type ChartDiffInput struct {
 	// "spec.values.datarestPgInternal.general.identity.approlename")
 	// never written to the patch.
 	Exclude []string
+	// Values are the values the chart was rendered with (its defaults
+	// under the HelmRelease's), where a container's inline env var is
+	// looked up to patch it (see inlineSource).
+	Values map[string]any
 }
 
 // WorkloadComparison is one compared workload's two sides, for a
@@ -116,6 +129,10 @@ type resolvedVar struct {
 	// ambiguous is set when merged workloads disagree on whether the
 	// variable has a path at all, so even a single path isn't certain.
 	ambiguous bool
+	// inline is the values env a container's own env var is rendered
+	// from, when found; isInline is set for any container env var.
+	inline   *inlineSource
+	isInline bool
 }
 
 // mappedValue is one workload's live value for a .Values path.
@@ -139,10 +156,26 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 		files:      in.Files,
 		attributed: AttributeConfigMaps(in.Rendered, in.Files, in.ValuesRoot),
 		valuesRoot: in.ValuesRoot,
+		values:     in.Values,
 	}
 	result := &ChartDiffResult{}
 	mapped := map[string][]mappedValue{}
+	// matching are the variables already equal live through a single
+	// path: patching that path for another variable would change them.
+	matching := map[string][]mappedValue{}
 	var ambiguous []UnmappedDiff
+	var inlineEdits []inlineEdit
+	workloads := map[string]*unstructured.Unstructured{}
+	for _, lw := range in.Live {
+		if lw.Rendered != nil {
+			workloads[lw.Rendered.GetName()] = lw.Rendered
+		}
+	}
+	// A flat live side names no workload, but a chart rendering only one
+	// leaves no doubt which one a variable is pinned in.
+	if len(c.rendered.workloads) == 1 {
+		workloads[""] = c.rendered.workloads[0]
+	}
 
 	for _, lw := range in.Live {
 		workload := ""
@@ -171,7 +204,15 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 			case isPlaceholder(rv.value) || isPlaceholder(liveVal):
 				// An unresolvable placeholder on either side can't be diffed.
 			case rv.value == liveVal:
-				// No difference.
+				if len(rv.paths) == 1 && !rv.ambiguous {
+					matching[rv.paths[0]] = append(matching[rv.paths[0]], mappedValue{workload, name, rv.value, liveVal})
+				}
+			case rv.inline != nil && !rv.ambiguous:
+				inlineEdits = append(inlineEdits, inlineEdit{mappedValue{workload, name, rv.value, liveVal}, *rv.inline})
+			case rv.isInline && !rv.ambiguous:
+				result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
+					Workload: workload, Name: name, Rendered: rv.value, Live: liveVal, Reason: UnmappedInline,
+				})
 			case len(rv.paths) == 1 && !rv.ambiguous:
 				mapped[rv.paths[0]] = append(mapped[rv.paths[0]], mappedValue{workload, name, rv.value, liveVal})
 			case len(rv.paths) == 0:
@@ -208,17 +249,40 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 			continue
 		}
 		entries := mapped[path]
-		if distinctLive(entries) == 1 {
+		var shared []string
+		var pins []inlineEdit
+		pinnable := true
+		for _, m := range matching[path] {
+			if m.live == entries[0].live {
+				continue
+			}
+			shared = append(shared, describeShared(m, len(in.Live) > 1))
+			src := envSourceFor(in.Values, workloads[m.workload])
+			if src == nil || isExcluded(src.path, in.Exclude) {
+				pinnable = false
+				continue
+			}
+			pins = append(pins, inlineEdit{m, *src})
+		}
+		if distinctLive(entries) == 1 && (len(shared) == 0 || pinnable) {
 			setDotPath(values, path, CoerceValue(entries[0].live))
+			inlineEdits = append(inlineEdits, pins...)
 			continue
 		}
 		for _, e := range entries {
 			result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
 				Workload: e.workload, Name: e.name, Rendered: e.rendered, Live: e.live,
-				Reason: UnmappedConflict, Candidates: []string{path},
+				Reason: UnmappedConflict, Candidates: []string{path}, Shared: shared,
 			})
 		}
 	}
+	var keptEdits []inlineEdit
+	for _, e := range inlineEdits {
+		if !isExcluded(e.source.path, in.Exclude) && !isExcluded(e.source.path+"."+e.name, in.Exclude) {
+			keptEdits = append(keptEdits, e)
+		}
+	}
+	result.UnmappedDiffs = append(result.UnmappedDiffs, applyInlineEdits(values, in.Values, keptEdits)...)
 	sort.SliceStable(result.UnmappedDiffs, func(i, j int) bool {
 		a, b := result.UnmappedDiffs[i], result.UnmappedDiffs[j]
 		if a.Workload != b.Workload {
@@ -252,6 +316,7 @@ type chartContext struct {
 	files      []ChartFile
 	attributed map[string]*ChartFile
 	valuesRoot string
+	values     map[string]any
 }
 
 // pathsFor is the .Values paths v could be patched through: its own
@@ -259,6 +324,9 @@ type chartContext struct {
 // (none, if that file doesn't map it — another file's same-named mapping
 // belongs to a different ConfigMap), otherwise every chart file's.
 func (c chartContext) pathsFor(v renderedVar) []string {
+	if v.inline() {
+		return nil
+	}
 	if file := c.attributed[v.ConfigMap]; file != nil {
 		if p, ok := file.Values[v.Key]; ok {
 			return []string{p}
@@ -271,7 +339,11 @@ func (c chartContext) pathsFor(v renderedVar) []string {
 func (c chartContext) workloadVars(workload *unstructured.Unstructured) map[string]resolvedVar {
 	out := map[string]resolvedVar{}
 	for name, v := range c.rendered.workloadEnv(workload) {
-		out[name] = resolvedVar{value: v.Value, paths: c.pathsFor(v)}
+		rv := resolvedVar{value: v.Value, paths: c.pathsFor(v), isInline: v.inline()}
+		if rv.isInline {
+			rv.inline = inlineSourceFor(c.values, workload, v)
+		}
+		out[name] = rv
 	}
 	return out
 }
@@ -294,8 +366,12 @@ func (c chartContext) mergedVars() map[string]resolvedVar {
 			if !isPlaceholder(prev.value) && isPlaceholder(value) {
 				value = prev.value
 			}
-			ambiguous := prev.ambiguous || (len(prev.paths) == 0) != (len(v.paths) == 0)
-			out[name] = resolvedVar{value: value, paths: unionSorted(prev.paths, v.paths), ambiguous: ambiguous}
+			ambiguous := prev.ambiguous || (len(prev.paths) == 0) != (len(v.paths) == 0) ||
+				prev.isInline != v.isInline || !sameInline(prev.inline, v.inline)
+			out[name] = resolvedVar{
+				value: value, paths: unionSorted(prev.paths, v.paths), ambiguous: ambiguous,
+				inline: v.inline, isInline: v.isInline,
+			}
 		}
 	}
 	return out
@@ -311,6 +387,20 @@ func isExcluded(valuesPath string, exclude []string) bool {
 		}
 	}
 	return false
+}
+
+func sameInline(a, b *inlineSource) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
+}
+
+// describeShared names a variable Shared lists: its name and live value,
+// prefixed with its workload when several are compared.
+func describeShared(m mappedValue, prefix bool) string {
+	name := m.name
+	if prefix && m.workload != "" {
+		name = m.workload + "/" + name
+	}
+	return name + "=" + m.live
 }
 
 func distinctLive(entries []mappedValue) int {

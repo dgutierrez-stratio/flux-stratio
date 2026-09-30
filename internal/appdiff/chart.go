@@ -2,10 +2,15 @@ package appdiff
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -42,9 +47,14 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		return nil, fmt.Errorf("mapping chart env vars to .Values paths: %w", err)
 	}
 
+	values, err := chartValues(opts, rendered)
+	if err != nil {
+		return nil, err
+	}
 	result := diff.ChartDiff(diff.ChartDiffInput{
 		Rendered: renderedDocs, Live: live, Files: files,
 		ValuesRoot: opts.App.ValuesRoot, HRName: opts.App.Object, Exclude: opts.App.Exclude,
+		Values: values,
 	})
 	if result.Patch != nil && len(result.UnmappedDiffs) > 0 {
 		result.UnmappedDiffs = settleUnmapped(ctx, opts, rendered, result)
@@ -147,6 +157,28 @@ func appendNonEmpty(parts []string, s string) []string {
 		return parts
 	}
 	return append(parts, s)
+}
+
+// chartValues are the values the chart renders with: its own values.yaml
+// defaults under the rendered HelmRelease's spec.values, merged as Helm
+// merges them (a list the HelmRelease sets replaces the default).
+func chartValues(opts Options, rendered *render.Result) (map[string]any, error) {
+	hrValues, _, err := unstructured.NestedMap(rendered.Object.Object, "spec", "values")
+	if err != nil {
+		return nil, fmt.Errorf("reading rendered HelmRelease spec.values: %w", err)
+	}
+	defaults := map[string]any{}
+	data, err := os.ReadFile(filepath.Join(chartPath(opts), "values.yaml"))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return nil, err
+	default:
+		if err := yaml.Unmarshal(data, &defaults); err != nil {
+			return nil, fmt.Errorf("parsing %s values.yaml: %w", opts.App.ChartPath, err)
+		}
+	}
+	return diff.MergeValues(defaults, hrValues), nil
 }
 
 // settleUnmapped renders the chart again with result's patch applied

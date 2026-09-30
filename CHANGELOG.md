@@ -2,6 +2,25 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **Chart-mode patches carry legacy values that the chart's ConfigMaps can't.** Three cases showed up
+  in rocket's post-migration drift:
+  * **Inline container env.** A variable a container sets in its own `env` (a keos-apps size
+    overlay's `controllers.<c>.containers.<k>.env`) overrides the ConfigMap. It was patched through
+    the ConfigMap's `.Values` path anyway, so the patch had no effect (rocket's
+    `SPARTA_BOOTSTRAP_*` sizing). It's now patched in that env: a list is written whole with the
+    legacy values, since a patch replaces lists, and a map gets just its keys. An inline value no
+    values env renders is listed for review (`set inline in the container env`).
+  * **Shared `.Values` paths.** Patching a path for one variable silently changed another variable
+    that already matched through it (`cluster.domain` feeds both `KERBEROS_REALM_NAME`, legacy
+    `EOSDEV.INT`, and `PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN`, legacy `eosdev.int`). The other
+    variable is now pinned to its legacy value in the container's env, which the chart's ConfigMaps
+    can't override. Where no single container env can carry the pin, it's reported as a conflict.
+  * **Large integers.** They're written as strings. helm-controller passes values to Helm as JSON,
+    and a number of a million or more rendered in exponent form
+    (`SPARTA_PLUGIN_FACADE_CACHE_SIZE=1e+06`).
+
+  The chart's values are now its `values.yaml` defaults under the HelmRelease's values. With a
+  flat baseline, differences the patch settles are also dropped from review.
 * **`apps migrate` warns about dependencies the tenant file can't satisfy.** An entry whose
   `config.dependencies.<key>.name` names no `components.<key>` entry renders a `dependsOn` on a
   Kustomization that never exists, and Flux holds the app back forever. rocket's hand-written

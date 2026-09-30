@@ -51,7 +51,7 @@ func TestWorkloadEnv_EnvFromThenEnv(t *testing.T) {
 		}}),
 	}
 	want := map[string]renderedVar{
-		"A":   {Value: "direct", Key: "A"},
+		"A":   {Value: "direct", Key: "A", Container: "main"},
 		"B":   {Value: "from-override", ConfigMap: "override", Key: "B"},
 		"P_A": {Value: "from-base", ConfigMap: "base", Key: "A"},
 		"P_B": {Value: "from-base", ConfigMap: "base", Key: "B"},
@@ -73,10 +73,10 @@ func TestWorkloadEnv_ValueFromVariants(t *testing.T) {
 	}
 	got := workloadEnvOf(docs, "app")
 	want := map[string]renderedVar{
-		"A": {Value: "<fieldRef:status.podIP>", Key: "A"},
-		"B": {Value: "<secret:s/k>", Key: "B"},
+		"A": {Value: "<fieldRef:status.podIP>", Key: "A", Container: "main"},
+		"B": {Value: "<secret:s/k>", Key: "B", Container: "main"},
 		"C": {Value: "resolved", ConfigMap: "cm", Key: "k2"},
-		"D": {Value: "<configMap:not-rendered/k>", Key: "D"},
+		"D": {Value: "<configMap:not-rendered/k>", Key: "D", Container: "main"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("workloadEnv = %+v, want %+v", got, want)

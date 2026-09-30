@@ -20,6 +20,9 @@ func TestReportChartReview(t *testing.T) {
 			{Name: "VAULT_ROLE", Rendered: "genai_genai-ui", Live: "legacy", Reason: diff.UnmappedAmbiguous,
 				Candidates: []string{"genaiApi.general.identity.approlename", "genaiUi.general.identity.approlename"}},
 			{Workload: "rocket", Name: "TENANT", Rendered: "a", Live: "b", Reason: diff.UnmappedConflict, Candidates: []string{"rocketCommon.tenant"}},
+			{Name: "KERBEROS_REALM_NAME", Rendered: "eosdev.int", Live: "EOSDEV.INT", Reason: diff.UnmappedConflict,
+				Candidates: []string{"cluster.domain"}, Shared: []string{"PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN=eosdev.int"}},
+			{Name: "HARDCODED", Rendered: "1", Live: "2", Reason: diff.UnmappedInline},
 		},
 		Missing:  []string{"Deployment stratio-genai/genai-ui"},
 		LiveOnly: 3,
@@ -28,7 +31,9 @@ func TestReportChartReview(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"Deployment stratio-genai/genai-ui: rendered by the chart but not in the backup",
-		"2 difference(s) need manual review",
+		"4 difference(s) need manual review",
+		`KERBEROS_REALM_NAME: rendered "eosdev.int", live "EOSDEV.INT" — conflicting live values for cluster.domain, which also sets PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN=eosdev.int`,
+		`HARDCODED: rendered "1", live "2" — set inline in the container env`,
 		`VAULT_ROLE: rendered "genai_genai-ui", live "legacy" — ambiguous between genaiApi.general.identity.approlename, genaiUi.general.identity.approlename`,
 		`rocket/TENANT: rendered "a", live "b" — conflicting live values for rocketCommon.tenant`,
 		"3 variable(s) in the backup aren't rendered by the chart",

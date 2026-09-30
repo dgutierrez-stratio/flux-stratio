@@ -40,8 +40,9 @@ func MergeValues(dst, src map[string]any) map[string]any {
 // renders the live value. That's a variable built from several templates
 // rather than one .Values path — rocket's ROCKET_API_DOCKER_IMAGE is
 // "<registry>/rocket-api:<image tag>", and the image tag is patched
-// through ROCKET_VERSION. A diff from a flat baseline (no Workload) can't
-// be checked against one workload, so it's kept.
+// through ROCKET_VERSION. A diff from a flat baseline (no Workload) is
+// settled only when every patched workload setting the variable renders
+// the live value.
 func SettledByPatch(unmapped []UnmappedDiff, patched []*unstructured.Unstructured) []UnmappedDiff {
 	r := indexRendered(patched)
 	envs := map[string]map[string]renderedVar{}
@@ -50,12 +51,26 @@ func SettledByPatch(unmapped []UnmappedDiff, patched []*unstructured.Unstructure
 	}
 	var remaining []UnmappedDiff
 	for _, u := range unmapped {
-		if env, ok := envs[u.Workload]; ok && u.Workload != "" {
-			if v, ok := env[u.Name]; ok && v.Value == u.Live {
-				continue
-			}
+		if !settled(u, envs) {
+			remaining = append(remaining, u)
 		}
-		remaining = append(remaining, u)
 	}
 	return remaining
+}
+
+func settled(u UnmappedDiff, envs map[string]map[string]renderedVar) bool {
+	if u.Workload != "" {
+		v, ok := envs[u.Workload][u.Name]
+		return ok && v.Value == u.Live
+	}
+	found := false
+	for _, env := range envs {
+		if v, ok := env[u.Name]; ok {
+			if v.Value != u.Live {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
 }

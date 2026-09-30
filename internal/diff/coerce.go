@@ -25,8 +25,16 @@ func CoerceValue(v string) any {
 	case "false":
 		return false
 	}
-	if n, err := strconv.Atoi(v); err == nil {
+	if n, err := strconv.Atoi(v); err == nil && -maxPlainInt < n && n < maxPlainInt {
 		return n
 	}
 	return v
 }
+
+// maxPlainInt bounds the integers CoerceValue writes as numbers. helm-
+// controller hands a HelmRelease's values to Helm as JSON, so every
+// number arrives as a float64, and a template prints a float64 of a
+// million or more in exponent form: facadeCacheSize: 1000000 rendered
+// rocket's SPARTA_PLUGIN_FACADE_CACHE_SIZE as "1e+06". Kept a string, it
+// renders unchanged (charts quote such defaults for the same reason).
+const maxPlainInt = 1_000_000

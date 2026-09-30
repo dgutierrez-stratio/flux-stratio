@@ -22,6 +22,9 @@ func TestCoerceValue(t *testing.T) {
 		{"null", "null"},
 		{"~", "~"},
 		{"hello", "hello"},
+		{"999999", 999999},
+		{"1000000", "1000000"}, // helm-controller would render it 1e+06
+		{"-1000000", "-1000000"},
 	}
 	for _, c := range cases {
 		got := CoerceValue(c.in)
