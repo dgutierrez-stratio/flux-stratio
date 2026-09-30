@@ -242,6 +242,7 @@ func SeedCatalog() Catalog {
 				"spec.values.genaiUi.settings.generalProperties.governanceUrl",
 				"spec.values.genaiUi.general.governanceRegistration.governanceDeployment",
 				"spec.values.genaiUi.general.governanceRegistration.governanceBaseUri",
+				"spec.values.genaiUi.general.identity.approlename",
 				"spec.values.genaiGateway.general.identity.approlename",
 				"spec.values.genaiUi.settings.externalDashboards.discoveryDatabase",
 			},
