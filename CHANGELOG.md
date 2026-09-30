@@ -2,6 +2,28 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **Chart-mode diffs match env vars per workload.** A chart rendering sibling workloads (genai's
+  genai-api/genai-ui/genai-developer-proxy) had every workload's variables merged by name, so a value
+  from one sibling could be patched into another's `.Values` path. `apps migrate genai` wrote
+  genai-api's Vault role into `genaiUi.general.identity.approlename`, and genai-ui crash-looped.
+  (The Python client had the same flat maps; its filesystem-order tie-break just happened to favour
+  genai-api where Go's lexical one didn't.) Now:
+  * each live workload is compared with its own rendered workload, and each value is patched through
+    the `.Values` path in the chart file its rendered ConfigMap was built from;
+  * anything that can't be attributed to one path is listed for manual review, never guessed, in
+    `apps diff`/`apps migrate`. Those commands also name rendered workloads with nothing live (or
+    in the backup) to compare, and count live variables the chart drops. Previously these were
+    computed but never shown, and a diff with only unmapped differences reported "no differences";
+  * backups also write `env-vars.<kind>.<name>.env` per live workload, which `--baseline` and
+    drift checks compare when present. Older backups keep working through `env-vars.env`, with
+    shared names reported as ambiguous;
+  * the seeded genai type also excludes `genaiDeveloperProxy.general.identity.approlename`, so
+    Vault roles follow the GitOps naming.
+  * new catalog field `chart.siblings` declares a chart's other workloads that legacy CCT deployed
+    as separate apps. They join the anchor's instance, so backups of a CCT install capture them and
+    `--baseline`/`--drift` compare each with its own rendered workload. It's seeded for genai
+    (`genai-ui`, `genai-developer-proxy`) and virtualizer (`virtualizer-monitor`,
+    `virtualizer-ui`), whose siblings `apps backup --all` no longer captures as separate apps.
 * **Config split into a typed component catalog and an environment file.** `config init` now
   writes `~/.fluxcd/flux-stratio/catalog.yaml` and `environment.yaml` (`--dir`, `--force`)
   instead of one `config.yaml` whose flat `apps:` list mixed static coordinates with

@@ -7,19 +7,91 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
+// UnmappedReason says why a differing variable couldn't be turned into a
+// values patch automatically.
+type UnmappedReason string
+
+const (
+	// UnmappedNoPath means the chart file the variable comes from doesn't
+	// map it to a single .Values path (a literal or computed value), or no
+	// chart file does.
+	UnmappedNoPath UnmappedReason = "no .Values path"
+	// UnmappedAmbiguous means the variable could come from several .Values
+	// paths (Candidates) and nothing says which — typically a flat
+	// baseline that doesn't record which sibling workload a value came
+	// from, or a ConfigMap no chart file could be matched to.
+	UnmappedAmbiguous UnmappedReason = "ambiguous"
+	// UnmappedConflict means sibling workloads read the variable from the same
+	// .Values path (Candidates[0]) but have different live values, and one
+	// path can carry only one of them.
+	UnmappedConflict UnmappedReason = "conflicting live values"
+)
+
 // UnmappedDiff is a variable whose rendered and live values differ but
-// which BuildChartValuesMap could not trace back to a .Values path —
-// reported for human review rather than silently dropped, since it can't
-// be automatically patched.
+// which ChartDiff could not turn into a patch value — reported for human
+// review rather than silently dropped or guessed.
 type UnmappedDiff struct {
+	// Workload is the rendered workload the variable belongs to, or ""
+	// when the live side didn't say (a flat baseline compared against
+	// every rendered workload at once).
+	Workload             string
 	Name, Rendered, Live string
+	Reason               UnmappedReason
+	// Candidates are the .Values paths involved: every possible one when
+	// Reason is UnmappedAmbiguous, the shared one when it's
+	// UnmappedConflict.
+	Candidates []string
+}
+
+// LiveWorkloadEnv is one live workload's already-resolved env vars (e.g.
+// from internal/envvars.Extract), paired with the rendered workload it's
+// the live counterpart of.
+type LiveWorkloadEnv struct {
+	// Rendered is the rendered workload Env is compared against — or nil
+	// to compare it against every rendered workload at once, for a live
+	// side that doesn't say which workload a value came from (a backup's
+	// flat env-vars.env). Any variable more than one of them could have
+	// set is then reported as ambiguous rather than guessed.
+	Rendered *unstructured.Unstructured
+	Env      map[string]string
+}
+
+// ChartDiffInput is what ChartDiff compares.
+type ChartDiffInput struct {
+	// Rendered is the chart's rendered output (HelmTemplate).
+	Rendered []*unstructured.Unstructured
+	// Live are the live workloads to compare, each paired with its
+	// rendered counterpart. A rendered workload with no live counterpart
+	// contributes nothing.
+	Live []LiveWorkloadEnv
+	// Files is ScanChartFiles' result for the chart.
+	Files []ChartFile
+	// ValuesRoot, when set, is the .Values root a multi-flavor chart's
+	// ambiguities resolve to (see AttributeConfigMaps, candidatePaths).
+	ValuesRoot string
+	// HRName names the HelmRelease the patch targets.
+	HRName string
+	// Exclude are dot-paths rooted at the patch document (e.g.
+	// "spec.values.datarestPgInternal.general.identity.approlename")
+	// never written to the patch.
+	Exclude []string
+}
+
+// WorkloadComparison is one compared workload's two sides, for a
+// before/after view.
+type WorkloadComparison struct {
+	// Workload is the rendered workload's name, or "" for a live side
+	// compared against every rendered workload at once.
+	Workload       string
+	Rendered, Live map[string]string
 }
 
 // ChartDiffResult is the outcome of ChartDiff.
 type ChartDiffResult struct {
 	// Patch is the HelmRelease values patch, or nil if nothing to patch.
 	Patch *PatchDoc
-	// UnmappedDiffs lists variables that differ with no known .Values path.
+	// UnmappedDiffs lists variables that differ but couldn't be patched
+	// automatically, sorted by workload and name.
 	UnmappedDiffs []UnmappedDiff
 	// LiveOnlyCount is how many variables exist live but not in the
 	// chart's rendered output — informational: these values will be lost
@@ -29,62 +101,139 @@ type ChartDiffResult struct {
 	// no live counterpart (e.g. new defaults introduced since the app was
 	// last deployed).
 	RenderedOnlyCount int
-	// RenderedEnv is the deduped rendered env vars this comparison used —
+	// Workloads are the compared sides, one per Live entry in order —
 	// exposed so a caller can present a full before/after view (e.g.
 	// internal/appdiff builds a unified diff from it), not just the
 	// mapped subset that became a patch.
-	RenderedEnv map[string]string
+	Workloads []WorkloadComparison
 }
 
-// ChartDiff compares a chart's rendered env vars (renderedDocs, the output
-// of HelmTemplate) against a live workload's already-resolved env vars
-// (liveEnv, e.g. from internal/envvars.Extract) and returns the
-// HelmRelease values patch flux-stratio would splice into the tenant
-// YAML. excludePaths are dot-paths rooted at the patch document (e.g.
-// "spec.values.datarestPgInternal.general.identity.approlename").
-func ChartDiff(renderedDocs []*unstructured.Unstructured, liveEnv map[string]string, valuesMap map[string]string, hrName string, excludePaths []string) *ChartDiffResult {
-	rendered := dedupeRenderedEnv(CollectRenderedEnvVars(renderedDocs))
+// resolvedVar is a rendered variable's value and the .Values paths it
+// could be patched through.
+type resolvedVar struct {
+	value string
+	paths []string
+	// ambiguous is set when merged workloads disagree on whether the
+	// variable has a path at all, so even a single path isn't certain.
+	ambiguous bool
+}
 
-	names := map[string]bool{}
-	for k := range rendered {
-		names[k] = true
+// mappedValue is one workload's live value for a .Values path.
+type mappedValue struct {
+	workload, name, rendered, live string
+}
+
+// ChartDiff compares each live workload's env vars against its rendered
+// counterpart's and returns the HelmRelease values patch flux-stratio
+// would splice into the tenant YAML.
+//
+// A differing variable is patched through the .Values path of the chart
+// file its rendered value came from — the file behind the rendered
+// ConfigMap the workload reads it from (AttributeConfigMaps) — never
+// through a sibling workload's same-named variable. Where that can't be
+// told (see UnmappedReason), the difference is reported in UnmappedDiffs
+// instead of guessed.
+func ChartDiff(in ChartDiffInput) *ChartDiffResult {
+	c := chartContext{
+		rendered:   indexRendered(in.Rendered),
+		files:      in.Files,
+		attributed: AttributeConfigMaps(in.Rendered, in.Files, in.ValuesRoot),
+		valuesRoot: in.ValuesRoot,
 	}
-	for k := range liveEnv {
-		names[k] = true
-	}
+	result := &ChartDiffResult{}
+	mapped := map[string][]mappedValue{}
+	var ambiguous []UnmappedDiff
 
-	values := map[string]any{}
-	result := &ChartDiffResult{RenderedEnv: rendered}
+	for _, lw := range in.Live {
+		workload := ""
+		var vars map[string]resolvedVar
+		if lw.Rendered != nil {
+			workload = lw.Rendered.GetName()
+			vars = c.workloadVars(lw.Rendered)
+		} else {
+			vars = c.mergedVars()
+		}
 
-	for _, name := range sortedKeys(names) {
-		renderedVal, hasRendered := rendered[name]
-		liveVal, hasLive := liveEnv[name]
+		comparison := WorkloadComparison{Workload: workload, Rendered: map[string]string{}, Live: lw.Env}
+		for name, v := range vars {
+			comparison.Rendered[name] = v.value
+		}
+		result.Workloads = append(result.Workloads, comparison)
 
-		switch {
-		case !hasLive:
-			result.RenderedOnlyCount++
-		case !hasRendered:
-			result.LiveOnlyCount++
-		case strings.HasPrefix(renderedVal, "<") || strings.HasPrefix(liveVal, "<"):
-			// An unresolvable placeholder on either side can't be diffed.
-		case renderedVal == liveVal:
-			// No difference.
-		default:
-			if valuesPath, ok := valuesMap[name]; ok {
-				setDotPath(values, valuesPath, CoerceValue(liveVal))
-			} else {
-				result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{Name: name, Rendered: renderedVal, Live: liveVal})
+		for _, name := range unionKeys(comparison.Rendered, lw.Env) {
+			rv, hasRendered := vars[name]
+			liveVal, hasLive := lw.Env[name]
+			switch {
+			case !hasLive:
+				result.RenderedOnlyCount++
+			case !hasRendered:
+				result.LiveOnlyCount++
+			case isPlaceholder(rv.value) || isPlaceholder(liveVal):
+				// An unresolvable placeholder on either side can't be diffed.
+			case rv.value == liveVal:
+				// No difference.
+			case len(rv.paths) == 1 && !rv.ambiguous:
+				mapped[rv.paths[0]] = append(mapped[rv.paths[0]], mappedValue{workload, name, rv.value, liveVal})
+			case len(rv.paths) == 0:
+				result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
+					Workload: workload, Name: name, Rendered: rv.value, Live: liveVal, Reason: UnmappedNoPath,
+				})
+			default:
+				ambiguous = append(ambiguous, UnmappedDiff{
+					Workload: workload, Name: name, Rendered: rv.value, Live: liveVal,
+					Reason: UnmappedAmbiguous, Candidates: rv.paths,
+				})
 			}
 		}
 	}
 
+	// An ambiguity only matters while some candidate could still be
+	// written: one whose every candidate is excluded is moot.
+	for _, u := range ambiguous {
+		var remaining []string
+		for _, p := range u.Candidates {
+			if !isExcluded(p, in.Exclude) {
+				remaining = append(remaining, p)
+			}
+		}
+		if len(remaining) > 0 {
+			u.Candidates = remaining
+			result.UnmappedDiffs = append(result.UnmappedDiffs, u)
+		}
+	}
+
+	values := map[string]any{}
+	for _, path := range sortedMapKeys(mapped) {
+		if isExcluded(path, in.Exclude) {
+			continue
+		}
+		entries := mapped[path]
+		if distinctLive(entries) == 1 {
+			setDotPath(values, path, CoerceValue(entries[0].live))
+			continue
+		}
+		for _, e := range entries {
+			result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
+				Workload: e.workload, Name: e.name, Rendered: e.rendered, Live: e.live,
+				Reason: UnmappedConflict, Candidates: []string{path},
+			})
+		}
+	}
+	sort.SliceStable(result.UnmappedDiffs, func(i, j int) bool {
+		a, b := result.UnmappedDiffs[i], result.UnmappedDiffs[j]
+		if a.Workload != b.Workload {
+			return a.Workload < b.Workload
+		}
+		return a.Name < b.Name
+	})
+
 	patchObj := map[string]any{
 		"apiVersion": "helm.toolkit.fluxcd.io/v2",
 		"kind":       "HelmRelease",
-		"metadata":   map[string]any{"name": hrName},
+		"metadata":   map[string]any{"name": in.HRName},
 		"spec":       map[string]any{"values": values},
 	}
-	for _, p := range excludePaths {
+	for _, p := range in.Exclude {
 		removeDotPath(patchObj, p)
 	}
 	pruneEmptyMaps(patchObj)
@@ -98,27 +247,103 @@ func ChartDiff(renderedDocs []*unstructured.Unstructured, liveEnv map[string]str
 	return result
 }
 
-// dedupeRenderedEnv collapses CollectRenderedEnvVars' entries — which may
-// name the same variable more than once, e.g. a ConfigMap key that a
-// container also sets directly — into one value per name. A later entry
-// overwrites an earlier one, unless the later value is an unresolvable
-// "<...>" placeholder: a concrete value already stored is never silently
-// replaced by a placeholder appearing later in doc order (a later
-// concrete value, however, does overwrite an earlier concrete one — the
-// last container/ConfigMap to set a name wins, matching how the rendered
-// manifests would actually behave at apply time).
-func dedupeRenderedEnv(entries []EnvVarEntry) map[string]string {
-	out := map[string]string{}
-	for _, e := range entries {
-		if _, exists := out[e.Name]; exists && strings.HasPrefix(e.Value, "<") {
-			continue
+type chartContext struct {
+	rendered   renderedEnv
+	files      []ChartFile
+	attributed map[string]*ChartFile
+	valuesRoot string
+}
+
+// pathsFor is the .Values paths v could be patched through: its own
+// chart file's mapping when v came from a ConfigMap attributed to one
+// (none, if that file doesn't map it — another file's same-named mapping
+// belongs to a different ConfigMap), otherwise every chart file's.
+func (c chartContext) pathsFor(v renderedVar) []string {
+	if file := c.attributed[v.ConfigMap]; file != nil {
+		if p, ok := file.Values[v.Key]; ok {
+			return []string{p}
 		}
-		out[e.Name] = e.Value
+		return nil
+	}
+	return candidatePaths(c.files, v.Key, c.valuesRoot)
+}
+
+func (c chartContext) workloadVars(workload *unstructured.Unstructured) map[string]resolvedVar {
+	out := map[string]resolvedVar{}
+	for name, v := range c.rendered.workloadEnv(workload) {
+		out[name] = resolvedVar{value: v.Value, paths: c.pathsFor(v)}
 	}
 	return out
 }
 
-func sortedKeys(m map[string]bool) []string {
+// mergedVars is every rendered workload's variables at once: a later
+// workload's value overwrites an earlier one's (a concrete value is never
+// replaced by a placeholder), and a variable's paths are every path any
+// workload's value could be patched through — ambiguous when workloads
+// disagree on whether it has one at all.
+func (c chartContext) mergedVars() map[string]resolvedVar {
+	out := map[string]resolvedVar{}
+	for _, w := range c.rendered.workloads {
+		for name, v := range c.workloadVars(w) {
+			prev, ok := out[name]
+			if !ok {
+				out[name] = v
+				continue
+			}
+			value := v.value
+			if !isPlaceholder(prev.value) && isPlaceholder(value) {
+				value = prev.value
+			}
+			ambiguous := prev.ambiguous || (len(prev.paths) == 0) != (len(v.paths) == 0)
+			out[name] = resolvedVar{value: value, paths: unionSorted(prev.paths, v.paths), ambiguous: ambiguous}
+		}
+	}
+	return out
+}
+
+// isExcluded reports whether a .Values path is, or is under, one of
+// exclude's patch-document paths.
+func isExcluded(valuesPath string, exclude []string) bool {
+	full := "spec.values." + valuesPath
+	for _, p := range exclude {
+		if full == p || strings.HasPrefix(full, p+".") {
+			return true
+		}
+	}
+	return false
+}
+
+func distinctLive(entries []mappedValue) int {
+	seen := map[string]bool{}
+	for _, e := range entries {
+		seen[e.live] = true
+	}
+	return len(seen)
+}
+
+func unionKeys(a, b map[string]string) []string {
+	seen := map[string]bool{}
+	for k := range a {
+		seen[k] = true
+	}
+	for k := range b {
+		seen[k] = true
+	}
+	return sortedMapKeys(seen)
+}
+
+func unionSorted(a, b []string) []string {
+	seen := map[string]bool{}
+	for _, s := range a {
+		seen[s] = true
+	}
+	for _, s := range b {
+		seen[s] = true
+	}
+	return sortedMapKeys(seen)
+}
+
+func sortedMapKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

@@ -1,67 +1,174 @@
 package diff
 
-import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+import (
+	"strings"
 
-// EnvVarEntry is one environment variable found while scanning a chart's
-// rendered manifests.
-type EnvVarEntry struct {
-	Name, Value, Source string
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+// workloadKinds are the rendered kinds chart mode compares env vars of.
+var workloadKinds = map[string]bool{"Deployment": true, "StatefulSet": true, "DaemonSet": true}
+
+// renderedVar is one env var a rendered workload's containers would see:
+// its value, and where it came from — the rendered ConfigMap it was read
+// from and its key there (before any envFrom prefix), or no ConfigMap for
+// a container's own env value.
+type renderedVar struct {
+	Value     string
+	ConfigMap string
+	Key       string
 }
 
-// CollectRenderedEnvVars scans docs — the output of `helm template` — for
-// ConfigMap data entries and container env entries.
-//
-// Two things are deliberately simpler here than internal/envvars.Extract,
-// which resolves a *live* workload's env vars: envFrom is not expanded
-// (only a container's own env[] entries are read), and a valueFrom
-// reference is rendered as a "<...>" placeholder string rather than
-// resolved, exactly like an unresolved fieldRef already is — there is no
-// live cluster to resolve a rendered chart's secretKeyRef/configMapKeyRef
-// against, so this side of a diff can only ever compare "does the chart
-// still reference the same key", never the key's actual value. Ported
-// from the Python client's own _collect_env_vars, which has the same
-// asymmetry for the same reason.
-func CollectRenderedEnvVars(docs []*unstructured.Unstructured) []EnvVarEntry {
-	var out []EnvVarEntry
+// renderedEnv is a chart's rendered output, indexed for resolving each
+// workload's env vars.
+type renderedEnv struct {
+	workloads  []*unstructured.Unstructured
+	configMaps map[string]map[string]string
+	// orphans are the ConfigMaps (in doc order) no rendered workload
+	// references by name.
+	orphans []string
+}
+
+func indexRendered(docs []*unstructured.Unstructured) renderedEnv {
+	r := renderedEnv{configMaps: map[string]map[string]string{}}
+	var cmOrder []string
 	for _, d := range docs {
-		switch d.GetKind() {
-		case "ConfigMap":
+		switch {
+		case d.GetKind() == "ConfigMap":
 			data, _, _ := unstructured.NestedStringMap(d.Object, "data")
-			for k, v := range data {
-				out = append(out, EnvVarEntry{Name: k, Value: v, Source: d.GetName()})
-			}
-		case "Deployment", "StatefulSet", "DaemonSet":
-			out = append(out, collectContainerEnv(d)...)
+			r.configMaps[d.GetName()] = data
+			cmOrder = append(cmOrder, d.GetName())
+		case workloadKinds[d.GetKind()]:
+			r.workloads = append(r.workloads, d)
 		}
 	}
-	return out
+	referenced := map[string]bool{}
+	for _, w := range r.workloads {
+		for _, name := range referencedConfigMaps(w) {
+			referenced[name] = true
+		}
+	}
+	for _, name := range cmOrder {
+		if !referenced[name] {
+			r.orphans = append(r.orphans, name)
+		}
+	}
+	return r
 }
 
-func collectContainerEnv(d *unstructured.Unstructured) []EnvVarEntry {
-	containers, _, _ := unstructured.NestedSlice(d.Object, "spec", "template", "spec", "containers")
-	var out []EnvVarEntry
-	for _, c := range containers {
-		container, ok := c.(map[string]any)
-		if !ok {
-			continue
+// workloadEnv resolves the env vars workload's containers would see, with
+// the same precedence internal/envvars.Extract resolves a live workload's
+// with — containers in order, each one's envFrom and then its env, a later
+// entry overwriting an earlier one — reading ConfigMaps from the rendered
+// output instead of the cluster.
+//
+// A chart that renders a single workload also gets every ConfigMap no
+// workload references, applied first: chart mode always compared every
+// rendered ConfigMap's data, and a lone workload is the only one those
+// values can belong to. With sibling workloads they're left out, since
+// nothing says which sibling they belong to.
+//
+// Secrets aren't rendered with real values, so envFrom secretRef isn't
+// expanded and a secretKeyRef stays a "<secret:...>" placeholder, like a
+// fieldRef — there's no value to compare, only whether the chart still
+// references the same key. A concrete value is never replaced by a later
+// placeholder.
+func (r renderedEnv) workloadEnv(workload *unstructured.Unstructured) map[string]renderedVar {
+	out := map[string]renderedVar{}
+	set := func(name string, v renderedVar) {
+		if prev, ok := out[name]; ok && !isPlaceholder(prev.Value) && isPlaceholder(v.Value) {
+			return
 		}
-		name, _ := container["name"].(string)
-		source := "container:" + name
+		out[name] = v
+	}
+	applyConfigMap := func(cm, prefix string) {
+		for k, v := range r.configMaps[cm] {
+			set(prefix+k, renderedVar{Value: v, ConfigMap: cm, Key: k})
+		}
+	}
 
+	if len(r.workloads) == 1 {
+		for _, cm := range r.orphans {
+			applyConfigMap(cm, "")
+		}
+	}
+	for _, container := range containersOf(workload) {
+		envFrom, _, _ := unstructured.NestedSlice(container, "envFrom")
+		for _, e := range envFrom {
+			entry, _ := e.(map[string]any)
+			ref, _ := entry["configMapRef"].(map[string]any)
+			if name, _ := ref["name"].(string); name != "" {
+				prefix, _ := entry["prefix"].(string)
+				applyConfigMap(name, prefix)
+			}
+		}
 		env, _, _ := unstructured.NestedSlice(container, "env")
 		for _, e := range env {
-			entry, ok := e.(map[string]any)
-			if !ok {
+			entry, _ := e.(map[string]any)
+			name, _ := entry["name"].(string)
+			if name == "" {
 				continue
 			}
-			varName, _ := entry["name"].(string)
-			if varName == "" {
-				continue
-			}
-			out = append(out, EnvVarEntry{Name: varName, Value: renderedEnvValue(entry), Source: source})
+			set(name, r.envEntryValue(name, entry))
 		}
 	}
 	return out
+}
+
+// envEntryValue resolves one container env entry: a direct value, a
+// configMapKeyRef into a rendered ConfigMap, or a "<...>" placeholder for
+// anything the rendered output can't resolve.
+func (r renderedEnv) envEntryValue(name string, entry map[string]any) renderedVar {
+	valueFrom, _ := entry["valueFrom"].(map[string]any)
+	if ref, ok := valueFrom["configMapKeyRef"].(map[string]any); ok {
+		cm, _ := ref["name"].(string)
+		key, _ := ref["key"].(string)
+		if v, ok := r.configMaps[cm][key]; ok {
+			return renderedVar{Value: v, ConfigMap: cm, Key: key}
+		}
+	}
+	return renderedVar{Value: renderedEnvValue(entry), Key: name}
+}
+
+func containersOf(workload *unstructured.Unstructured) []map[string]any {
+	containers, _, _ := unstructured.NestedSlice(workload.Object, "spec", "template", "spec", "containers")
+	out := make([]map[string]any, 0, len(containers))
+	for _, c := range containers {
+		if container, ok := c.(map[string]any); ok {
+			out = append(out, container)
+		}
+	}
+	return out
+}
+
+// referencedConfigMaps names every ConfigMap workload's containers read
+// env vars from (envFrom configMapRef, env configMapKeyRef).
+func referencedConfigMaps(workload *unstructured.Unstructured) []string {
+	var names []string
+	for _, container := range containersOf(workload) {
+		envFrom, _, _ := unstructured.NestedSlice(container, "envFrom")
+		for _, e := range envFrom {
+			entry, _ := e.(map[string]any)
+			ref, _ := entry["configMapRef"].(map[string]any)
+			if name, _ := ref["name"].(string); name != "" {
+				names = append(names, name)
+			}
+		}
+		env, _, _ := unstructured.NestedSlice(container, "env")
+		for _, e := range env {
+			entry, _ := e.(map[string]any)
+			valueFrom, _ := entry["valueFrom"].(map[string]any)
+			ref, _ := valueFrom["configMapKeyRef"].(map[string]any)
+			if name, _ := ref["name"].(string); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+func isPlaceholder(v string) bool {
+	return strings.HasPrefix(v, "<")
 }
 
 func renderedEnvValue(entry map[string]any) string {

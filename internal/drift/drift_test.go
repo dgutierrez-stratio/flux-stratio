@@ -219,6 +219,82 @@ spec:
 	}
 }
 
+// TestRun_ChartMode_CCTBackupVsMigratedSiblings is drift after a genai
+// migration: the backup was taken from the legacy CCT install (anchor and
+// sibling captured per workload), live is now the HelmRelease's render.
+// Only genai-ui's VAULT_ROLE changed; genai-api sets the same name and
+// wins both sides' merged env-vars.env, so only a per-workload comparison
+// can show it.
+func TestRun_ChartMode_CCTBackupVsMigratedSiblings(t *testing.T) {
+	logger := log.New(io.Discard, false)
+	chartsRoot := t.TempDir()
+	chartPath := fixtureChart(t, chartsRoot, "genai")
+
+	hr := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+		"metadata": map[string]any{"name": "genai", "namespace": "stratio-genai"},
+		"spec":     map[string]any{"values": map[string]any{}},
+	}}
+	workload := func(name, role string) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "stratio-genai"},
+			Spec: appsv1.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": name}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Env: []corev1.EnvVar{{Name: "VAULT_ROLE", Value: role}},
+					}}},
+				},
+			},
+		}
+	}
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
+		hr, workload("genai-api", "api-role"), workload("genai-ui", "changed-ui-role"),
+	).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backupDir := t.TempDir()
+	writeBackupFile(t, backupDir, "deployment.yaml", "kind: Deployment\n")
+	writeBackupFile(t, backupDir, "env-vars.env", "VAULT_ROLE=api-role\n")
+	writeBackupFile(t, backupDir, "env-vars.deployment.genai-api.env", "VAULT_ROLE=api-role\n")
+	writeBackupFile(t, backupDir, "env-vars.deployment.genai-ui.env", "VAULT_ROLE=ui-role\n")
+
+	result, err := Run(context.Background(), Options{
+		Repos: chartsRepoAt(t.TempDir(), filepath.Join(chartsRoot, "charts")),
+		App:   config.App{ID: "genai", Object: "genai", ChartPath: chartPath},
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			// genai-ui renders first, so genai-api's VAULT_ROLE wins the merge.
+			"helm": {Stdout: []byte(`
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-ui
+  namespace: stratio-genai
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-api
+  namespace: stratio-genai
+`)},
+		}},
+		Client: c, Index: idx, Against: backupDir, Log: logger,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	wantBefore := "# env-vars.deployment.genai-api.env\nVAULT_ROLE=api-role\n# env-vars.deployment.genai-ui.env\nVAULT_ROLE=ui-role\n"
+	wantAfter := "# env-vars.deployment.genai-api.env\nVAULT_ROLE=api-role\n# env-vars.deployment.genai-ui.env\nVAULT_ROLE=changed-ui-role\n"
+	if result.Before != wantBefore || result.After != wantAfter {
+		t.Errorf("Before = %q\nAfter = %q\nwant %q\n     %q", result.Before, result.After, wantBefore, wantAfter)
+	}
+}
+
 func TestRun_ShapeMismatch_ReturnsClearError(t *testing.T) {
 	logger := log.New(io.Discard, false)
 	live := &unstructured.Unstructured{Object: map[string]any{
@@ -288,6 +364,31 @@ func TestCompare_DegradedHelmReleaseVsEnvBackup_PointsAtChart(t *testing.T) {
 	if strings.Contains(err.Error(), "changed shape") || !strings.Contains(err.Error(), "repos.charts") ||
 		!strings.Contains(err.Error(), "env-vars.env") {
 		t.Errorf("error = %v, want it to point at repos.charts and name the backup's files", err)
+	}
+}
+
+// TestCompare_PerWorkloadEnvFiles_ShowSiblingDrift covers a change the
+// merged env-vars.env hides: genai-ui's VAULT_ROLE changed, but genai-api
+// sets the same name and wins the merge, so the merged files are equal.
+func TestCompare_PerWorkloadEnvFiles_ShowSiblingDrift(t *testing.T) {
+	backupDir, liveDir := t.TempDir(), t.TempDir()
+	writeBackupFile(t, backupDir, "env-vars.env", "VAULT_ROLE=api-role\n")
+	writeBackupFile(t, backupDir, "env-vars.deployment.genai-api.env", "VAULT_ROLE=api-role\n")
+	writeBackupFile(t, backupDir, "env-vars.deployment.genai-ui.env", "VAULT_ROLE=ui-role\n")
+	writeBackupFile(t, liveDir, "env-vars.env", "VAULT_ROLE=api-role\n")
+	writeBackupFile(t, liveDir, "env-vars.deployment.genai-api.env", "VAULT_ROLE=api-role\n")
+	writeBackupFile(t, liveDir, "env-vars.deployment.genai-ui.env", "VAULT_ROLE=changed-ui-role\n")
+
+	result, err := compare(backupDir, liveDir, []string{
+		"deployment.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-ui.env",
+	})
+	if err != nil {
+		t.Fatalf("compare returned error: %v", err)
+	}
+	wantBefore := "# env-vars.deployment.genai-api.env\nVAULT_ROLE=api-role\n# env-vars.deployment.genai-ui.env\nVAULT_ROLE=ui-role\n"
+	wantAfter := "# env-vars.deployment.genai-api.env\nVAULT_ROLE=api-role\n# env-vars.deployment.genai-ui.env\nVAULT_ROLE=changed-ui-role\n"
+	if result.Before != wantBefore || result.After != wantAfter {
+		t.Errorf("Before = %q, After = %q, want %q / %q", result.Before, result.After, wantBefore, wantAfter)
 	}
 }
 

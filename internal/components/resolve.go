@@ -42,7 +42,7 @@ type Options struct {
 // than one instance (several types, or the same entry live in several
 // namespaces), the operator is asked which one.
 func Resolve(opts Options, name string) (config.App, error) {
-	instances, err := Classify(opts.Catalog, opts.Objects, opts.Tenant)
+	instances, err := Classify(opts.Catalog, opts.Objects, opts.Tenant, opts.Log.Warningf)
 	if err != nil {
 		return config.App{}, err
 	}
@@ -158,7 +158,7 @@ func managedByTenant(obj *unstructured.Unstructured, tenant string) bool {
 // per-app failure — whether the resolvable apps still go ahead. Any other
 // error is fatal.
 func ResolveAll(opts Options) (apps []config.App, unresolved []error, err error) {
-	instances, err := Classify(opts.Catalog, opts.Objects, opts.Tenant)
+	instances, err := Classify(opts.Catalog, opts.Objects, opts.Tenant, opts.Log.Warningf)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -211,6 +211,29 @@ func classifiedLive(opts Options) (*unstructured.Unstructured, bool) {
 	return opts.Index.Get(ref.GVK, ref.Namespace, ref.Name)
 }
 
+// classifiedSiblings are the live workloads besides its primary one that
+// opts.App was classified from — a chart type's siblings (Chart.Siblings,
+// genai's genai-ui next to its genai-api anchor), which a legacy CCT
+// installation deployed as separate apps with no HelmRelease to enumerate
+// them by. Captured with the primary one, they're what lets `apps diff
+// --baseline` and drift checks compare each sibling against its own
+// rendered workload. A sibling no longer in the index is skipped.
+func classifiedSiblings(opts Options) []*unstructured.Unstructured {
+	var out []*unstructured.Unstructured
+	for i, ref := range opts.App.Live {
+		if i == 0 {
+			continue
+		}
+		obj, ok := opts.Index.Get(ref.GVK, ref.Namespace, ref.Name)
+		if !ok || !isWorkload(obj) {
+			opts.Log.Debugf("%s %s/%s: classified as part of %q but no longer live; not captured", ref.GVK.Kind, ref.Namespace, ref.Name, opts.App.ID)
+			continue
+		}
+		out = append(out, obj)
+	}
+	return out
+}
+
 // captureClassified backs up a classified live object by its own kind.
 func captureClassified(ctx context.Context, opts Options, dir string, live *unstructured.Unstructured) ([]string, error) {
 	switch {
@@ -241,7 +264,7 @@ func captureChartMode(ctx context.Context, opts Options, dir, name string) ([]st
 		return captureChartFromHelmRelease(ctx, opts, dir, hr)
 	}
 	if live, ok := classifiedLive(opts); ok && isWorkload(live) {
-		return writeWorkload(ctx, opts, dir, live)
+		return writeWorkloads(ctx, opts, dir, append([]*unstructured.Unstructured{live}, classifiedSiblings(opts)...))
 	}
 	if wl, ok := opts.Index.FindWorkload(name, opts.Log); ok {
 		return writeWorkload(ctx, opts, dir, wl)
@@ -294,14 +317,47 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 	if err := writeYAMLFile(dir, "deployment.yaml", liveWorkloads[0].Object); err != nil {
 		return nil, err
 	}
-	env, err := appdiff.MergeLiveEnv(ctx, aopts, liveWorkloads)
+	envs, err := appdiff.LiveWorkloadEnvs(ctx, aopts, liveWorkloads)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeEnvFile(dir, "env-vars.env", env); err != nil {
+	envFiles, err := writeEnvFiles(dir, liveWorkloads, envs)
+	if err != nil {
 		return nil, err
 	}
-	return []string{"deployment.yaml", "env-vars.env"}, nil
+	return append([]string{"deployment.yaml"}, envFiles...), nil
+}
+
+// writeEnvFiles writes each live workload's env vars to its own
+// appdiff.WorkloadEnvFile, plus all of them merged — a later workload's
+// variables overwriting an earlier one's — into env-vars.env, returning
+// the file names written (env-vars.env first).
+//
+// The per-workload files are what `apps diff --baseline` compares each
+// sibling of a multi-workload chart with, and what a drift check diffs
+// when both sides have them: a merge can't say which sibling a same-named
+// variable (genai-api's and genai-ui's VAULT_ROLE) came from. env-vars.env
+// stays for backups' own detection (ResolveBaseline) and as the fallback
+// for comparing against backups taken before per-workload files existed.
+func writeEnvFiles(dir string, workloads []*unstructured.Unstructured, envs []map[string]string) ([]string, error) {
+	merged := map[string]string{}
+	for _, env := range envs {
+		for k, v := range env {
+			merged[k] = v
+		}
+	}
+	if err := writeEnvFile(dir, "env-vars.env", merged); err != nil {
+		return nil, err
+	}
+	files := []string{"env-vars.env"}
+	for i, w := range workloads {
+		name := appdiff.WorkloadEnvFile(w.GetKind(), w.GetName())
+		if err := writeEnvFile(dir, name, envs[i]); err != nil {
+			return nil, err
+		}
+		files = append(files, name)
+	}
+	return files, nil
 }
 
 // warnNoLiveWorkloads explains why a chart-mode capture degrades to the
@@ -351,15 +407,28 @@ func writeCR(dir string, cr *unstructured.Unstructured) ([]string, error) {
 }
 
 func writeWorkload(ctx context.Context, opts Options, dir string, wl *unstructured.Unstructured) ([]string, error) {
-	if err := writeYAMLFile(dir, "deployment.yaml", wl.Object); err != nil {
+	return writeWorkloads(ctx, opts, dir, []*unstructured.Unstructured{wl})
+}
+
+// writeWorkloads captures live workloads directly (no chart templating):
+// the first one's manifest as deployment.yaml, and every one's env vars
+// (see writeEnvFiles).
+func writeWorkloads(ctx context.Context, opts Options, dir string, wls []*unstructured.Unstructured) ([]string, error) {
+	if err := writeYAMLFile(dir, "deployment.yaml", wls[0].Object); err != nil {
 		return nil, err
 	}
-	env, err := envvars.Extract(ctx, envvars.ClientGetter{Client: opts.Client}, wl, opts.Log.Debugf)
+	getter := envvars.ClientGetter{Client: opts.Client}
+	envs := make([]map[string]string, 0, len(wls))
+	for _, wl := range wls {
+		env, err := envvars.Extract(ctx, getter, wl, opts.Log.Debugf)
+		if err != nil {
+			return nil, err
+		}
+		envs = append(envs, env)
+	}
+	envFiles, err := writeEnvFiles(dir, wls, envs)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeEnvFile(dir, "env-vars.env", env); err != nil {
-		return nil, err
-	}
-	return []string{"deployment.yaml", "env-vars.env"}, nil
+	return append([]string{"deployment.yaml"}, envFiles...), nil
 }

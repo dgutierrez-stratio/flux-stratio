@@ -1,23 +1,11 @@
-# Investigation: chart-mode env-var diffing can mis-attribute values across sibling workloads
+# Investigation: chart-mode env-var diffing mis-attributed values across sibling workloads
 
-## Summary
+**Status: resolved.** Chart mode now matches env vars per workload (see "The fix" below). This
+file keeps the investigation for context.
 
-`internal/diff` and `internal/appdiff`'s chart-mode diffing (used by `apps diff`/`apps migrate`
-for any catalog type with `chart:` set) collapses environment variables into a single flat
-`map[string]string` keyed only by **name**, across every sibling workload a chart renders. When
-two sibling workloads define an env var with the same name but different meanings, a live value
-found for one can get silently written into the *other's* `.Values` patch path. No error, no
-warning — just a wrong value in the tenant file.
+## What happened
 
-This is not a Go-port regression: the original Python client
-(`/stratio/charts/charts/bin/migration/cmd_patch_chart.py`) has the exact same limitation,
-almost line-for-line (see "Confirmed: inherited from the Python client" below). Fixing this
-would be a genuine improvement over both tools, not a restoration of lost behavior.
-
-## How this was found
-
-While migrating `genai` (which was never fully live before — see below), `apps migrate genai`
-wrote this into the tenant file's patch:
+While migrating `genai`, `apps migrate genai` wrote this into the tenant file's patch:
 
 ```yaml
 genaiUi:
@@ -26,14 +14,13 @@ genaiUi:
       approlename: stratio-genai-genai-api   # genai-API's role name, not genai-ui's
 ```
 
-`genai-ui`'s pod then crash-looped: its entrypoint tried to Vault-login as
-`stratio-genai-genai-api` (403 Forbidden — that role isn't bound to genai-ui's ServiceAccount).
+`genai-ui`'s pod then crash-looped: its entrypoint tried to log in to Vault as
+`stratio-genai-genai-api` and got 403 Forbidden, because that role isn't bound to genai-ui's
+ServiceAccount.
 
-### Root cause, precisely
-
-The `genai` chart renders three sibling workloads from one HelmRelease: `genai-api`, `genai-ui`,
-`genai-developer-proxy`. All three name their Vault-role env var identically — `VAULT_ROLE` —
-each mapping to a different `.Values` path:
+The `genai` chart renders sibling workloads from one HelmRelease: `genai-api`, `genai-ui` and
+`genai-developer-proxy`. Each one's `config/*_env_vars.yaml` sets the same names from its own
+`.Values` root:
 
 ```
 genai/config/genai_api_env_vars.yaml:              VAULT_ROLE: {{ .Values.genaiApi.general.identity.approlename }}
@@ -41,103 +28,99 @@ genai/config/genai_ui_env_vars.yaml:                VAULT_ROLE: {{ .Values.genai
 genai/config/genai_developer_proxy_env_vars.yaml:   VAULT_ROLE: {{ .Values.genaiDeveloperProxy.general.identity.approlename }}
 ```
 
-Two separate collapsing points cause the mis-attribution:
+Chart mode collapsed env vars into flat maps keyed by name alone. It did this in three places:
+- the chart-wide name → `.Values` path map (`BuildChartValuesMap`);
+- the merged live env of every workload (`MergeLiveEnv`);
+- the deduped rendered env of every ConfigMap and container (`dedupeRenderedEnv`).
 
-1. **`internal/diff/chartvalues.go`, `BuildChartValuesMap`/`scanChartValueLines`** — scans every
-   chart file for `KEY: {{ .Values.path }}` lines into one `map[string]string` keyed by `KEY`.
-   With no `preferredRoot` (genai's catalog type doesn't set `ValuesRoot`), the tie-break is
-   "last file scanned wins" (alphabetical `filepath.WalkDir` order) — `genai_ui_env_vars.yaml`
-   sorts last among the three, so `VAULT_ROLE` *always* resolves to
-   `genaiUi.general.identity.approlename`, regardless of which workload's value is actually being
-   diffed.
+A value from one sibling could therefore be written into another sibling's `.Values` path, with no
+error and no warning.
 
-2. **`internal/appdiff/chart.go`, `MergeLiveEnv`** (live side) and **`internal/diff/chartdiff.go`,
-   `dedupeRenderedEnv`** (rendered side) — each merges every workload's env vars into one flat
-   `map[string]string`, last-workload-wins on a name collision.
+## Did the Go port break it?
 
-`genai-ui` never ran under the legacy CCT deployment for this tenant (it was never installed), so
-`FetchLiveWorkloads` (`internal/appdiff/chart.go`) found no live counterpart for it and
-contributed nothing — only genai-api's real live env vars entered `liveEnv`. But because of
-collision point 1, the diff on `VAULT_ROLE` (rendered default vs. genai-api's real legacy value)
-got written to `genaiUi.general.identity.approlename` instead of `genaiApi.general.identity.approlename` — the two are unrelated fields, and the tool had no way to know it picked the wrong one.
+The algorithm was ported faithfully from the Python client
+(`/stratio/charts/charts/bin/migration/cmd_patch_chart.py`: `_build_chart_values_map`,
+`live_env.update(...)`, and the `rendered_env` dedup). **The tie-break order is what changed, and
+that flipped genai onto the wrong sibling:**
 
-### Confirmed: inherited from the Python client
+- **Python** walks files with `Path.rglob("*")`, which follows the filesystem's directory order:
+  arbitrary, and different on each machine. On the checkout checked, it visits
+  `genai_ui` → `genai_developer_proxy` → `genai_api`, so **genai-api** wins every shared name.
+- **Go** walks with `filepath.WalkDir`, which is always alphabetical, so `genai_ui` /
+  `genai_developer_proxy` win.
 
-`/stratio/charts/charts/bin/migration/cmd_patch_chart.py`:
+Rebuilding both maps against the real chart shows **15 genai keys** that Python sends to
+`genaiApi.*` and Go sent to `genaiUi.*` or `genaiDeveloperProxy.*`: VAULT_ROLE/HOST/PORT/PROTOCOL/ENABLE,
+GOSEC_SERVER_HOST/PORT, GOSEC_CACHE_TTL, SSO_HOST, VIRTUAL_HOST, SERVICE_NAME, KUBERNETES_NAMESPACE,
+DEPLOYMENT_ENVIRONMENT, EOS_TENANT and INGRESS_PROXY_TIMEOUT.
 
-- `_build_chart_values_map` (env var name → `.Values` path): identical algorithm, identical
-  last-write-wins tie-break, no per-workload scoping — this is what `BuildChartValuesMap` was
-  ported from, faithfully.
-- `_output_patch`'s `live_env = {}` + `.update(live_vars)` per live workload, and its
-  `rendered_env` dedup (`if name not in rendered_env or not value.startswith("<")`) — the exact
-  same flat-map, name-only collapsing as `MergeLiveEnv`/`dedupeRenderedEnv`.
+Python only looked right by luck. It would still mis-attribute values once genai-ui is live too
+(the normal installation), because its live env merge is also by name only.
 
-Interesting detail: `_collect_env_vars` in the Python client *does* track a `source` (container
-name or ConfigMap name) alongside each `(name, value)` pair — but that `source` is only used for
-the human-readable table/list output (`_output_table`/`_output_list`), never for the actual
-diff/patch computation. So the per-workload information was captured but never used to avoid the
-collision, in the original tool either.
+The Python-era excludes carried into `internal/config/seed.go` show the same bug being hit before,
+with whatever file order each author's machine produced:
+- `genaiGateway…approlename`, `virtualizerMonitor…approlename`;
+- `genaiUi.settings.generalProperties.governanceUrl`, which is genai-api's `GOVERNANCE_URL`
+  mis-attributed to genai-ui.
 
-## Today's workaround (already applied, not a fix)
+Other catalog charts had keys the two tools resolved differently: virtualizer 6, rocket 22,
+dg-agent 23, bdl-datarest 118 (with `ValuesRoot`). Many of these came from scanning flavor files the
+release doesn't even render (`rocket_{{ .Values.server.storage.type }}`,
+`dg-agent_{{ .Values.agent.type }}`).
 
-`internal/config/seed.go`'s `genai` catalog type now has an extra exclude entry,
-`spec.values.genaiUi.general.identity.approlename`, alongside the pre-existing
-`spec.values.genaiGateway.general.identity.approlename` (added for the same class of problem,
-presumably hit before). This stops `apps migrate`/`apps diff` from ever recomputing *this specific
-path* again — but it's a per-path patch, not a fix for the underlying collision. Any new sibling
-workload, any new chart with same-named env vars across siblings, or any catalog type someone
-adds without knowing to pre-emptively exclude every sibling's identity field is still at risk of
-this exact silent mis-attribution, with no error or warning to catch it.
+A second port regression turned up during the investigation. `UnmappedDiffs` and the live-only count
+were computed but never printed. When every difference was unmapped, `apps diff`/`migrate` reported
+"no differences". The Python client printed both.
 
-## What a real fix needs to answer
+## The fix
 
-1. **Scope env-var collection per workload/container**, not globally by name. This likely means
-   changing `internal/envvars.Extract`'s callers, `MergeLiveEnv`, `dedupeRenderedEnv`, and
-   `BuildChartValuesMap`/`ChartDiff` to key on something like `(workloadIdentity, envVarName)`
-   rather than `envVarName` alone — and reworking the `.Values` path resolution to disambiguate
-   by which workload's chart template the mapping came from (the chart file path itself
-   encodes this today, e.g. `genai_ui_env_vars.yaml` vs `genai_api_env_vars.yaml` — that's
-   already available in `scanChartValueLines`, just discarded).
-2. **Decide what "workload identity" means for matching** live values to rendered values when
-   only *some* sibling workloads exist live (this migration's actual situation) — e.g. by
-   container name, by which env-vars file defined the mapping, or by cross-referencing the
-   `.Values` root each candidate path starts with against something workload-specific.
-3. **At minimum, detect the ambiguity and refuse to guess.** If a fix that fully disambiguates
-   turns out to be a bigger redesign than is worth it right now, a smaller fix is: when an env var
-   name maps to *multiple* `.Values` paths across different chart files, don't silently pick
-   one — route it to `UnmappedDiffs` (already exists, see `internal/diff/chartdiff.go`) for human
-   review instead, the same way a value with no known path at all is handled today. This would
-   have caught this exact bug loudly (a reported "can't auto-patch VAULT_ROLE, ambiguous between
-   genaiApi/genaiUi/genaiDeveloperProxy" instead of a silently wrong value) without requiring the
-   full disambiguation work.
-4. **Check whether this affects other existing chart-mode catalog types** — grep every chart
-   under the charts repo for env-var files that reuse the same key name across more than one
-   workload-specific file (`grep -rn "^VAULT_ROLE:\|^<name>:" <chart>/config/*_env_vars.yaml`
-   grouped by chart), to know how many catalog types are silently exposed to this today. `rocket`,
-   `intelligence`, and `bdlDatarest` (multi-flavor, already has `ValuesRoot` for a related but
-   different tie-break need) are worth checking first, since they're the other multi-workload
-   chart-mode types in the seeded catalog.
+The chart itself records which file feeds which workload. Every catalog chart uses the bjw-s
+`configMapsFromFile` helper: each `config/*_env_vars.yaml` becomes its own ConfigMap, and each
+workload reads its ConfigMaps through `envFrom`. For example, Deployment `genai-api` reads
+`genai-api-config`, which is built from `genai_api_env_vars.yaml`.
 
-## Where to start reading
+- **`internal/diff`**
+  - `ScanChartFiles` keeps the chart files apart.
+  - `AttributeConfigMaps` matches each rendered ConfigMap to the file whose top-level keys equal the
+    ConfigMap's data keys. `ValuesRoot` settles identical flavor files.
+  - `ChartDiff` compares each live workload with its own rendered workload. A differing value is
+    patched through the path in the file it actually came from.
+  - What can't be told is reported in `UnmappedDiffs` with a reason, never guessed:
+    - ambiguous between candidate paths;
+    - conflicting live values from siblings sharing one path;
+    - no path in its own file.
+- **`internal/appdiff`**
+  - Pairs each rendered workload with its live counterpart.
+  - Before/After lines are prefixed with the workload's name when a chart renders several.
+  - `MissingWorkloads` names rendered workloads with no live side.
+- **`internal/backup`**
+  - Also writes one `env-vars.<kind>.<name>.env` per live workload.
+  - `env-vars.env` (merged) stays as the backup marker and as the fallback for older backups.
+- **Baseline** (`--baseline`) uses the per-workload files. An old flat-only backup is compared
+  against every rendered workload at once, with shared names reported as ambiguous.
+- **Drift** compares the per-workload files when both sides have them, so a change in one sibling
+  isn't hidden by another sibling's same-named variable.
+- **Siblings in the catalog** (`chart.siblings`): a legacy CCT install has no HelmRelease to
+  enumerate the chart's workloads by, and CCT deployed each sibling as its own app. genai's
+  `genai-ui`/`genai-developer-proxy` and virtualizer's `virtualizer-monitor`/`virtualizer-ui` are
+  declared as siblings. Classification attaches each one to its anchor's instance, so a backup
+  captures them too and `--baseline`/`--drift` compare every sibling with its own rendered
+  workload.
+- **CLI**: `apps diff`/`apps migrate` list the unmapped differences, missing workloads and live-only
+  count, and no longer say "no differences" when some need manual review.
+- **Catalog**: Vault roles follow the GitOps naming. The genaiUi/genaiGateway approlename excludes
+  stay, and `genaiDeveloperProxy…approlename` is added.
 
-- `internal/diff/chartvalues.go` — `BuildChartValuesMap`, `scanChartValueLines`
-- `internal/diff/chartdiff.go` — `ChartDiff`, `dedupeRenderedEnv`
-- `internal/appdiff/chart.go` — `chartDiff`, `MergeLiveEnv`, `workloadTargets`, `FetchLiveWorkloads`
-- `internal/envvars` — `Extract` (per-workload env var extraction; already workload-scoped at this
-  layer, the collapsing happens above it)
-- Existing tests to extend, matching this repo's own conventions (in-package, table-driven,
-  `client/fake`, `testdata/` fixtures): `internal/diff/chartdiff_test.go`,
-  `internal/appdiff/chart_test.go`, `internal/backup/chart_test.go` (the latter already has a
-  `deploymentWithEnv` fixture helper for genai's own siblings — a good starting point for a
-  reproduction test)
-- Python reference: `/stratio/charts/charts/bin/migration/cmd_patch_chart.py` (see above) — worth
-  rereading in full before designing a fix, in case there's other context (e.g. why `source` was
-  captured but never used) that explains a constraint this task isn't aware of yet.
+Checked against a local render of each catalog chart (placeholder values): every env-vars ConfigMap
+is attributed to exactly one file. The one exception is bdl-datarest's oracle/oracle11 flavors, which
+have identical key sets and aren't in the catalog; those go to review.
 
-## Non-goals for this task
+## Remaining limits
 
-- Don't touch the `genaiUi`/`genaiGateway` exclude entries already in place — they're a correct,
-  low-risk stopgap regardless of how the underlying collision gets fixed.
-- Don't assume every multi-workload chart needs fixing today — start by measuring how many are
-  actually exposed (same env var name across more than one sibling's own file) before deciding
-  scope.
+- **Pairing is by name.** A backup's per-workload files pair with rendered workloads by live name.
+  CCT and GitOps name genai's and virtualizer's workloads the same; a sibling renamed by the redesign
+  would show as missing, not mis-matched.
+- **Containers within one workload are still merged** (as `envvars.Extract` does). No catalog chart
+  has a sidecar setting the same name as its main container.
+- **Key-set attribution** fails *safely*: an unmatched ConfigMap falls back to the chart-wide
+  candidates, and more than one candidate is reported for review.

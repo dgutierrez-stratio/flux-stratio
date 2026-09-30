@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"text/template"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -54,9 +55,15 @@ func (i Instance) Label() string {
 // tenant's (see TenantAnnotation). An object may classify as more than
 // one type; each is its own instance, and Resolve asks which one is meant.
 //
+// A chart type's siblings (Chart.Siblings — genai's genai-ui next to its
+// genai-api anchor) never start an instance: each joins the one instance
+// of its type in its namespace, after the anchors, so Primary stays the
+// anchor. A sibling with no such instance, or several, joins none, and
+// warn (when set) says why.
+//
 // Instances come back sorted by catalog type order, then entry, then
 // namespace — deterministic regardless of the API's own list order.
-func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant string) ([]Instance, error) {
+func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant string, warn func(format string, a ...any)) ([]Instance, error) {
 	type key struct {
 		typeIdx          int
 		namespace, entry string
@@ -88,6 +95,8 @@ func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant str
 		}
 	}
 
+	siblings := attachSiblings(cat, objs, tenant, byKey, keys, warn)
+
 	sort.Slice(keys, func(a, b int) bool {
 		ka, kb := keys[a], keys[b]
 		if ka.typeIdx != kb.typeIdx {
@@ -102,9 +111,83 @@ func Classify(cat *config.Catalog, objs []*unstructured.Unstructured, tenant str
 	for _, k := range keys {
 		inst := byKey[k]
 		sort.SliceStable(inst.Live, func(a, b int) bool { return inst.Live[a].GetName() < inst.Live[b].GetName() })
+		sibs := siblings[inst]
+		sort.SliceStable(sibs, func(a, b int) bool { return sibs[a].GetName() < sibs[b].GetName() })
+		inst.Live = append(inst.Live, sibs...)
 		out = append(out, *inst)
 	}
 	return out, nil
+}
+
+// attachSiblings finds every object one of cat's chart types selects as a
+// sibling (Chart.Siblings) and returns, per instance, the siblings that
+// join it: an object joins the one instance of that type in its own
+// namespace. With none there's no anchor for it to belong to (the anchor
+// isn't live); with several, nothing says which one it belongs to — either
+// way it joins none, and warn says so.
+func attachSiblings[K comparable](cat *config.Catalog, objs []*unstructured.Unstructured, tenant string, byKey map[K]*Instance, keys []K, warn func(string, ...any)) map[*Instance][]*unstructured.Unstructured {
+	out := map[*Instance][]*unstructured.Unstructured{}
+	for _, obj := range objs {
+		if len(obj.GetOwnerReferences()) > 0 || !ownedByTenant(obj, tenant) {
+			continue
+		}
+		for ti := range cat.Types {
+			t := &cat.Types[ti]
+			if !SiblingMatches(t, obj) {
+				continue
+			}
+			var candidates []*Instance
+			for _, k := range keys {
+				if inst := byKey[k]; inst.Type == t && inst.Primary().GetNamespace() == obj.GetNamespace() && !hasObject(inst.Live, obj) {
+					candidates = append(candidates, inst)
+				}
+			}
+			label := fmt.Sprintf("%s %s/%s", obj.GetKind(), obj.GetNamespace(), obj.GetName())
+			switch len(candidates) {
+			case 1:
+				out[candidates[0]] = append(out[candidates[0]], obj)
+			case 0:
+				warnf(warn, "%s is a %s sibling, but no %s instance is live in namespace %s to attach it to; "+
+					"it won't be captured or compared as part of one", label, t.Type, t.Type, obj.GetNamespace())
+			default:
+				entries := make([]string, len(candidates))
+				for i, c := range candidates {
+					entries[i] = c.Entry
+				}
+				sort.Strings(entries)
+				warnf(warn, "%s is a %s sibling, but %d %s instances are live in namespace %s (entries %s) "+
+					"and nothing says which it belongs to; it won't be captured or compared as part of either",
+					label, t.Type, len(candidates), t.Type, obj.GetNamespace(), strings.Join(entries, ", "))
+			}
+		}
+	}
+	return out
+}
+
+func hasObject(objs []*unstructured.Unstructured, obj *unstructured.Unstructured) bool {
+	for _, o := range objs {
+		if o == obj {
+			return true
+		}
+	}
+	return false
+}
+
+func warnf(warn func(string, ...any), format string, a ...any) {
+	if warn != nil {
+		warn(format, a...)
+	}
+}
+
+// SiblingMatches reports whether obj is one of t's chart siblings
+// (Chart.Siblings).
+func SiblingMatches(t *config.ComponentType, obj *unstructured.Unstructured) bool {
+	for _, m := range t.SiblingMatches() {
+		if matchKinds(m.Kinds, obj) && selectorMatches(m.Labels, obj.GetLabels()) && selectorMatches(m.Annotations, obj.GetAnnotations()) {
+			return true
+		}
+	}
+	return false
 }
 
 // TenantAnnotation is where CCT records which tenant a legacy object belongs
@@ -135,8 +218,12 @@ func Matches(t *config.ComponentType, obj *unstructured.Unstructured) bool {
 }
 
 func kindMatches(t *config.ComponentType, obj *unstructured.Unstructured) bool {
+	return matchKinds(t.Match.Kinds, obj)
+}
+
+func matchKinds(kinds []string, obj *unstructured.Unstructured) bool {
 	gvk := obj.GroupVersionKind()
-	for _, k := range t.Match.Kinds {
+	for _, k := range kinds {
 		want, err := config.ParseKind(k)
 		if err == nil && want.Group == gvk.Group && want.Kind == gvk.Kind {
 			return true

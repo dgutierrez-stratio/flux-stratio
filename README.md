@@ -226,6 +226,20 @@ flux stratio apps migrate pool-psql --baseline latest             # write it
 `--baseline latest` picks the component's most recent backup; pass `--dir` if `apps backup` used a
 non-default one. See [`docs/migration-runbook.md`](docs/migration-runbook.md) for the full sequence.
 
+**Do you need `--baseline`?** Usually not. The routine is:
+
+1. `apps backup` before pushing a component. It's a free safety net and the only record of the
+   legacy values once Flux reconciles the component. For a chart that renders several workloads
+   (genai's genai-api/genai-ui, virtualizer and its monitor/ui), it captures every one the catalog
+   type's `chart.siblings` declares, each in its own `env-vars.<kind>.<name>.env`.
+2. `apps migrate` against the live cluster (no `--baseline`). This is correct while the legacy
+   workloads still run untouched. Each sibling workload is fetched live and compared with its own
+   rendered workload.
+3. `--baseline` only when live no longer holds the legacy values: the "already managed by Flux"
+   warning above, or you know Flux reset the component before you migrated it. The patch is then
+   built from the backup, sibling by sibling. A workload the backup doesn't hold (e.g. a backup
+   taken before siblings were declared) is reported as missing, never guessed.
+
 An app whose config declares a `prepare` step (see
 [`docs/config-reference.md`](docs/config-reference.md)) has that precondition checked — and, for an
 automated step, satisfied — as the first stage of `apps migrate`, before any diff or patch. An

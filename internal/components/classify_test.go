@@ -1,6 +1,7 @@
 package components
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -45,11 +46,12 @@ func instanceKeys(instances []Instance) []string {
 
 // TestClassify_SeededCatalogAgainstRealLegacyObjects is the regression
 // test for the seeded selectors: every real legacy object in the fixture
-// either classifies as exactly the component it is, or — a same-named
-// PgDatabase, an owned sub-workload, a sibling workload of a chart — as
-// nothing at all.
+// either classifies as exactly the component it is, joins its chart's
+// instance as a declared sibling (virtualizer-monitor), or — a same-named
+// PgDatabase, an owned sub-workload, a legacy workload the chart no longer
+// renders (genai-gateway) — classifies as nothing at all.
 func TestClassify_SeededCatalogAgainstRealLegacyObjects(t *testing.T) {
-	instances, err := Classify(seededCatalog(), loadLiveFixture(t), "stratio")
+	instances, err := Classify(seededCatalog(), loadLiveFixture(t), "stratio", nil)
 	if err != nil {
 		t.Fatalf("Classify returned error: %v", err)
 	}
@@ -74,7 +76,7 @@ func TestClassify_SeededCatalogAgainstRealLegacyObjects(t *testing.T) {
 		"postgres stratio-datastores/psql -> psql",
 		"postgres-gosec-agent stratio-datastores/psql-agent -> psql",
 		"rocket stratio-rocket/rocket -> rocket",
-		"virtualizer stratio-apps/virtualizer -> virtualizer",
+		"virtualizer stratio-apps/virtualizer,virtualizer-monitor -> virtualizer",
 	}
 	got := instanceKeys(instances)
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -99,7 +101,7 @@ func TestClassify_OtherTenantsObjectsExcluded(t *testing.T) {
 		{"stratio", "stratio-datastores"},
 		{"keos", "keos-core"},
 	} {
-		instances, err := Classify(seededCatalog(), loadLiveFixture(t), c.tenant)
+		instances, err := Classify(seededCatalog(), loadLiveFixture(t), c.tenant, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -128,7 +130,7 @@ func TestClassify_GroupsSameEntryInOneNamespace(t *testing.T) {
 		deployment("genai-api", "stratio-genai", map[string]string{"svc": "genai"}),
 		deployment("genai-api", "other-genai", map[string]string{"svc": "genai"}),
 	}
-	instances, err := Classify(cat, objs, "stratio")
+	instances, err := Classify(cat, objs, "stratio", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +141,89 @@ func TestClassify_GroupsSameEntryInOneNamespace(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("instances = %v, want %v", got, want)
+	}
+}
+
+// siblingCatalog is a genai-shaped chart type: genai-api anchors an
+// instance, genai-ui is a declared sibling.
+func siblingCatalog() *config.Catalog {
+	byModel := func(model string) config.Match {
+		return config.Match{Kinds: []string{"apps/v1/Deployment"}, Annotations: &config.Selector{
+			MatchLabels: map[string]string{"model": model},
+		}}
+	}
+	return &config.Catalog{Types: []config.ComponentType{{
+		Type: "genai", Name: "GenAI", Component: "genai", Rset: "r.yaml",
+		Entry: `{{ .Live.Name | trimSuffix "-api" }}`,
+		Match: byModel("genai-api"),
+		Chart: &config.Chart{Path: "genai", Siblings: []config.Match{byModel("genai-ui"), byModel("genai-developer-proxy")}},
+	}}}
+}
+
+func TestClassify_SiblingsJoinTheirNamespacesInstance(t *testing.T) {
+	var warnings []string
+	warn := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
+	objs := []*unstructured.Unstructured{
+		deployment("genai-ui", "stratio-genai", map[string]string{"model": "genai-ui"}),
+		deployment("genai-developer-proxy", "stratio-genai", map[string]string{"model": "genai-developer-proxy"}),
+		deployment("genai-api", "stratio-genai", map[string]string{"model": "genai-api"}),
+	}
+	instances, err := Classify(siblingCatalog(), objs, "stratio", warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The anchor stays first (Primary); siblings follow, by name.
+	want := []string{"genai stratio-genai/genai-api,genai-developer-proxy,genai-ui -> genai"}
+	if got := instanceKeys(instances); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("instances = %v, want %v", got, want)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none", warnings)
+	}
+}
+
+func TestClassify_SiblingWithoutOneInstanceJoinsNone(t *testing.T) {
+	cases := []struct {
+		name        string
+		objs        []*unstructured.Unstructured
+		want        []string
+		wantWarning string
+	}{
+		{
+			name: "no anchor live in its namespace",
+			objs: []*unstructured.Unstructured{
+				deployment("genai-api", "stratio-genai", map[string]string{"model": "genai-api"}),
+				deployment("genai-ui", "other-genai", map[string]string{"model": "genai-ui"}),
+			},
+			want:        []string{"genai stratio-genai/genai-api -> genai"},
+			wantWarning: "no genai instance is live in namespace other-genai",
+		},
+		{
+			name: "two instances in its namespace",
+			objs: []*unstructured.Unstructured{
+				deployment("genai-api", "stratio-genai", map[string]string{"model": "genai-api"}),
+				deployment("genai2-api", "stratio-genai", map[string]string{"model": "genai-api"}),
+				deployment("genai-ui", "stratio-genai", map[string]string{"model": "genai-ui"}),
+			},
+			want:        []string{"genai stratio-genai/genai-api -> genai", "genai stratio-genai/genai2-api -> genai2"},
+			wantWarning: "2 genai instances are live in namespace stratio-genai (entries genai, genai2)",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var warnings []string
+			warn := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
+			instances, err := Classify(siblingCatalog(), c.objs, "stratio", warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := instanceKeys(instances); strings.Join(got, "\n") != strings.Join(c.want, "\n") {
+				t.Errorf("instances = %v, want %v", got, c.want)
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], c.wantWarning) {
+				t.Errorf("warnings = %v, want one containing %q", warnings, c.wantWarning)
+			}
+		})
 	}
 }
 
@@ -198,7 +283,7 @@ func TestClassify_TemplateCanReadAnnotations(t *testing.T) {
 		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}},
 	}}}
 	objs := []*unstructured.Unstructured{deployment("x", "ns", map[string]string{"cct.stratio.com/application_service": "rocket"})}
-	instances, err := Classify(cat, objs, "acme")
+	instances, err := Classify(cat, objs, "acme", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +298,7 @@ func TestClassify_EmptyRenderedEntryIsAnError(t *testing.T) {
 		Entry: `{{ .Live.Annotation "missing" }}`,
 		Match: config.Match{Kinds: []string{"apps/v1/Deployment"}},
 	}}}
-	if _, err := Classify(cat, []*unstructured.Unstructured{deployment("x", "ns", nil)}, "t"); err == nil {
+	if _, err := Classify(cat, []*unstructured.Unstructured{deployment("x", "ns", nil)}, "t", nil); err == nil {
 		t.Error("Classify returned nil error for an empty rendered entry, want an error")
 	}
 }
@@ -304,7 +389,7 @@ func TestManagedMatches(t *testing.T) {
 // catalog's selectors alone.
 func TestClassify_IgnoresMigratedWorkloads(t *testing.T) {
 	objs := migrated(loadLiveFixture(t), "virtualizer", "stratio-apps", "virtualizer")
-	instances, err := Classify(seededCatalog(), objs, "stratio")
+	instances, err := Classify(seededCatalog(), objs, "stratio", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

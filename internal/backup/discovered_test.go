@@ -3,7 +3,10 @@ package backup
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
@@ -142,8 +145,68 @@ func TestRun_ClassifiedAppCapturesItsExactLiveObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if !equalStrings(result.Files, []string{"deployment.yaml", "env-vars.env"}) {
+	if !equalStrings(result.Files, []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.rocket.env"}) {
 		t.Errorf("Files = %v, want the Deployment's capture, not the PgDatabase's cr.yaml", result.Files)
+	}
+}
+
+// TestRun_ClassifiedChartAppCapturesItsSiblings covers a legacy CCT genai:
+// no HelmRelease to enumerate the chart's workloads by, so the siblings
+// classified with it (genai-ui) are captured with the genai-api anchor,
+// each into its own env file. A classified sibling no longer live
+// (genai-developer-proxy) is skipped, and no synthetic app captures
+// genai-ui a second time.
+func TestRun_ClassifiedChartAppCapturesItsSiblings(t *testing.T) {
+	logger := log.New(&bytes.Buffer{}, false)
+	api := deploymentWithEnv("genai-api", "stratio-genai", "legacy-api-role")
+	ui := deploymentWithEnv("genai-ui", "stratio-genai", "legacy-ui-role")
+	api.Spec.Template.Spec.Containers[0].Env[0].Name = "VAULT_ROLE"
+	ui.Spec.Template.Spec.Containers[0].Env[0].Name = "VAULT_ROLE"
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(api, ui).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := config.App{
+		ID: "genai", Type: "genai", Object: "genai", ChartPath: "genai",
+		Live: []config.ObjectRef{
+			{GVK: deploymentGVK, Namespace: "stratio-genai", Name: "genai-api"},
+			{GVK: deploymentGVK, Namespace: "stratio-genai", Name: "genai-developer-proxy"},
+			{GVK: deploymentGVK, Namespace: "stratio-genai", Name: "genai-ui"},
+		},
+	}
+	result, err := Run(context.Background(), Options{
+		Repos: config.ReposUnder(fixtureBase(t)), App: app, Index: idx, Client: c, Dir: t.TempDir(), Clock: fixedClock, Log: logger,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-ui.env"}
+	if !equalStrings(result.Files, wantFiles) {
+		t.Errorf("Files = %v, want %v", result.Files, wantFiles)
+	}
+	for file, want := range map[string]string{
+		"env-vars.deployment.genai-api.env": "VAULT_ROLE=legacy-api-role\n",
+		"env-vars.deployment.genai-ui.env":  "VAULT_ROLE=legacy-ui-role\n",
+	} {
+		data, err := os.ReadFile(filepath.Join(result.Dir, file))
+		if err != nil {
+			t.Fatalf("%s not written: %v", file, err)
+		}
+		if string(data) != want {
+			t.Errorf("%s = %q, want %q", file, data, want)
+		}
+	}
+	depData, err := os.ReadFile(filepath.Join(result.Dir, "deployment.yaml"))
+	if err != nil || !strings.Contains(string(depData), "name: genai-api") {
+		t.Errorf("deployment.yaml = %q (err %v), want the anchor's manifest", depData, err)
+	}
+
+	for _, a := range DiscoveredApps([]config.App{app}, idx) {
+		if a.ID == "genai-ui" {
+			t.Errorf("DiscoveredApps = %+v: genai-ui is captured with genai, not as an app of its own", a)
+		}
 	}
 }
 

@@ -91,6 +91,16 @@ type Chart struct {
 	// than one flavor's values under the same directory tree (e.g.
 	// bdl-datarest's pginternal/pgmd5/pgtls flavors).
 	ValuesRoot string `yaml:"valuesRoot,omitempty"`
+	// Siblings select the live legacy workloads that belong to the same
+	// instance as the one Match selected, for a chart that renders several
+	// workloads legacy CCT deployed as separate apps — genai's genai-ui
+	// and genai-developer-proxy next to its genai-api anchor. A sibling
+	// never starts an instance of its own: it joins the instance of this
+	// type in its namespace (after its anchor), so `apps backup` captures
+	// its env vars with the anchor's and `apps diff/migrate --baseline`
+	// can compare it with its own rendered workload. Each must select
+	// Deployment/StatefulSet/DaemonSet kinds only.
+	Siblings []Match `yaml:"siblings,omitempty"`
 }
 
 // Match selects live objects: an object matches when its kind is one of
@@ -162,7 +172,11 @@ func (c Catalog) Kinds() []schema.GroupVersionKind {
 	seen := map[schema.GroupVersionKind]bool{}
 	var out []schema.GroupVersionKind
 	for _, t := range c.Types {
-		for _, k := range t.Match.Kinds {
+		kinds := append([]string(nil), t.Match.Kinds...)
+		for _, m := range t.SiblingMatches() {
+			kinds = append(kinds, m.Kinds...)
+		}
+		for _, k := range kinds {
 			gvk, err := ParseKind(k)
 			if err != nil || seen[gvk] {
 				continue // validate already rejected a malformed kind
@@ -201,6 +215,14 @@ func (t ComponentType) ValuesRoot() string {
 		return ""
 	}
 	return t.Chart.ValuesRoot
+}
+
+// SiblingMatches is Chart.Siblings, or nil for a manifest-mode type.
+func (t ComponentType) SiblingMatches() []Match {
+	if t.Chart == nil {
+		return nil
+	}
+	return t.Chart.Siblings
 }
 
 func orDefault(v, def string) string {
@@ -275,19 +297,19 @@ func (c Catalog) validate() error {
 				t.Chart.Path, strings.TrimPrefix(t.Chart.Path, RepoCharts+"/"))
 		}
 
-		if len(t.Match.Kinds) == 0 {
-			add("match.kinds is required")
+		for _, p := range t.Match.validate("match") {
+			add("%s", p)
 		}
-		for _, k := range t.Match.Kinds {
-			if _, err := ParseKind(k); err != nil {
-				add("match.kinds: %v", err)
+		for j, m := range t.SiblingMatches() {
+			field := fmt.Sprintf("chart.siblings[%d]", j)
+			for _, p := range m.validate(field) {
+				add("%s", p)
 			}
-		}
-		if err := t.Match.Labels.validate(); err != nil {
-			add("match.labels: %v", err)
-		}
-		if err := t.Match.Annotations.validate(); err != nil {
-			add("match.annotations: %v", err)
+			for _, k := range m.Kinds {
+				if gvk, err := ParseKind(k); err == nil && !isWorkloadKind(gvk) {
+					add("%s.kinds: %q is not a Deployment, StatefulSet or DaemonSet — only workloads can be siblings", field, k)
+				}
+			}
 		}
 
 		for _, f := range []struct{ field, tmpl string }{
@@ -307,6 +329,30 @@ func (c Catalog) validate() error {
 		msg += "\n  - " + p
 	}
 	return fmt.Errorf("%s", msg)
+}
+
+// validate reports m's problems, each prefixed with field.
+func (m Match) validate(field string) []string {
+	var problems []string
+	if len(m.Kinds) == 0 {
+		problems = append(problems, field+".kinds is required")
+	}
+	for _, k := range m.Kinds {
+		if _, err := ParseKind(k); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.kinds: %v", field, err))
+		}
+	}
+	if err := m.Labels.validate(); err != nil {
+		problems = append(problems, fmt.Sprintf("%s.labels: %v", field, err))
+	}
+	if err := m.Annotations.validate(); err != nil {
+		problems = append(problems, fmt.Sprintf("%s.annotations: %v", field, err))
+	}
+	return problems
+}
+
+func isWorkloadKind(gvk schema.GroupVersionKind) bool {
+	return gvk.Group == "apps" && (gvk.Kind == "Deployment" || gvk.Kind == "StatefulSet" || gvk.Kind == "DaemonSet")
 }
 
 func (s *Selector) validate() error {

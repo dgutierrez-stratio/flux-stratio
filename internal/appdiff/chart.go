@@ -25,41 +25,125 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		return nil, err
 	}
 
-	var liveEnv map[string]string
+	var live []diff.LiveWorkloadEnv
+	var missing []string
 	var managedBy string
 	if opts.Baseline != "" {
-		liveEnv, err = readBaselineEnvFile(opts.Baseline, "env-vars.env")
+		live, missing, err = baselineWorkloadEnvs(opts, hrNamespace, renderedDocs)
 	} else {
-		liveWorkloads := FetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
-		if len(liveWorkloads) == 0 {
-			return nil, fmt.Errorf("no live workload found for chart %q among %v", opts.App.ChartPath, workloadKinds)
-		}
-		for _, w := range liveWorkloads {
-			if managedBy = fluxManagedBy(w); managedBy != "" {
-				break
-			}
-		}
-		liveEnv, err = MergeLiveEnv(ctx, opts, liveWorkloads)
+		live, missing, managedBy, err = liveWorkloadEnvs(ctx, opts, hrNamespace, renderedDocs)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	valuesMap, err := diff.BuildChartValuesMap(chartPath(opts), opts.App.ValuesRoot)
+	files, err := diff.ScanChartFiles(chartPath(opts))
 	if err != nil {
 		return nil, fmt.Errorf("mapping chart env vars to .Values paths: %w", err)
 	}
 
-	result := diff.ChartDiff(renderedDocs, liveEnv, valuesMap, opts.App.Object, opts.App.Exclude)
+	result := diff.ChartDiff(diff.ChartDiffInput{
+		Rendered: renderedDocs, Live: live, Files: files,
+		ValuesRoot: opts.App.ValuesRoot, HRName: opts.App.Object, Exclude: opts.App.Exclude,
+	})
+	before, after := formatComparisons(result.Workloads)
 	return &Result{
 		Patch:             result.Patch,
-		Before:            formatEnvLines(result.RenderedEnv),
-		After:             formatEnvLines(liveEnv),
+		Before:            before,
+		After:             after,
 		UnmappedDiffs:     result.UnmappedDiffs,
 		LiveOnlyCount:     result.LiveOnlyCount,
 		RenderedOnlyCount: result.RenderedOnlyCount,
+		MissingWorkloads:  missing,
 		FluxManagedBy:     managedBy,
 	}, nil
+}
+
+// liveWorkloadEnvs fetches every workload renderedDocs declares from the
+// live cluster and resolves each one's env vars, paired with its rendered
+// counterpart — so each sibling of a multi-workload chart is compared
+// against its own rendered workload, never a merge of all of them.
+// missing names the rendered workloads not found live.
+func liveWorkloadEnvs(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) ([]diff.LiveWorkloadEnv, []string, string, error) {
+	pairs, missing := fetchWorkloadPairs(ctx, opts, hrNamespace, renderedDocs)
+	if len(pairs) == 0 {
+		return nil, nil, "", fmt.Errorf("no live workload found for chart %q among %v", opts.App.ChartPath, workloadKinds)
+	}
+	getter := envvars.ClientGetter{Client: opts.Client}
+	var managedBy string
+	live := make([]diff.LiveWorkloadEnv, 0, len(pairs))
+	for _, p := range pairs {
+		if managedBy == "" {
+			managedBy = fluxManagedBy(p.Live)
+		}
+		env, err := envvars.Extract(ctx, getter, p.Live, nil)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("extracting env vars for %s %s/%s: %w", p.Live.GetKind(), p.Live.GetNamespace(), p.Live.GetName(), err)
+		}
+		live = append(live, diff.LiveWorkloadEnv{Rendered: p.Rendered, Env: env})
+	}
+	return live, missing, managedBy, nil
+}
+
+// baselineWorkloadEnvs reads the live side from a backup: one env file
+// per live workload (WorkloadEnvFile), paired with its rendered
+// counterpart by the same live name liveWorkloadEnvs would fetch — or,
+// for a backup that has none (taken before per-workload files existed,
+// or whose workloads no longer match what the chart renders), its merged
+// env-vars.env, compared against every rendered workload at once.
+// missing names the rendered workloads the backup holds nothing for.
+func baselineWorkloadEnvs(opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) ([]diff.LiveWorkloadEnv, []string, error) {
+	var live []diff.LiveWorkloadEnv
+	var missing []string
+	for _, t := range workloadTargets(opts, hrNamespace, renderedDocs) {
+		env, ok, err := readBaselineWorkloadEnv(opts.Baseline, WorkloadEnvFile(t.gvk.Kind, t.name))
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			missing = append(missing, t.String())
+			continue
+		}
+		live = append(live, diff.LiveWorkloadEnv{Rendered: t.rendered, Env: env})
+	}
+	if len(live) > 0 {
+		return live, missing, nil
+	}
+	env, err := readBaselineEnvFile(opts.Baseline, mergedEnvFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	return []diff.LiveWorkloadEnv{{Env: env}}, nil, nil
+}
+
+// formatComparisons renders a chart diff's compared workloads as the
+// before (rendered) and after (live) text internal/ui.FileDiff shows:
+// sorted "KEY=VALUE" lines, each prefixed with its workload's name when
+// more than one workload was compared, so a sibling's change reads as
+// that sibling's.
+func formatComparisons(workloads []diff.WorkloadComparison) (before, after string) {
+	if len(workloads) == 1 {
+		return formatEnvLines(workloads[0].Rendered, ""), formatEnvLines(workloads[0].Live, "")
+	}
+	var beforeParts, afterParts []string
+	for _, w := range sortedComparisons(workloads) {
+		beforeParts = appendNonEmpty(beforeParts, formatEnvLines(w.Rendered, w.Workload+"/"))
+		afterParts = appendNonEmpty(afterParts, formatEnvLines(w.Live, w.Workload+"/"))
+	}
+	return strings.Join(beforeParts, "\n"), strings.Join(afterParts, "\n")
+}
+
+func sortedComparisons(workloads []diff.WorkloadComparison) []diff.WorkloadComparison {
+	out := append([]diff.WorkloadComparison(nil), workloads...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Workload < out[j].Workload })
+	return out
+}
+
+func appendNonEmpty(parts []string, s string) []string {
+	if s == "" {
+		return parts
+	}
+	return append(parts, s)
 }
 
 // renderChart runs `helm template` for opts.App's chart against the
@@ -91,15 +175,34 @@ func renderChart(ctx context.Context, opts Options, rendered *render.Result) ([]
 // workload a multi-workload chart declares, not just the one named after
 // the app itself.
 func FetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []*unstructured.Unstructured {
-	var live []*unstructured.Unstructured
+	pairs, _ := fetchWorkloadPairs(ctx, opts, hrNamespace, renderedDocs)
+	live := make([]*unstructured.Unstructured, 0, len(pairs))
+	for _, p := range pairs {
+		live = append(live, p.Live)
+	}
+	return live
+}
+
+// workloadPair is a rendered workload and its live counterpart.
+type workloadPair struct {
+	Rendered, Live *unstructured.Unstructured
+}
+
+// fetchWorkloadPairs is FetchLiveWorkloads keeping each live workload
+// paired with the rendered one it was fetched for; missing names the
+// rendered workloads not found live.
+func fetchWorkloadPairs(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) ([]workloadPair, []string) {
+	var pairs []workloadPair
+	var missing []string
 	for _, t := range workloadTargets(opts, hrNamespace, renderedDocs) {
 		obj, err := fetchWorkload(ctx, opts, t.gvk, t.namespace, t.name)
 		if err != nil {
+			missing = append(missing, t.String())
 			continue
 		}
-		live = append(live, obj)
+		pairs = append(pairs, workloadPair{Rendered: t.rendered, Live: obj})
 	}
-	return live
+	return pairs, missing
 }
 
 // RenderedWorkloadNames describes every workload renderedDocs declares as
@@ -110,15 +213,21 @@ func RenderedWorkloadNames(opts Options, hrNamespace string, renderedDocs []*uns
 	targets := workloadTargets(opts, hrNamespace, renderedDocs)
 	names := make([]string, 0, len(targets))
 	for _, t := range targets {
-		names = append(names, fmt.Sprintf("%s %s/%s", t.gvk.Kind, t.namespace, t.name))
+		names = append(names, t.String())
 	}
 	return names
 }
 
 // workloadTarget is one rendered workload and where it's expected live.
 type workloadTarget struct {
+	rendered        *unstructured.Unstructured
 	gvk             schema.GroupVersionKind
 	namespace, name string
+}
+
+// String describes t as "Kind namespace/name".
+func (t workloadTarget) String() string {
+	return fmt.Sprintf("%s %s/%s", t.gvk.Kind, t.namespace, t.name)
 }
 
 func workloadTargets(opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []workloadTarget {
@@ -133,7 +242,7 @@ func workloadTargets(opts Options, hrNamespace string, renderedDocs []*unstructu
 			if namespace == "" {
 				namespace = hrNamespace
 			}
-			targets = append(targets, workloadTarget{gvk: doc.GroupVersionKind(), namespace: namespace, name: name})
+			targets = append(targets, workloadTarget{rendered: doc, gvk: doc.GroupVersionKind(), namespace: namespace, name: name})
 		}
 	}
 	return targets
@@ -144,20 +253,18 @@ func fetchWorkload(ctx context.Context, opts Options, gvk schema.GroupVersionKin
 }
 
 // MergeLiveEnv resolves and merges every live workload's env vars — a
-// later workload's variables overwrite an earlier one's, extending
-// internal/envvars.Extract's own within-workload semantics across
-// workloads, since this is the "effective config" view diffed against the
-// chart as a whole, not any one container's view. Exported for
-// internal/backup, which captures the same merged view apps diff/migrate
-// would compare against.
+// later workload's variables overwrite an earlier one's — into the one
+// flat view a backup's env-vars.env keeps (for drift checks, and as the
+// fallback baseline). Chart-mode diffing itself compares each workload
+// separately (see liveWorkloadEnvs), since a merge loses which sibling a
+// same-named variable came from. Exported for internal/backup.
 func MergeLiveEnv(ctx context.Context, opts Options, liveWorkloads []*unstructured.Unstructured) (map[string]string, error) {
-	getter := envvars.ClientGetter{Client: opts.Client}
+	envs, err := LiveWorkloadEnvs(ctx, opts, liveWorkloads)
+	if err != nil {
+		return nil, err
+	}
 	merged := map[string]string{}
-	for _, live := range liveWorkloads {
-		env, err := envvars.Extract(ctx, getter, live, nil)
-		if err != nil {
-			return nil, fmt.Errorf("extracting env vars for %s %s/%s: %w", live.GetKind(), live.GetNamespace(), live.GetName(), err)
-		}
+	for _, env := range envs {
 		for k, v := range env {
 			merged[k] = v
 		}
@@ -165,10 +272,27 @@ func MergeLiveEnv(ctx context.Context, opts Options, liveWorkloads []*unstructur
 	return merged, nil
 }
 
-// formatEnvLines renders env as sorted "KEY=VALUE" lines, so
-// internal/ui.FileDiff can show a chart-mode diff the same way it shows a
-// manifest-mode one: as ordinary text, one line per changed entry.
-func formatEnvLines(env map[string]string) string {
+// LiveWorkloadEnvs resolves each live workload's env vars, in order.
+// Exported for internal/backup, which writes one env file per workload
+// (WorkloadEnvFile) next to the merged env-vars.env.
+func LiveWorkloadEnvs(ctx context.Context, opts Options, liveWorkloads []*unstructured.Unstructured) ([]map[string]string, error) {
+	getter := envvars.ClientGetter{Client: opts.Client}
+	envs := make([]map[string]string, 0, len(liveWorkloads))
+	for _, live := range liveWorkloads {
+		env, err := envvars.Extract(ctx, getter, live, nil)
+		if err != nil {
+			return nil, fmt.Errorf("extracting env vars for %s %s/%s: %w", live.GetKind(), live.GetNamespace(), live.GetName(), err)
+		}
+		envs = append(envs, env)
+	}
+	return envs, nil
+}
+
+// formatEnvLines renders env as sorted "KEY=VALUE" lines, each prefixed
+// with prefix, so internal/ui.FileDiff can show a chart-mode diff the same
+// way it shows a manifest-mode one: as ordinary text, one line per changed
+// entry.
+func formatEnvLines(env map[string]string, prefix string) string {
 	names := make([]string, 0, len(env))
 	for k := range env {
 		names = append(names, k)
@@ -176,7 +300,7 @@ func formatEnvLines(env map[string]string) string {
 	sort.Strings(names)
 	lines := make([]string, 0, len(names))
 	for _, k := range names {
-		lines = append(lines, k+"="+env[k])
+		lines = append(lines, prefix+k+"="+env[k])
 	}
 	return strings.Join(lines, "\n")
 }

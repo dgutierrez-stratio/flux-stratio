@@ -100,9 +100,11 @@ Examples:
 
 const appsBackupLong = `Captures live legacy state to disk, under <dir>/<app-id>/<UTC-timestamp>/:
 cr.yaml for a CR-backed component; deployment.yaml + env-vars.env for a
-chart-backed one (or helmrelease.yaml + values.yaml when only a
-HelmRelease is live). It reads only the live cluster — never the tenant
-file — so it works before a component is declared there at all.
+chart-backed one, plus one env-vars.<kind>.<name>.env per live workload so
+sibling workloads' same-named variables stay apart (or helmrelease.yaml +
+values.yaml when only a HelmRelease is live). It reads only the live
+cluster — never the tenant file — so it works before a component is
+declared there at all.
 
 Take the backup BEFORE pushing a component to the tenant file. Once Flux
 reconciles a component unpatched, it resets the live object to the GitOps
@@ -146,6 +148,21 @@ you took before cutover:
   flux stratio apps migrate pool-psql --baseline latest
 
 then commit and push the tenant file: Flux restores the legacy values.
+
+Do you need --baseline? Usually not:
+
+  - Without it (the default), the legacy side is the live cluster. That is
+    right as long as the component's legacy workloads still run untouched —
+    i.e. before Flux has reconciled it. A chart's sibling workloads
+    (genai-api and genai-ui, say) are each fetched live and compared with
+    their own rendered workload.
+  - Use --baseline only when live no longer holds the legacy values: you get
+    the "already managed by Flux" warning, or you know Flux reset the
+    component before you migrated it.
+  - Either way, take an apps backup first: it costs nothing, it's the only
+    record of the legacy values once Flux reconciles the component, and it
+    captures every workload of a multi-workload chart (the catalog type's
+    chart.siblings), each in its own env file.
 
 Resolving which component to migrate:
 
@@ -284,16 +301,17 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 		if result.ExistingPatches > 0 {
 			desiredLabel = "desired state without tenant patch"
 		}
-		liveLabel := "live cluster"
-		if resolvedBaseline != "" {
-			liveLabel = "backup"
-		}
-		return ui.Meld(cmd.Context(), runner.Exec{}, desiredLabel, result.Before, liveLabel, result.After)
+		return ui.Meld(cmd.Context(), runner.Exec{}, desiredLabel, result.Before, liveSource(resolvedBaseline), result.After)
 	}
 
 	warnFluxManaged(logger, app, result.FluxManagedBy)
+	review := chartReview{
+		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnlyCount,
+		Source: liveSource(resolvedBaseline),
+	}
+	reportChartReview(logger, review)
 	if result.Patch == nil || result.UpToDate {
-		reportNoChange(logger, result.UpToDate, result.ObsoletePatches)
+		reportNoChange(logger, result.UpToDate, result.ObsoletePatches, review)
 		if view == viewMeld {
 			return openMeld()
 		}
@@ -385,17 +403,75 @@ func warnFluxManaged(logger *log.Logger, app config.App, managedBy string) {
 // reportNoChange narrates a diff/migrate that found nothing to write:
 // either live already matches the base (warning when an existing patch
 // would now move it away), or the tenant file already carries exactly the
-// needed patch.
-func reportNoChange(logger *log.Logger, upToDate bool, obsoletePatches int) {
+// needed patch — unless review holds differences no patch could carry,
+// which reportChartReview already listed.
+func reportNoChange(logger *log.Logger, upToDate bool, obsoletePatches int, review chartReview) {
 	switch {
 	case upToDate:
 		logger.Successf("nothing to migrate: the tenant file's existing patch already covers every difference")
+	case len(review.Unmapped) > 0:
+		logger.Warningf("nothing can be patched automatically: the %d difference(s) listed above need manual review", len(review.Unmapped))
 	case obsoletePatches > 0:
 		logger.Warningf("no differences against the unpatched base, but the tenant file carries %d patch(es) for this object "+
 			"that Flux would apply on top — review or remove them", obsoletePatches)
 	default:
 		logger.Successf("no differences")
 	}
+}
+
+// chartReview is what a chart-mode diff couldn't carry into its patch.
+type chartReview struct {
+	// Unmapped are the differences no patch value could be computed for.
+	Unmapped []diff.UnmappedDiff
+	// Missing names the rendered workloads with no live side to compare.
+	Missing []string
+	// LiveOnly counts live variables the chart doesn't render.
+	LiveOnly int
+	// Source names the live side: "live cluster" or "backup".
+	Source string
+}
+
+// reportChartReview warns about everything a chart-mode diff/migrate
+// leaves out of its patch, so none of it is lost silently: rendered
+// workloads it had nothing to compare against, differences it couldn't
+// attribute to one .Values path (listed one per line, with the candidate
+// paths), and live variables the chart has no place for.
+func reportChartReview(logger *log.Logger, r chartReview) {
+	for _, w := range r.Missing {
+		logger.Warningf("%s: rendered by the chart but not in the %s — nothing of it is carried into the patch", w, r.Source)
+	}
+	if len(r.Unmapped) > 0 {
+		logger.Warningf("%d difference(s) need manual review — not written to the patch:", len(r.Unmapped))
+		for _, u := range r.Unmapped {
+			logger.Warningf("  %s", describeUnmapped(u))
+		}
+	}
+	if r.LiveOnly > 0 {
+		logger.Warningf("%d variable(s) in the %s aren't rendered by the chart: their values will be lost after migration", r.LiveOnly, r.Source)
+	}
+}
+
+func describeUnmapped(u diff.UnmappedDiff) string {
+	name := u.Name
+	if u.Workload != "" {
+		name = u.Workload + "/" + u.Name
+	}
+	line := fmt.Sprintf("%s: rendered %q, live %q — %s", name, u.Rendered, u.Live, u.Reason)
+	switch u.Reason {
+	case diff.UnmappedAmbiguous:
+		line += " between " + strings.Join(u.Candidates, ", ")
+	case diff.UnmappedConflict:
+		line += " for " + strings.Join(u.Candidates, ", ")
+	}
+	return line
+}
+
+// liveSource names what a desired-state diff compared against.
+func liveSource(resolvedBaseline string) string {
+	if resolvedBaseline != "" {
+		return "backup"
+	}
+	return "live cluster"
 }
 
 // desiredComparison names what a desired-state diff (apps diff without

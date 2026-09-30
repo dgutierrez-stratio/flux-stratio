@@ -191,7 +191,10 @@ func SeedCatalog() Catalog {
 			// model=default is the virtualizer server itself; its -monitor
 			// and -ui siblings are separate CCT apps of the same chart.
 			Match: cctMatch(kindDeployment, "virtualizer", "default"),
-			Chart: &Chart{Path: "virtualizer"},
+			Chart: &Chart{Path: "virtualizer", Siblings: []Match{
+				cctMatch(kindDeployment, "virtualizer", "virtualizer-monitor"),
+				cctMatch(kindDeployment, "virtualizer", "virtualizer-ui"),
+			}},
 			Exclude: []string{
 				"spec.values.virtualizerMonitor.general.approlename",
 				"spec.values.virtualizerServer.general.governanceRegistration.governanceDeployment",
@@ -230,12 +233,18 @@ func SeedCatalog() Catalog {
 			Name:      "GenAI",
 			Component: "genai",
 			Rset:      rsetGenAI,
-			// genai-api is the chart's anchor workload; genai-gateway is its
-			// sibling, fetched by chart templating. genai-litellm, the same
-			// CCT service's other model, is its own litellm component.
-			Match:   cctMatch(kindDeployment, "genai", "genai-api"),
-			Entry:   `{{ .Live.Name | trimSuffix "-api" }}`,
-			Chart:   &Chart{Path: "genai"},
+			// genai-api is the chart's anchor workload; genai-ui and
+			// genai-developer-proxy are its siblings, CCT apps of their own
+			// (model = workload name, as for every captured genai model).
+			// genai-litellm, the same CCT service's other model, is its own
+			// litellm component; the legacy genai-gateway isn't rendered by
+			// the chart any more, so it isn't a sibling.
+			Match: cctMatch(kindDeployment, "genai", "genai-api"),
+			Entry: `{{ .Live.Name | trimSuffix "-api" }}`,
+			Chart: &Chart{Path: "genai", Siblings: []Match{
+				cctMatch(kindDeployment, "genai", "genai-ui"),
+				cctMatch(kindDeployment, "genai", "genai-developer-proxy"),
+			}},
 			Prepare: "prepare-genai",
 			Notes:   "prepare-genai is a Postgres data rewrite apps migrate cannot verify itself; it runs the SQL via pod exec and shows the result, but always asks its own confirmation before proceeding, never skipped by --yes.",
 			Exclude: []string{
@@ -243,6 +252,7 @@ func SeedCatalog() Catalog {
 				"spec.values.genaiUi.general.governanceRegistration.governanceDeployment",
 				"spec.values.genaiUi.general.governanceRegistration.governanceBaseUri",
 				"spec.values.genaiUi.general.identity.approlename",
+				"spec.values.genaiDeveloperProxy.general.identity.approlename",
 				"spec.values.genaiGateway.general.identity.approlename",
 				"spec.values.genaiUi.settings.externalDashboards.discoveryDatabase",
 			},

@@ -45,8 +45,9 @@ type Options struct {
 	// Baseline, if set, is a backup directory as written by
 	// internal/backup — apps diff --baseline. The live side of the
 	// comparison is read from it instead of the live cluster: cr.yaml in
-	// manifest mode, env-vars.env in chart mode. The rendered/desired
-	// side is unaffected either way.
+	// manifest mode; in chart mode each workload's own env file
+	// (WorkloadEnvFile), or env-vars.env for a backup that has none. The
+	// rendered/desired side is unaffected either way.
 	Baseline string
 	Log      *log.Logger
 }
@@ -79,14 +80,21 @@ type Result struct {
 	// Before and After are a human-readable, textual view of the rendered
 	// desired state and the live legacy state — a manifest-mode spec's
 	// YAML in manifest mode, sorted "KEY=VALUE" env var lines in chart
-	// mode. internal/ui.FileDiff(Before, After) is apps diff's default
+	// mode (each prefixed with its workload's name when the chart renders
+	// several). internal/ui.FileDiff(Before, After) is apps diff's default
 	// output; Patch (via internal/ui.Patch) is its --patch output.
 	Before, After string
 	// The remaining fields are set only in chart mode (App.ChartPath !=
-	// ""); they stay at their zero value in manifest mode.
+	// ""); they stay at their zero value in manifest mode. See
+	// diff.ChartDiffResult for the first three.
 	UnmappedDiffs     []diff.UnmappedDiff
 	LiveOnlyCount     int
 	RenderedOnlyCount int
+	// MissingWorkloads names ("Kind namespace/name") the workloads the
+	// chart renders that have no live counterpart to compare — not found
+	// live, or (with Baseline) not captured in the backup — so nothing of
+	// theirs is carried into the patch.
+	MissingWorkloads []string
 }
 
 // Diff renders opts.App and compares it against its live legacy state.

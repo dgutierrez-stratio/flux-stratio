@@ -20,11 +20,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/Stratio/flux-stratio/internal/appdiff"
 	"github.com/Stratio/flux-stratio/internal/backup"
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/discovery"
@@ -105,7 +108,57 @@ func compare(backupDir, liveDir string, liveFiles []string) (*Result, error) {
 	if signal == "cr.yaml" || signal == "helmrelease.yaml" {
 		return compareSpec(backupDir, liveDir, signal)
 	}
+	if signal == "env-vars.env" {
+		backupEnvs, liveEnvs := workloadEnvFiles(listFiles(backupDir)), workloadEnvFiles(liveFiles)
+		if len(backupEnvs) > 0 && len(liveEnvs) > 0 {
+			return compareWorkloadEnvs(backupDir, backupEnvs, liveDir, liveEnvs)
+		}
+	}
 	return compareText(backupDir, liveDir, signal)
+}
+
+// workloadEnvFiles is files' per-workload env files
+// (appdiff.WorkloadEnvFile), sorted.
+func workloadEnvFiles(files []string) []string {
+	var out []string
+	for _, f := range files {
+		if appdiff.IsWorkloadEnvFile(f) {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// compareWorkloadEnvs diffs two chart-mode captures workload by workload:
+// each side is its per-workload env files concatenated, each under a
+// "# <file>" header, so a change in one sibling of a multi-workload chart
+// shows up even when another sibling sets the same variable — which the
+// merged env-vars.env keeps only one value of. A backup taken before
+// per-workload files existed has none, and compare falls back to the
+// merged file.
+func compareWorkloadEnvs(backupDir string, backupFiles []string, liveDir string, liveFiles []string) (*Result, error) {
+	before, err := concatWorkloadEnvs(backupDir, backupFiles)
+	if err != nil {
+		return nil, err
+	}
+	after, err := concatWorkloadEnvs(liveDir, liveFiles)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Before: before, After: after}, nil
+}
+
+func concatWorkloadEnvs(dir string, files []string) (string, error) {
+	var b strings.Builder
+	for _, f := range files {
+		text, err := readText(dir, f)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "# %s\n%s", f, text)
+	}
+	return b.String(), nil
 }
 
 // primarySignal returns the one file worth diffing for a given capture

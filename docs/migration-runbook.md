@@ -156,6 +156,13 @@ delta, and never trusting "already done."
 > `flux stratio apps diff pool-psql --baseline latest`, which should now report nothing to migrate: the
 > tenant file's existing patch already covers every difference.
 
+**`--baseline` is the exception, not the rule.** Migrate against the live cluster (the default)
+while the component's legacy workloads still run untouched. Reach for `--baseline` only when you
+get the "already managed by Flux" warning, or you know Flux reset the component first. The step 5
+backup is what makes that recovery possible. For multi-workload charts (genai, virtualizer) it holds
+every sibling workload the catalog declares, so the recovered patch covers each of them, not just
+the main one.
+
 ## 7. Migrate the rest
 
 ```shell

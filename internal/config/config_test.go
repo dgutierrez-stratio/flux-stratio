@@ -144,6 +144,44 @@ func TestLoad_ChartPathWithChartsPrefixRejected(t *testing.T) {
 	}
 }
 
+func TestLoad_ChartSiblings(t *testing.T) {
+	withSiblings := func(siblings string) string {
+		return strings.Replace(validCatalogYAML, "    chart:\n      path: gosec-agent\n",
+			"    chart:\n      path: gosec-agent\n      siblings:\n"+siblings, 1)
+	}
+
+	cat, err := Load(writeFile(t, "catalog.yaml", withSiblings(`        - kinds: [apps/v1/Deployment]
+          annotations:
+            matchLabels:
+              cct.stratio.com/application_model: sibling
+`)))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got := cat.Types[1].SiblingMatches(); len(got) != 1 || got[0].Annotations.MatchLabels["cct.stratio.com/application_model"] != "sibling" {
+		t.Errorf("SiblingMatches = %+v", got)
+	}
+
+	_, err = Load(writeFile(t, "catalog.yaml", withSiblings(`        - kinds: [postgres.stratio.com/v1/PgCluster]
+        - annotations:
+            matchExpressions:
+              - key: k
+                operator: Maybe
+`)))
+	if err == nil {
+		t.Fatal("Load accepted invalid siblings, want validation problems")
+	}
+	for _, want := range []string{
+		`chart.siblings[0].kinds: "postgres.stratio.com/v1/PgCluster" is not a Deployment, StatefulSet or DaemonSet`,
+		"chart.siblings[1].kinds is required",
+		`chart.siblings[1].annotations: matchExpressions[k]: unknown operator "Maybe"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q; got:\n%v", want, err)
+		}
+	}
+}
+
 func TestLoad_MissingFileReportsPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.yaml")
 	_, err := Load(path)

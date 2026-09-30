@@ -85,6 +85,7 @@ types:
 | `kustomization` | no | Template for the rendered Kustomization name. Default `apps-{{ .Object }}` — the convention every `keos-use-cases` component follows |
 | `chart.path` | no | Switches the type into **chart mode**: comparison happens via the chart's rendered env vars against the live workload's resolved environment, instead of a direct manifest/CR diff |
 | `chart.valuesRoot` | no | Chart mode only. When a chart mixes more than one flavor's `.Values` root in one directory tree (e.g. `pgmd5`/`pgtls`/`pginternal`), pins which root wins when a key is ambiguous |
+| `chart.siblings` | no | Chart mode only. A list of `match`-shaped selectors (Deployment/StatefulSet/DaemonSet kinds only) for the chart's other workloads that legacy CCT deployed as separate apps — e.g. genai's `genai-ui`/`genai-developer-proxy` next to its `genai-api` anchor. A sibling never starts an instance: it joins the one instance of this type in its namespace, after the anchor, so `apps backup` captures its env vars (`env-vars.<kind>.<name>.env`) and `apps diff/migrate --baseline` and `--drift` compare it with its own rendered workload. A sibling with no instance, or several, in its namespace joins none, with a warning |
 | `anchor` | no | Overrides where, relative to the instance's tenant entry, its patches are read from — see [Anchor](#anchor). Almost never needed |
 | `prepare` | no | A one-time precondition `apps migrate` satisfies first — see [Prepare](#prepare) |
 | `exclude` | no | Dot-paths dropped from the computed diff/patch — see [Exclude](#exclude) |

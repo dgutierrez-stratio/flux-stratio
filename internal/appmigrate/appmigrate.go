@@ -17,6 +17,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/appdiff"
 	"github.com/Stratio/flux-stratio/internal/catalog"
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/runner"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
@@ -54,6 +55,11 @@ type Result struct {
 	// edit, for a diff preview (apps migrate --dry-run) via
 	// internal/ui.FileDiff. Equal when Migrated is false.
 	Before, After string
+	// UnmappedDiffs, LiveOnlyCount and MissingWorkloads are what a
+	// chart-mode diff couldn't carry into the patch — see appdiff.Result.
+	UnmappedDiffs    []diff.UnmappedDiff
+	LiveOnlyCount    int
+	MissingWorkloads []string
 }
 
 // Plan computes what migrating opts.App would do, without writing
@@ -98,12 +104,13 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	if err != nil {
 		return nil, nil, "", err
 	}
+	result := &Result{
+		UpToDate: diffResult.UpToDate, ObsoletePatches: diffResult.ObsoletePatches, FluxManagedBy: diffResult.FluxManagedBy,
+		Before: string(before), After: string(before),
+		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnlyCount: diffResult.LiveOnlyCount, MissingWorkloads: diffResult.MissingWorkloads,
+	}
 	if diffResult.Patch == nil || diffResult.UpToDate {
-		return &Result{
-			Migrated: false, UpToDate: diffResult.UpToDate, ObsoletePatches: diffResult.ObsoletePatches,
-			FluxManagedBy: diffResult.FluxManagedBy,
-			Before:        string(before), After: string(before),
-		}, doc, tenantPath, nil
+		return result, doc, tenantPath, nil
 	}
 
 	if err := tenantfile.Splice(doc, opts.Catalog, opts.App, *diffResult.Patch); err != nil {
@@ -113,5 +120,6 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return &Result{Migrated: true, FluxManagedBy: diffResult.FluxManagedBy, Before: string(before), After: string(after)}, doc, tenantPath, nil
+	result.Migrated, result.After = true, string(after)
+	return result, doc, tenantPath, nil
 }

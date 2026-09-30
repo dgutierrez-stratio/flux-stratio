@@ -191,9 +191,9 @@ func TestRun_ManifestMode_FoundOnlyAsWorkloadWarnsAndCaptures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	wantFiles := map[string]bool{"deployment.yaml": true, "env-vars.env": true}
-	if len(result.Files) != 2 || !wantFiles[result.Files[0]] || !wantFiles[result.Files[1]] {
-		t.Errorf("Files = %v, want [deployment.yaml env-vars.env] in some order", result.Files)
+	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.psql.env"}
+	if !equalStrings(result.Files, wantFiles) {
+		t.Errorf("Files = %v, want %v", result.Files, wantFiles)
 	}
 	if !strings.Contains(logbuf.String(), "manifest-mode but was only found live as a workload") {
 		t.Errorf("expected a mismatch warning, got: %s", logbuf.String())

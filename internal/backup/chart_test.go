@@ -141,9 +141,9 @@ func TestRun_ChartMode_SingleWorkload_WritesDeploymentAndEnvFile(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	wantFiles := map[string]bool{"deployment.yaml": true, "env-vars.env": true}
-	if len(result.Files) != 2 || !wantFiles[result.Files[0]] || !wantFiles[result.Files[1]] {
-		t.Errorf("Files = %v, want [deployment.yaml env-vars.env] in some order", result.Files)
+	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.psql-gosec-agent.env"}
+	if !equalStrings(result.Files, wantFiles) {
+		t.Errorf("Files = %v, want %v", result.Files, wantFiles)
 	}
 
 	depData, err := os.ReadFile(filepath.Join(result.Dir, "deployment.yaml"))
@@ -220,6 +220,57 @@ func TestRun_ChartMode_MultiWorkload_MergesEveryWorkloadsEnv(t *testing.T) {
 	}
 }
 
+// TestRun_ChartMode_MultiWorkload_WritesEachWorkloadsOwnEnvFile covers
+// what the merged env-vars.env can't hold: siblings setting the same
+// variable (genai's VAULT_ROLE) to different values. Each workload's own
+// file keeps its value, for `apps diff --baseline` and drift checks.
+func TestRun_ChartMode_MultiWorkload_WritesEachWorkloadsOwnEnvFile(t *testing.T) {
+	base := fixtureBase(t)
+	chartPath := fixtureChart(t, base, "genai")
+	logger := log.New(io.Discard, false)
+
+	hr := helmRelease("genai", "stratio-genai", map[string]any{})
+	api := deploymentWithEnv("genai-api", "stratio-genai", "legacy-api-role")
+	gateway := deploymentWithEnv("genai-gateway", "stratio-genai", "legacy-gateway-role")
+	api.Spec.Template.Spec.Containers[0].Env[0].Name = "VAULT_ROLE"
+	gateway.Spec.Template.Spec.Containers[0].Env[0].Name = "VAULT_ROLE"
+
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(api, gateway, hr).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(context.Background(), Options{
+		Repos: config.ReposUnder(base),
+		App:   config.App{ID: "genai", Object: "genai", ChartPath: chartPath},
+		Index: idx,
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			"helm": {Stdout: []byte(helmTemplateOutputMultiWorkload)},
+		}},
+		Client: c, Dir: t.TempDir(), Clock: fixedClock, Log: logger,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-gateway.env"}
+	if !equalStrings(result.Files, wantFiles) {
+		t.Errorf("Files = %v, want %v (genai-litellm isn't live)", result.Files, wantFiles)
+	}
+	for file, want := range map[string]string{
+		"env-vars.deployment.genai-api.env":     "VAULT_ROLE=legacy-api-role\n",
+		"env-vars.deployment.genai-gateway.env": "VAULT_ROLE=legacy-gateway-role\n",
+	} {
+		data, err := os.ReadFile(filepath.Join(result.Dir, file))
+		if err != nil {
+			t.Fatalf("%s not written: %v", file, err)
+		}
+		if string(data) != want {
+			t.Errorf("%s = %q, want %q", file, data, want)
+		}
+	}
+}
+
 // TestRun_ChartMode_ChartsRepoOutsideBase asserts a chart-mode app
 // resolves its chart under Options.Repos.Charts when the charts repo is
 // checked out outside base — the chart deliberately doesn't exist anywhere under
@@ -260,9 +311,9 @@ func TestRun_ChartMode_ChartsRepoOutsideBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error (chart should resolve under repos.charts, not base): %v", err)
 	}
-	wantFiles := map[string]bool{"deployment.yaml": true, "env-vars.env": true}
-	if len(result.Files) != 2 || !wantFiles[result.Files[0]] || !wantFiles[result.Files[1]] {
-		t.Errorf("Files = %v, want [deployment.yaml env-vars.env] in some order", result.Files)
+	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.psql-gosec-agent.env"}
+	if !equalStrings(result.Files, wantFiles) {
+		t.Errorf("Files = %v, want %v", result.Files, wantFiles)
 	}
 }
 

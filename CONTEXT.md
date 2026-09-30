@@ -180,7 +180,11 @@ convention, that repo is the reference:
 - **`internal/components`** — live objects → `config.App`. `Classify` matches every discovered
   object against every type (skipping anything with `ownerReferences`), renders its entry, and
   groups by (type, namespace, entry); an object CCT annotated as another tenant's
-  (`cct.stratio.com/application_tenant`) is skipped too. `Resolve(opts, name)` picks the one instance `name` refers to
+  (`cct.stratio.com/application_tenant`) is skipped too. A chart type's `chart.siblings` (the
+  chart's other workloads CCT deployed as separate apps, e.g. genai-ui) never anchor an instance:
+  each joins the one instance of its type in its namespace, appended to `Live` after the anchor —
+  which is how a legacy CCT backup (no HelmRelease to enumerate the chart's workloads by) captures
+  them. `Resolve(opts, name)` picks the one instance `name` refers to
   (live/object name first, entry name as fallback, then an already-migrated workload: when a
   same-named HelmRelease adopted the legacy object, Helm stripped the CCT annotations the selectors
   need, so a live object named `name` whose `helm.toolkit.fluxcd.io/{name,namespace}` HelmRelease
@@ -222,13 +226,18 @@ convention, that repo is the reference:
   generation). `ManifestDiff`/`NeedsJSON6902`/`ToJSON6902Ops` auto-detect JSON 6902 vs. strategic
   merge patch by whether a shared top-level `spec` key is a list on *both* sides — this is never a
   user choice. `ChartDiff` + `HelmTemplate` are chart-mode's equivalent, comparing a chart's
-  declared env vars against a live workload's resolved ones. `CoerceValue` handles the
+  declared env vars against a live workload's resolved ones — **per workload**: each live workload
+  against its own rendered workload, and each differing value patched through the `.Values` path of
+  the chart file its rendered ConfigMap was built from (`ScanChartFiles` + `AttributeConfigMaps`,
+  matching a ConfigMap to the file with exactly its keys). Sibling workloads' same-named variables
+  (genai's `VAULT_ROLE`) never cross over; anything it can't attribute to one path goes to
+  `UnmappedDiffs` with a reason, never guessed. `CoerceValue` handles the
   octal-looking-string/float/`yes`-`null` typed-value edge cases the Python client got wrong.
 - **`internal/appdiff`** — orchestrates `internal/render` + `internal/diff` for `apps diff`'s
   default/`--baseline` comparison and for `apps migrate`'s patch computation — **the one place both
   commands compute a diff, so they can never disagree about what a migration would do.** Dispatch
   is by `App.ChartPath` (chart-mode vs. manifest-mode), never a flag the operator sets. Exports
-  `MergeLiveEnv` and `FetchLiveWorkloads` (chart-mode's "fetch every live Deployment/StatefulSet/
+  `MergeLiveEnv`, `LiveWorkloadEnvs`, `WorkloadEnvFile` and `FetchLiveWorkloads` (chart-mode's "fetch every live Deployment/StatefulSet/
   DaemonSet a chart declares, translating `App.Object` to `App.LiveName()` and falling back to
   `App.LiveNamespace()`") for reuse by
   `internal/backup`'s own chart-mode capture — the one legitimate cross-package dependency from
@@ -246,8 +255,10 @@ convention, that repo is the reference:
   already-classified object; `Index.Objects()` feeds `internal/components`; `Index.Names()` is the
   union across all four, used by `apps backup --all`.
 - **`internal/backup`** — captures an app's live state to
-  `<dir>/<App.ID>/<UTC-timestamp>/{cr.yaml | deployment.yaml+env-vars.env |
-  helmrelease.yaml+values.yaml}`, dispatching on `App.ChartPath` with a graceful fallback cascade
+  `<dir>/<App.ID>/<UTC-timestamp>/{cr.yaml | deployment.yaml+env-vars.env+env-vars.<kind>.<name>.env
+  per workload | helmrelease.yaml+values.yaml}` (the per-workload env files are what `--baseline`
+  and drift compare when present; the merged `env-vars.env` is the backup marker and the fallback
+  for older backups), dispatching on `App.ChartPath` with a graceful fallback cascade
   (mirroring the Python client's own CR → Deployment → HelmRelease-only priority) when the live
   object isn't backed by the expected kind — logging a warning, not failing, since `apps backup
   --all`/`--catalog` must not abort on one app's shape surprise. Chart-mode capture sources `helm
@@ -357,14 +368,6 @@ being tested in a feature package first.
 - `docs/config-reference.md` and this file can drift from the actual `config.ComponentType` fields —
   if you add/remove one, update `docs/config-reference.md` and `internal/config/seed.go` in the
   same change.
-- Chart-mode diffing (`internal/diff`/`internal/appdiff`) collapses env vars into a flat
-  `map[string]string` keyed only by name, cluster-wide across every sibling workload a chart
-  renders — a live value found for one sibling can get mis-attributed to a *different* sibling's
-  `.Values` path when two of them name an env var identically (confirmed live: `genai`'s
-  `VAULT_ROLE`, shared by `genai-api`/`genai-ui`/`genai-developer-proxy`). Worked around today by
-  excluding the affected paths one at a time; the collision itself isn't fixed. See
-  `docs/TASK-multi-workload-env-var-collision.md` for the full writeup and investigation starting
-  points.
 - `tenant import`'s `ExtraConfig` scaffolding (`internal/catalog.Schema.ExtraConfig`) only
   understands a flat scalar read directly off `$componentConfig`, with an optional quoted-string
   default — a nested sub-config (a variable assigned from `$componentConfig` and read for several

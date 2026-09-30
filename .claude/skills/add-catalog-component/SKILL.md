@@ -70,6 +70,7 @@ placeholders from Step 0.
 |---|---|---|---|
 | **Selector / kind** | Which live object is the component's top-level (anchor) object, and what identifies its *type* across environments? | Its `apiVersion/kind` and CCT annotations (below). Compare it with other instances (other namespaces/tenants) and with same-named objects of other kinds, e.g. a `PgDatabase` often shares an app's name | `match.kinds`, `match.annotations` / `match.labels` |
 | **Ownership / grouping** | Is it owned by something? Does the component deploy several anchor-like objects? | `ownerReferences`, and which objects share `application_service` / `application_model` | Owned objects are skipped automatically, so select the owner. For several workloads, pin the anchor by model, or group them with an `entry` template |
+| **Sibling workloads** (chart mode) | Does the chart render several workloads that CCT deployed as **separate apps** (one `application_model` each, no HelmRelease tying them together)? | Workloads the chart renders (`apps diff` names any not found live; or `helm template` the chart) vs. live objects sharing the anchor's `application_service` in its namespace, and their `application_model`s. Leave out models that are their own component (genai's `genai-litellm` → `litellm`), models the chart no longer renders (`genai-gateway`), and owned sub-workloads | `chart.siblings`, one selector per sibling model. Without it a CCT backup holds only the anchor, so `apps diff/migrate --baseline` can't patch the siblings and drift can't see them. Verify each sibling's live name equals its rendered name (pairing is by name) |
 | **Tenant scope** | Does another tenant (e.g. the platform's `keos`) run a copy? | `cct.stratio.com/application_tenant` on each candidate | Handled automatically; mention it in the type's comment |
 | **Coordinates** | Which component key, rset file and Kustomization name? Is the patch anchor the default, nested (`config.agent`-style), or not patchable (`patches: []`)? | The template block (below) | `component`, `rset`, `kustomization`, `anchor` |
 | **Renames** | Does the GitOps entry/object name differ from the live name? | The template's `name:` and `postBuild.substitute` (e.g. `*_NAME: << get $component "name" >>`, `-gosec-agent` suffixes) vs. the live name. Also `flux stratio tenant import` output | `entry`, `object` templates |
@@ -133,6 +134,7 @@ anything that doesn't conform.
 | `anchor` | no | dotted path (e.g. `config.agent`). Almost never needed, since it's derived from the templates, and a wrong value fails loudly |
 | `chart.path` | chart mode | relative to the charts repository root `<charts>`, e.g. `litellm` (never `charts/litellm`); enables chart/env-var comparison |
 | `chart.valuesRoot` | no | chart mode only: pins the `.Values` root when a chart has several flavors |
+| `chart.siblings` | no | chart mode only: a list of `match`-shaped selectors (`kinds` limited to `apps/v1` Deployment/StatefulSet/DaemonSet, plus `annotations`/`labels`) for the chart's other workloads CCT deployed as separate apps. A sibling joins the one instance of this type in its namespace, after the anchor; it never becomes an instance itself |
 | `match.kinds` | yes | list of `group/version/Kind` (`version/Kind` for the core group). The version isn't compared at match time |
 | `match.annotations` / `match.labels` | at least one | `matchLabels: {k: v}` and/or `matchExpressions: [{key, operator, values}]`. Operators: `In` or `NotIn` (with values), `Exists` or `DoesNotExist` (without) |
 | `prepare` | no | must name an existing step in `<repo>/internal/prepare` |
@@ -148,6 +150,8 @@ anything that doesn't conform.
 **Selectors:**
 - Prefer the CCT annotations `cct.stratio.com/application_service` (plus `application_model` when a
   service has several flavors or sibling apps).
+- `match` selects the anchor only. A sibling app of the same chart goes in `chart.siblings`, never
+  in `match`: in `match` it would become an instance of its own, with its own entry.
 - Always pin `match.kinds`.
 - Never select on names.
 
@@ -162,6 +166,12 @@ Copy-paste block:
     # chart:
     #   path: <chart>
     #   valuesRoot: <root>
+    #   siblings:                         # the chart's other workloads CCT deployed as separate apps
+    #     - kinds: [apps/v1/Deployment]
+    #       annotations:
+    #         matchLabels:
+    #           cct.stratio.com/application_service: <service>
+    #           cct.stratio.com/application_model: <sibling-model>
     match:
       kinds: [<group>/<version>/<Kind>]
       annotations:
@@ -206,11 +216,12 @@ Invalid block, corrected:
 |---|---|
 | Manifest mode, all defaults | `opendashboards`, `postgres`, `kafka` |
 | Rename + nested anchor + chart | `postgres-gosec-agent` (`entry` trims `-agent`/`-gosec-agent`, `object: '{{ .Entry }}-gosec-agent'`) |
-| Several workloads, pinned anchor | `genai` (`application_model: genai-api`, `entry` trims `-api`) |
+| Several workloads, pinned anchor + siblings | `genai` (`application_model: genai-api`, `entry` trims `-api`, `chart.siblings`: `genai-ui`, `genai-developer-proxy`) |
 | Live name ≠ tenant entry + prepare step | `datamarket-agent` (`entry: 'governance-{{ .Live.Name }}'`, `prepare-datamarket-agent`) |
 | Chart flavor | `bdl-datarest` (`application_model: datarest-pginternal` ↔ `valuesRoot: datarestPgInternal`) |
 | One type, several flavors | `dg-agent` (`In` over `connectors-dfs`, `connectors-rdbms`) |
-| Model excludes siblings | `virtualizer`, `rocket` (`application_model: default`) |
+| Model pins the anchor, siblings declared | `virtualizer` (`application_model: default`, `chart.siblings`: `virtualizer-monitor`, `virtualizer-ui`) |
+| Model excludes owned sub-workloads | `rocket` (`application_model: default`; its sub-Deployments are owned, and the chart renders one workload) |
 
 ## Step 4 — Validate, then test against the live cluster
 
@@ -229,6 +240,26 @@ Invalid block, corrected:
    ```
    If the live object is already Flux-managed (you'll see a warning), live no longer holds the
    legacy values. Use `--baseline latest` for everything from here on.
+4. **Chart mode: read every warning, not just the patch.**
+   - `… rendered by the chart but not in the live cluster`: the chart renders a workload with no live
+     counterpart. That's fine if it isn't deployed in this environment. If it *is* live under a
+     different name, pairing by name fails, which is a format gap.
+   - `N difference(s) need manual review`: values the diff wouldn't guess.
+     - `ambiguous between …`: several candidate paths.
+     - `conflicting live values for …`: siblings sharing one path.
+     - `no .Values path`: a literal or computed value.
+     Each is a Step 5 item.
+   - `N variable(s) … aren't rendered by the chart`: live values the migration will drop. Skim them
+     for anything that matters.
+5. **Siblings declared?** Check the backup captures them, and that the baseline covers them:
+   ```shell
+   flux stratio apps backup <name> --dir <scratch-backups>        # one env-vars.deployment.<workload>.env per live sibling
+   flux stratio apps diff <name> --view patch --baseline <scratch-backups>/<name>
+   ```
+   The baseline patch must touch each live sibling's own `.Values` root (e.g. both `genaiApi.*` and
+   `genaiUi.*`), and must not report any live sibling as missing from the backup. A sibling that joins
+   no instance is warned about during classification (no anchor, or several anchors, in its
+   namespace).
 
 ## Step 5 — Review the patch with the operator (approval gate)
 
@@ -243,6 +274,13 @@ For **every** field in the patch, show:
 | Identity, vault, governance, SSO, cluster references substituted from dependencies | propose `exclude` |
 | Versions (`image`) and URLs (`exposition.host`) | **ask**: it's a policy choice (both were kept for `opendashboards`) |
 
+Also walk the manual-review list from Step 4. For each entry, decide one of three things:
+- add an `exclude`, because GitOps owns the field;
+- have the operator set it by hand in the tenant patch;
+- accept the rendered value.
+
+Nothing on that list is written automatically.
+
 Re-run Step 4 after each `exclude` change. Stop only when the operator explicitly approves the
 patch. Then show `flux stratio apps migrate <name> --dry-run` (it writes nothing) as the final
 preview.
@@ -254,6 +292,11 @@ preview.
   push the tenant file.
 - **If Flux already reconciled it:** `flux stratio apps migrate <name> --baseline latest`.
 
+`--baseline` is the exception. Migrating against live (the default) is correct while the legacy
+workloads still run untouched, siblings included: each one is fetched live and compared with its own
+rendered workload. The backup is the recovery path once Flux has reset the component. With
+`chart.siblings` declared, the backup holds every sibling too.
+
 ## Step 7 — Upstream the type into the seed
 
 Everything here is in `<repo>`:
@@ -263,10 +306,12 @@ Everything here is in `<repo>`:
    tenant duplicates.
 2. `internal/components/testdata/live.yaml`: add the live anchor object's **metadata only**
    (name, namespace, `cct.*` labels, the CCT annotations above, and `ownerReferences` with a
-   placeholder uid). No spec, no secrets. Add negative cases too: same-named objects of other kinds,
-   and owned siblings.
+   placeholder uid). No spec, no secrets. Add each declared sibling's metadata too, from a real
+   capture. Add negative cases: same-named objects of other kinds, owned sub-workloads, and same-service
+   models that are *not* siblings.
 3. Tests:
-   - `internal/components/classify_test.go`: the expected instance list;
+   - `internal/components/classify_test.go`: the expected instance list. Siblings appear after the
+     anchor in the instance's live names, e.g. `virtualizer stratio-apps/virtualizer,virtualizer-monitor`;
    - `internal/config/seed_test.go`: the type count;
    - `internal/components/resolve_test.go`: the instance counts.
 4. Docs:
@@ -288,6 +333,8 @@ Stop and propose a plugin change (code, tests and docs, with the operator's go-a
 - the GitOps namespace can't be reached by the live-namespace fallback;
 - cutover needs a precondition no existing `prepare` step covers (add one in `internal/prepare`);
 - the anchor object can't be told apart by kind + labels/annotations (e.g. no CCT annotations);
+- a sibling workload's live name differs from its rendered name, or it lives in a different
+  namespace than its anchor (siblings pair by name, and join an instance in their own namespace);
 - the patch shape isn't one `internal/catalog` recognizes.
 
 ## Worked example: opendashboards on eosdev
