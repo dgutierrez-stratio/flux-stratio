@@ -35,6 +35,12 @@ var (
 	printfSuffixRe = regexp.MustCompile(`\$(\w+)\s*:=\s*printf\s*"%s-([\w-]+)"\s*\(get\s+\$component\s+"name"\)`)
 
 	healthCheckRe = regexp.MustCompile(`healthCheckExprs:\s*\n\s+-\s+apiVersion:\s*(\S+)\s*\n\s+kind:\s*(\S+)`)
+
+	// specPathRe and sourceRefNameRe read a Kustomization's spec.path and
+	// its sourceRef's name (the next `name:` after `sourceRef:`, whichever
+	// order kind/name/namespace appear in).
+	specPathRe      = regexp.MustCompile(`(?m)^\s*path:\s*(\S.*?)\s*$`)
+	sourceRefNameRe = regexp.MustCompile(`sourceRef:\s*\n(?:\s+(?:kind|namespace):.*\n)*\s+name:\s*(\S+)`)
 )
 
 var extraConfigIgnore = map[string]bool{"size": true, "dependencies": true, "type": true}
@@ -82,6 +88,7 @@ func extractSchema(key, block string) Schema {
 	}
 
 	s.Kustomizations, s.ChartName = extractKustomizations(block)
+	s.SourcePaths = extractSourcePaths(block)
 	return s
 }
 
@@ -206,4 +213,21 @@ func isConsonant(r rune) bool {
 	default:
 		return true
 	}
+}
+
+// extractSourcePaths returns the spec.path and sourceRef of every
+// document in block that declares both — every Kustomization the
+// component's template renders, including its postrequisites. A document
+// with a path but no sourceRef (an HTTPRoute, a probe) isn't one.
+func extractSourcePaths(block string) []SourcePath {
+	var paths []SourcePath
+	for _, segment := range docSepRe.Split(block, -1) {
+		pm := specPathRe.FindStringSubmatch(segment)
+		sm := sourceRefNameRe.FindStringSubmatch(segment)
+		if pm == nil || sm == nil {
+			continue
+		}
+		paths = append(paths, SourcePath{Source: sm[1], Path: pm[1]})
+	}
+	return paths
 }

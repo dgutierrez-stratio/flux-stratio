@@ -2,7 +2,8 @@
 // over everything a migration command depends on — required binaries, the
 // component catalog and environment files, the GitOps repo layout, each
 // chart-mode type's on-disk chart directory, each type's component key
-// and prepare step, cluster access, and the target tenant file —
+// and prepare step, every Kustomization path its template renders, cluster
+// access, and the target tenant file —
 // so a broken prerequisite is caught up front, not discovered
 // mid-migration.
 package doctor
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -57,6 +59,7 @@ const (
 	CheckRepoLayout  CheckName = "repo layout"
 	CheckChartPaths  CheckName = "chart paths"
 	CheckTypes       CheckName = "catalog types"
+	CheckSourcePaths CheckName = "kustomization paths"
 	CheckCluster     CheckName = "cluster access"
 	CheckTenant      CheckName = "tenant file"
 	// CheckMeld is Optional: apps diff --meld is the only thing it gates.
@@ -132,7 +135,11 @@ func Run(ctx context.Context, opts Options) Report {
 	report.Checks = append(report.Checks, narrate(opts.Log, checkRepoLayout(repos)))
 	if cat != nil {
 		report.Checks = append(report.Checks, narrate(opts.Log, checkChartPaths(cat, repos.Charts)))
-		report.Checks = append(report.Checks, narrate(opts.Log, checkTypes(cat, repos.UseCases)))
+		templates, err := catalog.Load(repos.UseCases)
+		report.Checks = append(report.Checks, narrate(opts.Log, checkTypes(cat, templates, err)))
+		if templates != nil {
+			report.Checks = append(report.Checks, narrate(opts.Log, checkSourcePaths(cat, templates, repos)))
+		}
 	}
 	report.Checks = append(report.Checks, checkCluster(ctx, opts))
 	report.Checks = append(report.Checks, narrate(opts.Log, checkTenantFile(repos.Fleet, env.Cluster, env.Tenant)))
@@ -235,10 +242,9 @@ func checkChartPaths(cat *config.Catalog, chartsRoot string) Check {
 // keos-use-cases's templates declare (else no tenant entry could ever
 // render it), and its prepare step, if any, must be one internal/prepare
 // knows — both otherwise only discovered mid-migration.
-func checkTypes(cat *config.Catalog, useCases string) Check {
-	templates, err := catalog.Load(useCases)
-	if err != nil {
-		return Check{Name: CheckTypes, OK: false, Detail: err.Error()}
+func checkTypes(cat *config.Catalog, templates *catalog.Catalog, loadErr error) Check {
+	if loadErr != nil {
+		return Check{Name: CheckTypes, OK: false, Detail: loadErr.Error()}
 	}
 	var problems []string
 	for _, t := range cat.Types {
@@ -253,6 +259,52 @@ func checkTypes(cat *config.Catalog, useCases string) Check {
 		return Check{Name: CheckTypes, OK: false, Detail: strings.Join(problems, "; ")}
 	}
 	return Check{Name: CheckTypes, OK: true, Detail: fmt.Sprintf("%d type(s)", len(cat.Types))}
+}
+
+// templateExprRe matches one << >> template expression in a Kustomization
+// path (a size, a storage type), which checkSourcePaths reads as "any
+// directory".
+var templateExprRe = regexp.MustCompile(`<<.*?>>`)
+
+// checkSourcePaths validates that every Kustomization path a catalog
+// type's component template renders exists in the repository its
+// sourceRef names, with each << >> expression matching any directory. A
+// path that matches nothing means keos-use-cases and keos-apps are out of
+// sync (a component directory renamed in one checkout but not the
+// other), which apps diff/migrate would otherwise only report at render
+// time — after migrate's prepare step already scaled the legacy app down.
+// Paths into any other repository aren't checked.
+func checkSourcePaths(cat *config.Catalog, templates *catalog.Catalog, repos config.RepoPaths) Check {
+	roots := map[string]string{config.RepoApps: repos.Apps, config.RepoUseCases: repos.UseCases}
+	var missing []string
+	seen := map[catalog.SourcePath]bool{}
+	for _, t := range cat.Types {
+		for _, sp := range templates.Schemas[t.Component].SourcePaths {
+			root, ok := roots[sp.Source]
+			if !ok || seen[sp] {
+				continue
+			}
+			seen[sp] = true
+			if !anyDir(filepath.Join(root, templateExprRe.ReplaceAllString(sp.Path, "*"))) {
+				missing = append(missing, fmt.Sprintf("%s: %s not found in %s", t.Component, sp.Path, sp.Source))
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return Check{Name: CheckSourcePaths, OK: false, Detail: strings.Join(missing, "; ") + " (are keos-use-cases and keos-apps both up to date?)"}
+	}
+	return Check{Name: CheckSourcePaths, OK: true, Detail: fmt.Sprintf("%d path(s)", len(seen))}
+}
+
+// anyDir reports whether pattern matches at least one directory.
+func anyDir(pattern string) bool {
+	matches, _ := filepath.Glob(pattern)
+	for _, m := range matches {
+		if info, err := os.Stat(m); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func checkCluster(ctx context.Context, opts Options) Check {

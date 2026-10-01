@@ -217,9 +217,13 @@ func SeedCatalog() Catalog {
 			Rset:      rsetApps,
 			Match:     cctMatch(kindDeployment, "data-marketplace", "agent-default"),
 			Entry:     "governance-{{ .Live.Name }}",
-			Chart:     &Chart{Path: "governance-datamarket-agent"},
-			Prepare:   "prepare-datamarket-agent",
-			Notes:     "prepare-datamarket-agent runs automatically before migrating: suspends the legacy HelmRelease and scales it to 0.",
+			// keos-apps fixes the HelmRelease's name whatever the entry is
+			// called, while the rset names the Kustomization apps-<entry>.
+			Object:        "governance-datamarket-agent",
+			Kustomization: "apps-{{ .Entry }}",
+			Chart:         &Chart{Path: "governance-datamarket-agent"},
+			Prepare:       "prepare-datamarket-agent",
+			Notes:         "prepare-datamarket-agent runs automatically before migrating: suspends the legacy HelmRelease and scales it to 0.",
 			Exclude: []string{
 				"spec.values.datamarketAgent.general.datamarket.datamarketURL",
 				"spec.values.datamarketAgent.environment.appId",

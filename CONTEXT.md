@@ -47,7 +47,8 @@ validation," that's almost certainly the wrong repo.
 ```
 flux stratio version
 flux stratio doctor                            # preflight: binaries (+ optional meld), catalog, environment, repo layout,
-                                                 # chart paths, catalog types vs. templates, cluster, tenant file
+                                                 # chart paths, catalog types vs. templates,
+                                                 # template kustomization paths vs. keos-apps, cluster, tenant file
 
 flux stratio config init --base --cluster --tenant [--charts] [--dir] [--force]
                                                  # write catalog.yaml (19 seeded component types) + environment.yaml

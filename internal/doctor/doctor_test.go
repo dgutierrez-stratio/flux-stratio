@@ -22,7 +22,8 @@ import (
 )
 
 // fixtureTemplate is a minimal keos-use-cases ResourceSet template
-// declaring one component key, "postgres" — enough for checkTypes.
+// declaring one component key, "postgres", whose Kustomization renders
+// fixtureAppPath — enough for checkTypes and checkSourcePaths.
 const fixtureTemplate = `spec:
   resourcesTemplate: |
     <<- range $component := $postgres >>
@@ -31,8 +32,17 @@ const fixtureTemplate = `spec:
     kind: Kustomization
     metadata:
       name: apps-<< get $component "name" >>
+    spec:
+      path: components/postgres/app/overlays/<< $componentSize >>
+      sourceRef:
+        kind: GitRepository
+        name: keos-apps
     <<- end >>
 `
+
+// fixtureAppPath is the keos-apps directory fixtureBase creates for
+// fixtureTemplate's path, with its size expression resolved.
+const fixtureAppPath = "components/postgres/app/overlays/S"
 
 // fixtureBase creates a temp directory with the four sibling repo
 // checkouts (keos-use-cases carrying fixtureTemplate) and, when tenant is
@@ -44,6 +54,9 @@ func fixtureBase(t *testing.T, cluster, tenant string) string {
 		if err := os.MkdirAll(filepath.Join(base, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", fixtureAppPath), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	componentsDir := filepath.Join(base, "keos-use-cases", "apps", "components")
 	if err := os.MkdirAll(componentsDir, 0o755); err != nil {
@@ -129,8 +142,8 @@ func TestRun_AllChecksPass(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("report.OK() = false, want true; error: %v", report.Err())
 	}
-	if len(report.Checks) != 9 {
-		t.Errorf("len(Checks) = %d, want 9", len(report.Checks))
+	if len(report.Checks) != 10 {
+		t.Errorf("len(Checks) = %d, want 10", len(report.Checks))
 	}
 }
 
@@ -145,8 +158,8 @@ func TestRun_MissingBinaries_OtherChecksStillRun(t *testing.T) {
 	if report.OK() {
 		t.Fatal("report.OK() = true, want false")
 	}
-	if len(report.Checks) != 9 {
-		t.Fatalf("len(Checks) = %d, want 9 (downstream checks must still run)", len(report.Checks))
+	if len(report.Checks) != 10 {
+		t.Fatalf("len(Checks) = %d, want 10 (downstream checks must still run)", len(report.Checks))
 	}
 	if report.Checks[0].Name != CheckBinaries || report.Checks[0].OK {
 		t.Errorf("Checks[0] = %+v, want a failing binaries check", report.Checks[0])
@@ -270,6 +283,32 @@ func TestRun_ChartPathMissing(t *testing.T) {
 	}
 	if !strings.Contains(chartCheck.Detail, "postgres") {
 		t.Errorf("chart paths detail %q should mention the type missing its chart", chartCheck.Detail)
+	}
+}
+
+func TestRun_KustomizationPathMissing(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	opts := baseOptions()
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
+	// keos-apps renamed the component directory; keos-use-cases still
+	// renders the old path.
+	if err := os.RemoveAll(filepath.Join(base, "keos-apps", "components", "postgres")); err != nil {
+		t.Fatal(err)
+	}
+
+	report := Run(context.Background(), opts)
+
+	if report.OK() {
+		t.Fatal("report.OK() = true, want false")
+	}
+	var pathsCheck Check
+	for _, c := range report.Checks {
+		if c.Name == CheckSourcePaths {
+			pathsCheck = c
+		}
+	}
+	if pathsCheck.OK || !strings.Contains(pathsCheck.Detail, "components/postgres/app/overlays/<< $componentSize >>") {
+		t.Errorf("kustomization paths check = %+v, want it to name the missing path", pathsCheck)
 	}
 }
 

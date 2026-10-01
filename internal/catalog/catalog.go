@@ -99,6 +99,18 @@ type Schema struct {
 	// component whose Kustomization deploys an operator custom resource
 	// directly, with no chart-shaped path).
 	ChartName string
+	// SourcePaths is every Kustomization's spec.path the template renders
+	// for this component, with the GitRepository it's relative to.
+	SourcePaths []SourcePath
+}
+
+// SourcePath is one Kustomization's spec.path, as written in the template
+// (still carrying its << >> expressions, e.g.
+// "components/discovery/app/overlays/<< $componentSize >>"), and the name
+// of the GitRepository (sourceRef) it resolves against.
+type SourcePath struct {
+	Source string
+	Path   string
 }
 
 // isEmpty reports whether s carries no extracted facts at all — used to

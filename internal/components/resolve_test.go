@@ -508,3 +508,27 @@ func TestResolve_DgAgentObjectIsLiveNameNotEntry(t *testing.T) {
 		t.Errorf("entry/object/kustomization = %q/%q/%q, want dg-agent/dg-hdfs-agent/apps-dg-agent", app.Entry, app.Object, app.Kustomization)
 	}
 }
+
+func TestResolve_DatamarketAgentObjectIsFixedWhateverTheEntry(t *testing.T) {
+	cases := []struct {
+		as, entry string
+	}{
+		{"", "governance-datamarket-agent"},
+		// A tenant file that kept the legacy entry name.
+		{"datamarket-agent/datamarket-agent", "datamarket-agent"},
+	}
+	for _, c := range cases {
+		t.Run(c.entry, func(t *testing.T) {
+			opts := baseOptions(t)
+			opts.Doc = nil
+			opts.As = c.as
+			app, err := Resolve(opts, "datamarket-agent")
+			if err != nil {
+				t.Fatalf("Resolve returned error: %v", err)
+			}
+			if app.Entry != c.entry || app.Object != "governance-datamarket-agent" || app.Kustomization != "apps-"+c.entry {
+				t.Errorf("entry/object/kustomization = %q/%q/%q, want %s/governance-datamarket-agent/apps-%s", app.Entry, app.Object, app.Kustomization, c.entry, c.entry)
+			}
+		})
+	}
+}

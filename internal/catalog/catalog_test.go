@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,6 +40,39 @@ func TestLoad_Schemas(t *testing.T) {
 	}
 	if len(rocket.Kustomizations) != 2 {
 		t.Fatalf("rocket.Kustomizations = %+v, want [default, -postrequisites]", rocket.Kustomizations)
+	}
+}
+
+func TestLoad_SourcePaths(t *testing.T) {
+	cat := loadBasic(t)
+
+	got := cat.Schemas["postgres"].SourcePaths
+	want := []SourcePath{
+		{Source: "keos-apps", Path: "components/postgres/app/overlays/<< $componentSize >>"},
+		{Source: "keos-apps", Path: "./components/gosec-agent/app/overlays/postgres/<< $componentSize >>"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("postgres.SourcePaths = %+v, want %+v", got, want)
+	}
+}
+
+func TestExtractSourcePaths_SkipsPathWithoutSourceRef(t *testing.T) {
+	block := `---
+kind: HTTPRoute
+spec:
+  path: /health
+---
+kind: Kustomization
+spec:
+  path: components/discovery/app/overlays/<< $componentSize >>
+  sourceRef:
+    name: keos-apps
+    kind: GitRepository
+`
+	got := extractSourcePaths(block)
+	want := []SourcePath{{Source: "keos-apps", Path: "components/discovery/app/overlays/<< $componentSize >>"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("extractSourcePaths = %+v, want %+v", got, want)
 	}
 }
 

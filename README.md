@@ -144,7 +144,7 @@ piping or redirecting a command's output never captures progress noise along wit
 | Command | Flags | Description |
 |---|---|---|
 | `flux stratio version` | | Print the flux-stratio version |
-| `flux stratio doctor` | | Check binaries, catalog, environment, repo layout, chart paths, catalog types, cluster access and the tenant file are all in order |
+| `flux stratio doctor` | | Check binaries, catalog, environment, repo layout, chart paths, catalog types, the kustomization paths their templates render, cluster access and the tenant file are all in order |
 | `flux stratio config init` | `--dir`, `--force` | Write `catalog.yaml` (seeded with the known Stratio component types) and `environment.yaml` |
 | `flux stratio tenant import` | `--size`, `--output`, `--force` | Scan a live, not-yet-migrated cluster and render a tenant `ResourceSetInputProvider` skeleton |
 | `flux stratio apps diff <name>` | `--baseline`, `--drift`, `--view`, `--as` | Pre-migration: compare desired state against live (or a backup, with `--baseline`). Post-migration: `--drift` compares live right now directly against a backup, no GitOps rendering. `--view unified\|patch\|meld` picks how it's shown |
