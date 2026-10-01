@@ -65,7 +65,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		Before:            before,
 		After:             after,
 		UnmappedDiffs:     result.UnmappedDiffs,
-		LiveOnlyCount:     result.LiveOnlyCount,
+		LiveOnly:          result.LiveOnly,
 		RenderedOnlyCount: result.RenderedOnlyCount,
 		MissingWorkloads:  missing,
 		FluxManagedBy:     managedBy,

@@ -149,7 +149,7 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	}
 	warnFluxManaged(logger, app, planned.FluxManagedBy)
 	review := chartReview{
-		Unmapped: planned.UnmappedDiffs, Missing: planned.MissingWorkloads, LiveOnly: planned.LiveOnlyCount,
+		Unmapped: planned.UnmappedDiffs, Missing: planned.MissingWorkloads, LiveOnly: planned.LiveOnly,
 		Source: liveSource(resolvedBaseline),
 	}
 	reportChartReview(logger, review)

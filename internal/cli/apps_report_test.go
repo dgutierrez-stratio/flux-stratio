@@ -24,9 +24,12 @@ func TestReportChartReview(t *testing.T) {
 				Candidates: []string{"cluster.domain"}, Shared: []string{"PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN=eosdev.int"}},
 			{Name: "HARDCODED", Rendered: "1", Live: "2", Reason: diff.UnmappedInline},
 		},
-		Missing:  []string{"Deployment stratio-genai/genai-ui"},
-		LiveOnly: 3,
-		Source:   "backup",
+		Missing: []string{"Deployment stratio-genai/genai-ui"},
+		LiveOnly: []diff.LiveOnlyVar{
+			{Workload: "rocket", Name: "LEGACY_FLAG", Live: "true"},
+			{Name: "EXTRA_JARS", Live: "a.jar,b.jar"},
+		},
+		Source: "backup",
 	})
 	out := buf.String()
 	for _, want := range []string{
@@ -36,7 +39,9 @@ func TestReportChartReview(t *testing.T) {
 		`HARDCODED: rendered "1", live "2" — set inline in the container env`,
 		`VAULT_ROLE: rendered "genai_genai-ui", live "legacy" — ambiguous between genaiApi.general.identity.approlename, genaiUi.general.identity.approlename`,
 		`rocket/TENANT: rendered "a", live "b" — conflicting live values for rocketCommon.tenant`,
-		"3 variable(s) in the backup aren't rendered by the chart",
+		"2 variable(s) in the backup aren't rendered by the chart",
+		`rocket/LEGACY_FLAG: live "true"`,
+		`EXTRA_JARS: live "a.jar,b.jar"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

@@ -88,7 +88,7 @@ type Result struct {
 	// ""); they stay at their zero value in manifest mode. See
 	// diff.ChartDiffResult for the first three.
 	UnmappedDiffs     []diff.UnmappedDiff
-	LiveOnlyCount     int
+	LiveOnly          []diff.LiveOnlyVar
 	RenderedOnlyCount int
 	// MissingWorkloads names ("Kind namespace/name") the workloads the
 	// chart renders that have no live counterpart to compare — not found

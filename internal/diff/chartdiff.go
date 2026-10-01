@@ -32,6 +32,14 @@ const (
 	UnmappedInline UnmappedReason = "set inline in the container env"
 )
 
+// LiveOnlyVar is a live variable the chart doesn't render.
+type LiveOnlyVar struct {
+	// Workload is the rendered workload the live side was compared
+	// against, or "" for a flat live side (see UnmappedDiff.Workload).
+	Workload   string
+	Name, Live string
+}
+
 // UnmappedDiff is a variable whose rendered and live values differ but
 // which ChartDiff could not turn into a patch value — reported for human
 // review rather than silently dropped or guessed.
@@ -106,10 +114,11 @@ type ChartDiffResult struct {
 	// UnmappedDiffs lists variables that differ but couldn't be patched
 	// automatically, sorted by workload and name.
 	UnmappedDiffs []UnmappedDiff
-	// LiveOnlyCount is how many variables exist live but not in the
-	// chart's rendered output — informational: these values will be lost
-	// after migration, since nothing in the chart can carry them forward.
-	LiveOnlyCount int
+	// LiveOnly are the variables that exist live but not in the chart's
+	// rendered output, by name within each compared workload — these values will be
+	// lost after migration, since nothing in the chart can carry them
+	// forward.
+	LiveOnly []LiveOnlyVar
 	// RenderedOnlyCount is how many variables the chart renders that have
 	// no live counterpart (e.g. new defaults introduced since the app was
 	// last deployed).
@@ -200,7 +209,7 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 			case !hasLive:
 				result.RenderedOnlyCount++
 			case !hasRendered:
-				result.LiveOnlyCount++
+				result.LiveOnly = append(result.LiveOnly, LiveOnlyVar{Workload: workload, Name: name, Live: liveVal})
 			case isPlaceholder(rv.value) || isPlaceholder(liveVal):
 				// An unresolvable placeholder on either side can't be diffed.
 			case rv.value == liveVal:

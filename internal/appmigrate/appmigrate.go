@@ -55,10 +55,10 @@ type Result struct {
 	// edit, for a diff preview (apps migrate --dry-run) via
 	// internal/ui.FileDiff. Equal when Migrated is false.
 	Before, After string
-	// UnmappedDiffs, LiveOnlyCount and MissingWorkloads are what a
+	// UnmappedDiffs, LiveOnly and MissingWorkloads are what a
 	// chart-mode diff couldn't carry into the patch — see appdiff.Result.
 	UnmappedDiffs    []diff.UnmappedDiff
-	LiveOnlyCount    int
+	LiveOnly         []diff.LiveOnlyVar
 	MissingWorkloads []string
 	// UnresolvedDeps are the app's tenant-file dependencies naming an
 	// entry the tenant file doesn't declare: migrating writes nothing
@@ -129,7 +129,7 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	result := &Result{
 		UpToDate: diffResult.UpToDate, ObsoletePatches: diffResult.ObsoletePatches, FluxManagedBy: diffResult.FluxManagedBy,
 		Before: string(before), After: string(before),
-		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnlyCount: diffResult.LiveOnlyCount, MissingWorkloads: diffResult.MissingWorkloads,
+		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnly: diffResult.LiveOnly, MissingWorkloads: diffResult.MissingWorkloads,
 	}
 	if result.UnresolvedDeps, err = unresolvedDeps(doc, opts.Catalog, opts.App); err != nil {
 		return nil, nil, "", err

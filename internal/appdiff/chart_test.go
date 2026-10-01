@@ -180,8 +180,8 @@ func TestDiff_ChartMode_UnmappedAndCountsPropagate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Diff returned error: %v", err)
 	}
-	if result.LiveOnlyCount != 1 {
-		t.Errorf("LiveOnlyCount = %d, want 1", result.LiveOnlyCount)
+	if len(result.LiveOnly) != 1 || result.LiveOnly[0].Name != "LIVE_ONLY_VAR" || result.LiveOnly[0].Live != "x" {
+		t.Errorf("LiveOnly = %+v, want LIVE_ONLY_VAR=x", result.LiveOnly)
 	}
 }
 

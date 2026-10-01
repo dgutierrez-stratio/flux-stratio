@@ -2,6 +2,7 @@ package diff
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -93,8 +94,8 @@ func TestChartDiff_LiveOnlyAndRenderedOnlyCounted(t *testing.T) {
 		Live: []LiveWorkloadEnv{liveFor(docs, "app", map[string]string{"LIVE_ONLY": "y"})},
 	})
 
-	if result.LiveOnlyCount != 1 {
-		t.Errorf("LiveOnlyCount = %d, want 1", result.LiveOnlyCount)
+	if want := []LiveOnlyVar{{Workload: "app", Name: "LIVE_ONLY", Live: "y"}}; !slices.Equal(result.LiveOnly, want) {
+		t.Errorf("LiveOnly = %+v, want %+v", result.LiveOnly, want)
 	}
 	if result.RenderedOnlyCount != 1 {
 		t.Errorf("RenderedOnlyCount = %d, want 1", result.RenderedOnlyCount)

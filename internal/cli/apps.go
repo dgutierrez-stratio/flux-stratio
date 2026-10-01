@@ -306,7 +306,7 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 
 	warnFluxManaged(logger, app, result.FluxManagedBy)
 	review := chartReview{
-		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnlyCount,
+		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly,
 		Source: liveSource(resolvedBaseline),
 	}
 	reportChartReview(logger, review)
@@ -425,15 +425,15 @@ type chartReview struct {
 	Unmapped []diff.UnmappedDiff
 	// Missing names the rendered workloads with no live side to compare.
 	Missing []string
-	// LiveOnly counts live variables the chart doesn't render.
-	LiveOnly int
+	// LiveOnly are the live variables the chart doesn't render.
+	LiveOnly []diff.LiveOnlyVar
 	// Source names the live side: "live cluster" or "backup".
 	Source string
 }
 
 // hasWarnings reports whether reportChartReview prints anything for r.
 func (r chartReview) hasWarnings() bool {
-	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || r.LiveOnly > 0
+	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || len(r.LiveOnly) > 0
 }
 
 // reportChartReview warns about everything a chart-mode diff/migrate
@@ -451,8 +451,15 @@ func reportChartReview(logger *log.Logger, r chartReview) {
 			logger.Warningf("  %s", describeUnmapped(u))
 		}
 	}
-	if r.LiveOnly > 0 {
-		logger.Warningf("%d variable(s) in the %s aren't rendered by the chart: their values will be lost after migration", r.LiveOnly, r.Source)
+	if len(r.LiveOnly) > 0 {
+		logger.Warningf("%d variable(s) in the %s aren't rendered by the chart: their values will be lost after migration:", len(r.LiveOnly), r.Source)
+		for _, v := range r.LiveOnly {
+			name := v.Name
+			if v.Workload != "" {
+				name = v.Workload + "/" + v.Name
+			}
+			logger.Warningf("  %s: live %q", name, v.Live)
+		}
 	}
 }
 
