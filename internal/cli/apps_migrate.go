@@ -137,12 +137,6 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		}
 	}
 
-	if app.Prepare != "" {
-		if err := ensurePrepared(cmd, app, tenant, c, execer, logger, dryRun, yes); err != nil {
-			return err
-		}
-	}
-
 	opts := appmigrate.Options{
 		Repos: repos, Cluster: cluster, Tenant: tenant, App: app, Catalog: cat,
 		Runner: runner.Exec{}, Client: c, Baseline: resolvedBaseline, Log: logger,
@@ -160,9 +154,18 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	}
 	reportChartReview(logger, review)
 	reportUnresolvedDeps(logger, app, planned.UnresolvedDeps)
+	// The patch is planned before app's prepare step runs, and saved from
+	// that plan afterwards: a prepare step may delete the very live
+	// workload the patch is read from (prepare-dlc).
+	prepared := func() error {
+		if app.Prepare == "" {
+			return nil
+		}
+		return ensurePrepared(cmd, app, tenant, c, execer, logger, dryRun, yes)
+	}
 	if !planned.Migrated {
 		reportNoChange(logger, planned.UpToDate, planned.ObsoletePatches, review)
-		return nil
+		return prepared()
 	}
 
 	warned := planned.FluxManagedBy != "" || review.hasWarnings() || len(planned.UnresolvedDeps) > 0
@@ -175,6 +178,9 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	}
 
 	if dryRun {
+		if err := prepared(); err != nil {
+			return err
+		}
 		logger.Successf("dry run: would migrate %q", app.Name)
 		return nil
 	}
@@ -190,13 +196,13 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		}
 	}
 
-	result, err := appmigrate.Apply(cmd.Context(), opts)
-	if err != nil {
+	if err := prepared(); err != nil {
 		return err
 	}
-	if result.Migrated {
-		logger.Successf("migrated %q", app.Name)
+	if err := planned.Save(); err != nil {
+		return err
 	}
+	logger.Successf("migrated %q", app.Name)
 	return nil
 }
 

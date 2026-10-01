@@ -182,7 +182,8 @@ from the templates and fails loudly on a mismatch rather than writing a patch in
 ## Prepare
 
 Some components need a one-time precondition satisfied before they can be safely migrated — named
-here, run automatically as the first stage of `apps migrate` for that instance.
+here, run automatically by `apps migrate` for that instance once its patch is planned and confirmed
+(the patch is computed first, since a step may delete the live workload it's read from).
 
 | Step | What it does | Automated? |
 |---|---|---|

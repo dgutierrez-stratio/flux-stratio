@@ -288,6 +288,58 @@ func tenantPgClusterPatch(t *testing.T, tenantPath string) string {
 // That the base is rendered without the existing patch is
 // internal/render's TestRender_StripsTheObjectKindsOwnPatches (the fake
 // flux build here doesn't apply patches at all).
+// TestPlan_SaveWritesWithoutReadingLiveAgain is apps migrate's order for
+// a destructive prepare step (prepare-dlc): plan while the legacy object
+// is still live, delete it, then save the planned patch.
+func TestPlan_SaveWritesWithoutReadingLiveAgain(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	cat := loadCatalog(t, base)
+	tenantPath := tenantfile.Path(filepath.Join(base, "keos-fleet"), "eosdev", "stratio")
+
+	liveObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
+		"metadata": map[string]any{"name": "psql", "namespace": "stratio-datastores"},
+		"spec":     map[string]any{"instances": int64(5)},
+	}}
+	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(liveObj).Build()
+	opts := Options{
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
+		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
+			"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
+		}},
+		Client: c,
+		Log:    log.New(io.Discard, false),
+	}
+
+	original, err := os.ReadFile(tenantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Plan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if untouched, err := os.ReadFile(tenantPath); err != nil || string(untouched) != string(original) {
+		t.Fatalf("Plan wrote the tenant file (err %v)", err)
+	}
+	if err := c.Delete(context.Background(), liveObj); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := result.Save(); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	written, err := os.ReadFile(tenantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != result.After || !strings.Contains(string(written), "instances: 5") {
+		t.Errorf("tenant file after Save:\n%s\nwant the planned After:\n%s", written, result.After)
+	}
+}
+
 func TestApply_RerunKeepsWhatTheExistingPatchCarried(t *testing.T) {
 	base := fixtureBase(t, "eosdev", "stratio")
 	cat := loadCatalog(t, base)

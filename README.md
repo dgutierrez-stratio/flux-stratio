@@ -149,7 +149,7 @@ piping or redirecting a command's output never captures progress noise along wit
 | `flux stratio tenant import` | `--size`, `--output`, `--force` | Scan a live, not-yet-migrated cluster and render a tenant `ResourceSetInputProvider` skeleton |
 | `flux stratio apps diff <name>` | `--baseline`, `--drift`, `--view`, `--as` | Pre-migration: compare desired state against live (or a backup, with `--baseline`). Post-migration: `--drift` compares live right now directly against a backup, no GitOps rendering. `--view unified\|patch\|meld` picks how it's shown |
 | `flux stratio apps backup <name> \| --catalog \| --all` | `--dir`, `--as` | Capture an app's live legacy state to disk (`--catalog`: every live object a catalog type selects; `--all`: that plus every other live object the cluster scan finds, unfiltered) |
-| `flux stratio apps migrate <name> \| --all` | `--dry-run`, `-y`/`--yes`, `--continue-on-error`, `--as`, `--baseline`, `--dir` | Diff an app (running its declared prepare step first, if any) and splice the resulting patch into the tenant file. `--baseline` computes the patch from a backup instead of live — for a component Flux already reconciled unpatched |
+| `flux stratio apps migrate <name> \| --all` | `--dry-run`, `-y`/`--yes`, `--continue-on-error`, `--as`, `--baseline`, `--dir` | Diff an app, run its declared prepare step (if any), and splice the resulting patch into the tenant file. `--baseline` computes the patch from a backup instead of live — for a component Flux already reconciled unpatched |
 
 Persistent flags on every command: `--config`, `--env-config`, `--base`, `--repo`, `--cluster`, `--tenant`, `--kubeconfig`,
 `--kube-context`, `-v`/`--verbose`.
@@ -242,7 +242,9 @@ non-default one. See [`docs/migration-runbook.md`](docs/migration-runbook.md) fo
 
 An app whose config declares a `prepare` step (see
 [`docs/config-reference.md`](docs/config-reference.md)) has that precondition checked — and, for an
-automated step, satisfied — as the first stage of `apps migrate`, before any diff or patch. An
+automated step, satisfied — by `apps migrate` after it has planned the patch and you've confirmed it,
+and before that planned patch is written: the patch is computed first because a step may delete the
+very live workload it's read from (`prepare-dlc` deletes the legacy DLC Deployment). An
 automated step first lists every operation it would perform (on stderr) and the live manifest of each
 object it acts on (on stdout), then asks before running exactly those; `--dry-run` stops after the
 list. A step that runs a database query (`prepare-genai`'s Postgres data rewrite) finds its target

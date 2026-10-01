@@ -64,30 +64,48 @@ type Result struct {
 	// entry the tenant file doesn't declare: migrating writes nothing
 	// wrong itself, but Flux won't reconcile the app until they're fixed.
 	UnresolvedDeps []tenantfile.UnresolvedDependency
+
+	// doc and tenantPath are the edited tenant file and where it's
+	// saved, for Save.
+	doc        *tenantfile.Doc
+	tenantPath string
 }
 
 // Plan computes what migrating opts.App would do, without writing
 // anything — the basis for apps migrate --dry-run and for previewing a
 // change before an interactive confirmation.
 func Plan(ctx context.Context, opts Options) (*Result, error) {
-	result, _, _, err := plan(ctx, opts)
-	return result, err
+	result, doc, tenantPath, err := plan(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	result.doc, result.tenantPath = doc, tenantPath
+	return result, nil
 }
 
 // Apply computes the same plan as Plan and, if there is a difference,
 // writes it to the tenant file.
 func Apply(ctx context.Context, opts Options) (*Result, error) {
-	result, doc, tenantPath, err := plan(ctx, opts)
+	result, err := Plan(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if !result.Migrated {
-		return result, nil
-	}
-	if err := doc.Save(tenantPath); err != nil {
+	if err := result.Save(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+// Save writes a planned result's edit to the tenant file, without
+// reading live state again: apps migrate plans the patch before an app's
+// prepare step runs, since a prepare step may delete the very live
+// workload the patch is computed from (prepare-dlc). Nothing to write
+// when the plan found no change.
+func (r *Result) Save() error {
+	if !r.Migrated {
+		return nil
+	}
+	return r.doc.Save(r.tenantPath)
 }
 
 func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, error) {

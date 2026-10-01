@@ -64,7 +64,7 @@ flux stratio apps diff <name> [--baseline <path>] [--drift <path>] [--view unifi
                                                  # --drift: post-migration (live now vs. a backup, no GitOps render)
 
 flux stratio apps migrate <name> | --all [--dry-run] [-y/--yes] [--continue-on-error] [--as] [--baseline <path>] [--dir]
-                                                 # diff (running any declared prepare step first), then splice the patch
+                                                 # diff, run any declared prepare step, then splice the planned patch
 ```
 
 `<name>` is a live object's name (`psql-agent`) or an instance's derived GitOps object name
@@ -290,8 +290,9 @@ convention, that repo is the reference:
 - **`internal/prepare`** — the four ported one-time preconditions (`prepare-datamarket-agent`,
   `prepare-datarest`, `prepare-dlc`, `prepare-genai`). An automated step's `Plan` reads live state
   and returns `[]Operation`, each carrying the live object it acts on (empty = already satisfied).
-  `ensurePrepared` (in `internal/cli/apps_migrate.go`, the only caller, and the first stage of
-  `apps migrate`) prints those operations and their manifests, stops there under `--dry-run`, and
+  `ensurePrepared` (in `internal/cli/apps_migrate.go`, the only caller) runs after `apps migrate`
+  has planned and confirmed the patch, which is then saved from that plan (`appmigrate.Result.Save`)
+  rather than re-read — `prepare-dlc` deletes the very Deployment the patch is read from. It prints those operations and their manifests, stops there under `--dry-run`, and
   otherwise applies exactly them. Targets are found by CCT's `cct.stratio.com/application_id` label
   (`<App.LiveName()>.<App.LiveNamespace()>`), skipping Flux-labelled objects; there are no
   hardcoded names, since the Python client's hardcoded DLC Ingress name was wrong on eosdev. Every

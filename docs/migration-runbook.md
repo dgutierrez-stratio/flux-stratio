@@ -91,7 +91,9 @@ against production. Run `flux stratio apps migrate <name> --dry-run` first: it l
 the step would perform and prints the live manifest of each object it would touch, without
 changing anything. `flux stratio apps migrate` then asks before running exactly those, but a step like
 `prepare-datamarket-agent` suspends and scales down a live workload, which is disruptive by nature
-even though it's exactly what needs to happen before cutover. See
+even though it's exactly what needs to happen before cutover. The step runs only after you've
+confirmed the patch, which was computed while the legacy objects were still live, so a step that
+deletes them (`prepare-dlc`) never leaves the patch with nothing to read from. See
 [`config-reference.md`](config-reference.md#prepare) for what each of the four steps does.
 
 ## 5. Back up before touching anything
