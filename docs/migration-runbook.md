@@ -177,7 +177,11 @@ type/entry questions: anything that would need one fails naming `--as` instead, 
 interactively (or `--dry-run`) first. By default, the run stops at the
 first app that fails, so a real problem doesn't get masked by nine "successful" migrations after
 it; pass `--continue-on-error` once you're confident enough failures are isolated per-app to be
-worth pushing through.
+worth pushing through. Even then, an app whose dependency failed or was declined is skipped: Flux
+would hold it back behind that dependency anyway. With `--yes`, an app whose diff has warnings stops
+too, unless `--accept-warnings` says to carry on regardless. Differences an app's `exclude` keeps out of
+the patch on purpose are listed as `excluded by the catalog: …` and are not warnings, so they never
+stop `--yes`.
 
 ## 8. Verify
 

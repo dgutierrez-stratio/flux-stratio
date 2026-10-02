@@ -47,7 +47,8 @@ validation," that's almost certainly the wrong repo.
 ```
 flux stratio version
 flux stratio doctor                            # preflight: binaries (+ optional meld), catalog, environment, repo layout,
-                                                 # chart paths, catalog types vs. templates,
+                                                 # chart paths, exclude paths vs. chart values (warning only),
+                                                 # catalog types vs. templates,
                                                  # template kustomization paths vs. keos-apps, cluster, tenant file
 
 flux stratio config init --base --cluster --tenant [--charts] [--dir] [--force]
@@ -261,10 +262,14 @@ convention, that repo is the reference:
   already-classified object; `Index.Objects()` feeds `internal/components`; `Index.Names()` is the
   union across all four, used by `apps backup --all`.
 - **`internal/backup`** — captures an app's live state to
-  `<dir>/<App.ID>/<UTC-timestamp>/{cr.yaml | deployment.yaml+env-vars.env+env-vars.<kind>.<name>.env
-  per workload | helmrelease.yaml+values.yaml}` (the per-workload env files are what `--baseline`
-  and drift compare when present; the merged `env-vars.env` is the backup marker and the fallback
-  for older backups), dispatching on `App.ChartPath` with a graceful fallback cascade
+  `<dir>/<App.ID>/<UTC-timestamp>/{cr.yaml | deployment.yaml (the first workload; each further one is
+  `workload.<kind>.<name>.yaml`)+env-vars.env+env-vars.<kind>.<name>.env per workload |
+  helmrelease.yaml+values.yaml}` (the per-workload env files are what `--baseline`
+  and drift compare when present — drift also compares each workload manifest's `.spec`, matched by
+  the kind/name the manifest holds; the merged `env-vars.env` is the backup marker and the fallback
+  for older backups; env files are `envvars.EncodeFile`'s format, which quotes multi-line values;
+  a capture is written to `.partial-<timestamp>` and renamed into place only once complete),
+  dispatching on `App.ChartPath` with a graceful fallback cascade
   (mirroring the Python client's own CR → Deployment → HelmRelease-only priority) when the live
   object isn't backed by the expected kind — logging a warning, not failing, since `apps backup
   --all`/`--catalog` must not abort on one app's shape surprise. Chart-mode capture sources `helm
@@ -273,8 +278,11 @@ convention, that repo is the reference:
   A classified app (`App.Live` set) is captured from its exact live object (`Index.Get`) before any
   name-only cascade — the cascade alone once captured a same-named `PgDatabase` as the genai/rocket
   apps. `DiscoveredApps(catalogApps, idx)` builds the app list for `--all`: the classified catalog
-  instances, plus a minimal synthetic `App{ID, Name, Object}` for every live name none of their
-  `Live` refs covers. `ResolveBaseline(root, appID)` is the shared
+  instances, plus a minimal synthetic `App{ID, Name, Object, Live}` (its one object pinned) for every
+  live *object* — exact kind, namespace and name — none of their `Live` refs covers (a same-named
+  PgDatabase, or the same name in another namespace, is not covered; a Kustomization or a HelmRelease
+  next to its workload yields no app of its own). When a chart can't be templated, or renders no
+  live workload, chart-mode capture falls back to the classified workloads. `ResolveBaseline(root, appID)` is the shared
   auto-locate logic both `apps diff --baseline` and `--drift` use.
 - **`internal/drift`** — answers a genuinely different question than `internal/appdiff`: not "what
   would migrating this app change" (desired vs. live-ish), but "has this app's live state changed
@@ -300,9 +308,9 @@ convention, that repo is the reference:
   verify, has a `Query` (`DBQuery`): `RunQuery` finds the tenant's PgCluster primary pod by label
   (`pgcluster.stratio.com/pgcluster-name`/`-role`, the same idiom `legacyObjects` uses for CCT's app
   id) and execs the SQL there via `kubeclient.Execer` (a thin `client-go/tools/remotecommand`
-  wrapper — the Go equivalent of `kubectl exec`, avoiding a shell-out). Its confirmation shows the
-  real captured output and is never skipped by `--yes`, though `--dry-run` only resolves the pod and
-  shows the SQL, asking nothing. A future component's own manual DB rewrite reuses this shape
+  wrapper — the Go equivalent of `kubectl exec`, avoiding a shell-out). It asks before running (the
+  SQL and the pod shown) and again over the real captured output, neither skipped by `--yes`;
+  `--dry-run` only resolves the pod and shows the SQL, asking nothing. A future component's own manual DB rewrite reuses this shape
   (a new `DBQuery` value) rather than one-off exec code.
 - **`internal/tenantimport`** — `tenant import`'s live-cluster scan (CRD instances → Deployments →
   HelmReleases, three passes feeding one `Components` map), fixpoint-expanding mandatory
@@ -334,7 +342,15 @@ convention, that repo is the reference:
   carries exactly this patch". Running it twice converges; it never trusts "I already migrated
   this." `--dry-run` on every mutating command; `--yes` skips confirmation
   (blank line/EOF both mean "no," ported from flux-keos's own `Confirm` semantics) — except
-  `prepare-genai`'s confirmation, which `--yes` never skips.
+  `prepare-genai`'s two confirmations, which `--yes` never answers, and an app's warnings, which
+  stop it under `--yes` unless `--accept-warnings`. A declined prompt is `errNotConfirmed`: the app
+  isn't migrated, `--all` skips its dependents, and the exit status says so.
+- **Secrets never leave `internal/envvars`.** A variable read from a Secret resolves to a
+  `<secret:NAME/KEY>` placeholder (the same one a chart's rendered `secretKeyRef` gets), so no diff,
+  warning, env file or patch can print, store or write a credential; an unresolvable reference is an
+  `<unresolved:...>` placeholder, never `""`. That covers *resolved env vars* only: the raw manifests
+  a backup stores (`deployment.yaml`, `cr.yaml`, `values.yaml`) are dumped as-is and keep any
+  credential written inline in them, plus `managedFields`. Hence backups are written 0700/0600.
 - **JSON6902 vs. strategic-merge-patch is auto-detected, never a flag.** See
   `internal/diff.NeedsJSON6902`'s doc comment for the exact rule.
 
@@ -364,6 +380,15 @@ being tested in a feature package first.
 | Rendered vs. live numeric decoding used different conventions (float64 vs int64), causing spurious integer diffs | `internal/yamldocs.Decode`'s `*Unstructured` unmarshal target (§6) |
 | `apps backup` (this plugin's own earlier version) required the tenant file to declare a component before it could find the live object — backwards for a pre-migration capture tool | `internal/discovery`, decoupling backup/drift from any render (this was a regression introduced *during* the Go port itself, not inherited from Python — see git history around "restore legacy backup behavior" for the full story) |
 | `prepare-genai`'s own SQL (`internal/prepare/step_genai.go`), never actually executed before it was automated, connected to the wrong database (`psql`, the cluster's own database) — genai's schemas live in its own `genai` PgDatabase. Only found by running it for real against eosdev: both statements failed with "relation ... does not exist" | `Command`'s database arg fixed to `genai`; the DELETE for `genai-gateway` (a deprecated component superseded by litellm) is also now guarded with `to_regclass(...) IS NOT NULL` — a migration whose genai already moved to litellm has no such schema at all, and that's not an error |
+| Manifest mode renders without resolving `substituteFrom` (`cmd_patch.py:37`; only chart mode passes `resolve_substitute_from=True`), so `${KERBEROS_REALM}` rendered blank and always diffed — a spurious hdfs `/spec/security/kerberos/realm` op | `internal/render/substitute.go` resolves it, so nothing is patched when live already matches |
+| One flat env-name→`.Values`-path map, last write wins, with a flat live merge: a variable of an unmounted ConfigMap (rocket's `rocketCatalog.*`) became a no-op, genai api/ui `SSO_HOST`/`INGRESS_PROXY_TIMEOUT`/`VIRTUAL_HOST` vanished, and genai-ui's Vault role was written into genai-api's path | Per-workload attribution (`diff.AttributeConfigMaps`); see `docs/TASK-multi-workload-env-var-collision.md` |
+| No inline-container-env detection: rocket's `rocketServer.environment.workers.*` is overridden by the keos-apps size overlay's inline `SPARTA_BOOTSTRAP_*` env, so the patch had no effect | The inline env list is patched (`internal/diff/inline.go`) |
+| Appears to render *with* the tenant file's existing patch and replace the whole patch by the residual (`cmd_steps.py:331-332`; looks like a second-pass run, unconfirmed) | Renders without it; the patch is always the whole patch |
+| Excludes `rocketCommon.settings.governanceIntegration.*`, which isn't where the chart defines them (`rocketServer.settings…`), so the legacy URLs were patched in | Correct paths in the seed; `doctor` checks every exclude path exists in its chart |
+| `cluster.domain: eosdev.int` leaves `KERBEROS_REALM_NAME` in the wrong case (the realm is case-sensitive: live `EOSDEV.INT`), as one path feeds it and `PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN` | `cluster.domain: EOSDEV.INT` with the Pekko variable pinned inline (`internal/diff/inline.go`) |
+| Drops a live env var that has no `value` (`backup.py:237`), so a blank `mutualTlsCnWhitelist` / `translateLitellmModel` never reached the patch | Maps it to `""` (`internal/envvars`); the patch keeps live's blank |
+| Writes a gosec agent's patch to the parent entry's top-level `patches` (`cmd_steps.py:303,328-331`), which matches nothing: the parent's Kustomization renders no agent HelmRelease | Written to `config.agent.patches`; one the legacy client already left at the parent's `patches` is reported by `apps migrate`, never deleted |
+| A difference hidden by an app's `exclude` (genai's Vault roles) vanished without a word | Listed as `excluded by the catalog: …` — information, not a warning, so `--yes` isn't stopped |
 
 ## 10. Known rough edges / good first tasks
 

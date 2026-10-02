@@ -55,7 +55,7 @@ It never runs `git` itself: it edits the tenant file in place; committing and pu
 # charts repo; add --repo <name>=<path> for any checked out elsewhere (e.g. --repo charts=<worktree>).
 flux stratio config init --base /path/to/gitops --cluster eosdev --tenant stratio
 
-# Confirm binaries, catalog, environment, repo layout, cluster access and the tenant file are all in order
+# Confirm binaries, catalog, environment, repo layout, cluster access, that the repository checkouts are at the revisions the cluster runs (a warning), and the tenant file are all in order
 flux stratio doctor
 
 # No tenant file yet? Scan the live, not-yet-migrated cluster for one
@@ -144,12 +144,12 @@ piping or redirecting a command's output never captures progress noise along wit
 | Command | Flags | Description |
 |---|---|---|
 | `flux stratio version` | | Print the flux-stratio version |
-| `flux stratio doctor` | | Check binaries, catalog, environment, repo layout, chart paths, catalog types, the kustomization paths their templates render, cluster access and the tenant file are all in order |
+| `flux stratio doctor` | | Check binaries, catalog, environment, repo layout, chart paths, that each excluded `spec.values` path exists in its chart (a warning), catalog types, the kustomization paths their templates render, cluster access and the tenant file are all in order |
 | `flux stratio config init` | `--dir`, `--force` | Write `catalog.yaml` (seeded with the known Stratio component types) and `environment.yaml` |
 | `flux stratio tenant import` | `--size`, `--output`, `--force` | Scan a live, not-yet-migrated cluster and render a tenant `ResourceSetInputProvider` skeleton |
 | `flux stratio apps diff <name>` | `--baseline`, `--drift`, `--view`, `--as` | Pre-migration: compare desired state against live (or a backup, with `--baseline`). Post-migration: `--drift` compares live right now directly against a backup, no GitOps rendering. `--view unified\|patch\|meld` picks how it's shown |
 | `flux stratio apps backup <name> \| --catalog \| --all` | `--dir`, `--as` | Capture an app's live legacy state to disk (`--catalog`: every live object a catalog type selects; `--all`: that plus every other live object the cluster scan finds, unfiltered) |
-| `flux stratio apps migrate <name> \| --all` | `--dry-run`, `-y`/`--yes`, `--continue-on-error`, `--as`, `--baseline`, `--dir` | Diff an app, run its declared prepare step (if any), and splice the resulting patch into the tenant file. `--baseline` computes the patch from a backup instead of live — for a component Flux already reconciled unpatched |
+| `flux stratio apps migrate <name> \| --all` | `--dry-run`, `-y`/`--yes`, `--accept-warnings`, `--continue-on-error`, `--as`, `--baseline`, `--dir` | Diff an app, run its declared prepare step (if any), and splice the resulting patch into the tenant file. `--baseline` computes the patch from a backup instead of live — for a component Flux already reconciled unpatched |
 
 Persistent flags on every command: `--config`, `--env-config`, `--base`, `--repo`, `--cluster`, `--tenant`, `--kubeconfig`,
 `--kube-context`, `-v`/`--verbose`.
@@ -242,14 +242,22 @@ non-default one. See [`docs/migration-runbook.md`](docs/migration-runbook.md) fo
 
 An app whose config declares a `prepare` step (see
 [`docs/config-reference.md`](docs/config-reference.md)) has that precondition checked — and, for an
-automated step, satisfied — by `apps migrate` after it has planned the patch and you've confirmed it,
-and before that planned patch is written: the patch is computed first because a step may delete the
-very live workload it's read from (`prepare-dlc` deletes the legacy DLC Deployment). An
-automated step first lists every operation it would perform (on stderr) and the live manifest of each
-object it acts on (on stdout), then asks before running exactly those; `--dry-run` stops after the
-list. A step that runs a database query (`prepare-genai`'s Postgres data rewrite) finds its target
-pod, runs it, and shows the real output — then always asks its own separate confirmation before
-proceeding, never skipped by `--yes`.
+automated step, satisfied — by `apps migrate` after it has planned the patch, you've confirmed it,
+and the patch is written to the tenant file: a step may delete the very live workload the patch is
+read from (`prepare-dlc` deletes the legacy DLC Deployment), so the patch is saved first. If the step
+then fails or is declined, the tenant file already carries the patch; don't commit it until running
+`apps migrate <name>` again finishes the step. An automated step first lists every operation it would
+perform (on stderr) and the live manifest of each object it acts on (on stdout), then asks before
+running exactly those, backing the app up (as `apps backup` would) right before it changes anything;
+`--dry-run` stops after the list. A step that runs a database query (`prepare-genai`'s Postgres data
+rewrite) shows the SQL and the pod it will run against and asks before running it, then shows the
+real output and asks again; `--yes` answers neither question.
+
+`--yes` doesn't answer for warnings either: an app whose diff has warnings (values that will be lost,
+differences needing review, unresolved dependencies, a gosec-agent patch the legacy client left in the
+parent entry's `patches`) stops unless `--accept-warnings` is also given. Differences an app's `exclude`
+keeps out of the patch on purpose are listed as `excluded by the catalog: …` and are not warnings.
+A declined prompt leaves the app not migrated, which the command's exit status reports.
 
 ## Build from source
 

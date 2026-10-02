@@ -2,6 +2,109 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`apps diff` / `apps migrate` list what `exclude` keeps out.** A chart-mode difference hidden by an
+  app's `exclude` (genai's Vault roles) is no longer dropped without a word: it is printed as
+  `excluded by the catalog: <workload>/<name> live "…", GitOps default "…" (<path>)`. Informational
+  only — never a warning, so `--yes` isn't stopped — and the patch is unchanged.
+* **`apps migrate` flags a gosec-agent patch the legacy client left on the parent entry.** A
+  `HelmRelease` patch for `<agent>` in the parent's top-level `patches` matches nothing (the agent
+  reads `config.agent.patches`); it is reported as a warning to remove by hand, never deleted.
+* **`apps backup --all` captures what it used to drop.** An object is skipped only when a catalog
+  app was classified from that exact object (kind, namespace, name), not when it merely shares a
+  name: the PgDatabases named like their app (rocket, discovery, intelligence, dlc-entity,
+  virtualizer...) and a second namespace's same-named objects (`opensearch1` in `keos-core`) now get
+  a backup of their own, as `<name>-live` or `<name>-<namespace>`.
+* **Every workload of a multi-workload app keeps its manifest.** `deployment.yaml` is still the
+  first workload; the others (genai-ui, virtualizer-ui, ...) are written as
+  `workload.<kind>.<name>.yaml` instead of leaving only an env file. `apps diff --drift` compares
+  the `.spec` of each workload present in both captures, matched by what the manifest says it is, so
+  an image, replica, resource or probe change shows up.
+* **A chart that won't template no longer costs the capture of its live workloads.** When
+  `helm template` fails or renders nothing live, the backup captures the classified workloads
+  directly and says so. Env-resolution warnings (a ConfigMap or Secret it couldn't read) are shown
+  instead of silently producing `<unresolved:...>` values.
+* **`apps migrate` says what replacing a patch loses.** Re-running it replaces the whole same-kind
+  patch; the paths only the existing patch set (a hand edit, a value the diff can't see) are now
+  listed as a warning, which `--yes` stops on unless `--accept-warnings`. So is an obsolete patch.
+* **`doctor` checks exclude paths.** Every `spec.values.*` path a chart type excludes must exist in
+  its chart's `values.yaml` (non-blocking warning): a path that doesn't exclude nothing. Rocket's
+  governance URLs were excluded under `rocketCommon` while the chart defines them under
+  `rocketServer`, so the legacy URLs were patched in; the seed is fixed. **A catalog already written
+  by `config init` keeps the old paths: change `rocketCommon.settings.governanceIntegration` to
+  `rocketServer.settings.governanceIntegration` in it.**
+* **Object selection by kind.** When a Kustomization renders several objects with the app's name (a
+  storage overlay's Secret next to the HelmRelease), a chart-mode app takes the HelmRelease, and a
+  manifest-mode one a custom resource over a core object, rather than whichever comes first.
+* **`--all` lets you skip an instance it can't place.** Every question it asks (which declared entry
+  an undeclared one migrates into, which of several live objects is the real one, which catalog type
+  an object is) now ends with a "skip it" choice. Picking it leaves that component out of the run
+  with a warning, and `--all` carries on with the next; it is not counted as a failure. A blank
+  answer still means "no answer" and stops the run unless `--continue-on-error`. Asking for a single
+  app by name offers no skip.
+* **`apps migrate --skip-prepare` patches the tenant file without running any prepare step.** Meant
+  for `--all`: nothing is run, shown, asked or backed up for the steps, each skipped step is
+  warned about with the command that finishes it, and the run ends with a list of every app that
+  still needs its step. Running `apps migrate <app>` later finds the patch up to date and goes
+  straight to the step.
+* **`doctor` compares the repository checkouts with what the cluster runs.** `apps diff`/`migrate`
+  render from the checkouts, so one on another branch or commit than the cluster's GitRepository
+  renders templates the cluster doesn't run (a Kustomization named `apps-genai-litellm` where the
+  cluster has `apps-litellm`). A mismatch is a warning naming both revisions, and a worktree of the
+  same repository already at the cluster's revision, if there is one, to point `repos` at.
+* **A patch lands on the tenant entry the app was resolved to, not one named after its
+  Kustomization.** Where a template pins a Kustomization to a fixed name (`apps-litellm`) but the
+  entry keeps its own (`genai-litellm`), migrate used to fail with "no components.<key> entry named
+  litellm"; the `--all` ordering and the dependency check were also looking under the wrong name.
+* **Ctrl-C works at a prompt again.** The first Ctrl-C cancels in-flight cluster calls and says so;
+  a second one quits immediately, instead of being swallowed while a prompt waits on stdin.
+* **`config init --dir ./cfg --force` keeps the repo paths it carries over** (a relative `--dir` no
+  longer turns `charts: ../charts` into a path relative to the wrong directory). Two captures of an
+  app within one second (a prepare step's backup right after a backup) no longer collide, and the
+  error after a failed prepare step names the `--baseline latest` re-run for when the step already
+  removed the live workload.
+* **Smaller fixes.** A value that merely starts with `<` (XML) is no longer mistaken for a
+  placeholder and skipped from the patch; an unquoted number in a chart's env `value:` is compared
+  as that number, not `""`; `prepare-genai`'s UPDATE only rewrites rows holding the old name.
+* **Secret values never leave the cluster.** A variable read from a Secret is now a
+  `<secret:NAME/KEY>` placeholder everywhere: in diffs, warnings, backups and patches. A legacy value
+  read from a Secret where the chart now renders a plain value is listed for review instead of
+  patched. Backups are readable only by their owner (0700/0600). Backups taken before this change
+  still hold plaintext values and should be removed.
+* **`prepare-genai` asks before running its SQL.** It shows the SQL and the target pod first, runs
+  `psql` with `ON_ERROR_STOP` in a single transaction, then asks again over the real output.
+  `--yes` answers neither question.
+* **Destructive prepare steps run only after the patch is saved, and only after a backup.** If the
+  step then fails, the tenant file already carries the patch; running `apps migrate` again finishes
+  the step.
+* **Patches no longer change values they meant to keep.** Zero-padded numbers (`0022`) and
+  `True`/`TRUE` stay strings. Only `quote`/`squote`/`toString`/`default` pipelines map an env var to
+  its `.Values` path. The patched chart is rendered again, and a value the patch doesn't reproduce
+  is taken back out and listed for review. Excluded paths are now dropped from inside an op on a
+  parent path too. A reordered or shortened list is replaced whole, never merged by index. A
+  `valuesFrom` HelmRelease is refused.
+* **`apps migrate --all` is stricter.**
+  * An object two catalog types select is asked about once, not migrated twice.
+  * An app whose dependency failed or was declined is skipped.
+  * A declined prompt counts as not migrated.
+  * `--yes` stops on an app with warnings unless `--accept-warnings` is given.
+* **Reads that fail stop the command instead of reading as "nothing there".**
+  * `tenant import` fails on a list it isn't allowed to make, instead of writing placeholder
+    entries.
+  * Discovery warns about kinds it may not list.
+  * A sibling workload that can't be read fails the diff.
+* **Smaller fixes.**
+  * `envFrom` prefixes are applied on the live side.
+  * Multi-line env values survive a backup.
+  * A half-written backup is never picked as `latest`.
+  * Saving the tenant file keeps its mode and symlink, and refuses if the file changed since it was
+    read.
+  * Piped answers reach every prompt.
+  * Ctrl-C and timeouts stop cluster calls and subprocesses.
+  * `prepare-datamarket-agent` scales down what the legacy HelmRelease rendered.
+  * `config init --force` backs up what it replaces and keeps repo overrides.
+  * `~` and relative paths in the environment file resolve correctly.
+  * `tenant import` applies the same tenant-ownership rules as `apps`.
+
 * **Chart-mode patches carry legacy values that the chart's ConfigMaps can't.** Three cases showed up
   in rocket's post-migration drift:
   * **Inline container env.** A variable a container sets in its own `env` (a keos-apps size

@@ -198,7 +198,7 @@ matches by a hardcoded object name, and it never touches the GitOps objects that
 on a re-run after cutover. `apps migrate` lists every operation and prints each target's live
 manifest before asking, and `--dry-run` stops there. Each operation is pinned to the planned
 object's UID, so an object replaced in the meantime makes it fail rather than act on the new one.
-| `prepare-genai` | A Postgres data rewrite (renaming a stored component reference) — no Kubernetes API can verify this happened, so `apps migrate` never claims to on its own. It finds the tenant's PgCluster primary pod (labelled `pgcluster.stratio.com/pgcluster-name`/`-role`), execs the SQL there itself, and shows the real output — then always asks its own separate confirmation before proceeding, never skipped by `--yes` | runs itself, confirmed |
+| `prepare-genai` | A Postgres data rewrite (renaming a stored component reference) — no Kubernetes API can verify this happened, so `apps migrate` never claims to on its own. It finds the tenant's PgCluster primary pod (labelled `pgcluster.stratio.com/pgcluster-name`/`-role`), shows the SQL and that pod and asks before running it (`psql -v ON_ERROR_STOP=1 --single-transaction`, so a failed statement fails the step and rolls the rest back), then shows the real output and asks again — neither question answered by `--yes` | runs itself, confirmed |
 
 Every automated step re-checks live cluster state each run rather than trusting a persisted
 record — running `apps migrate` again once a precondition holds is a no-op for that step. A Query
@@ -213,7 +213,9 @@ declares a `prepare.DBQuery` (namespace, pod selector, container, command, SQL) 
 
 Dot-paths dropped from the computed diff and patch before it's written — fields the GitOps side is
 authoritative for and must never be back-ported from the live cluster. In practice this is almost
-always an identity, vault or governance-integration field.
+always an identity, vault or governance-integration field. A chart-mode difference an exclude keeps out is not dropped
+silently: `apps diff` and `apps migrate` list it as `excluded by the catalog: <workload>/<name> live "…", GitOps default "…" (<path>)`
+— information only, not a warning, so `--yes` isn't stopped by it.
 
 Paths are rooted at the patch document itself, so a manifest-mode exclude starts with `spec.`
 (`spec.bootstrap.pgBackup`) and a chart-mode exclude with `spec.values.<root>.`
