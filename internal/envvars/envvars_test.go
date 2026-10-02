@@ -70,6 +70,8 @@ func TestExtract_EnvFromConfigMapMergesAllKeys(t *testing.T) {
 	}
 }
 
+// TestExtract_EnvFromSecretMergesAllKeys: every key is there, but as a
+// placeholder — a Secret's value never leaves envvars.
 func TestExtract_EnvFromSecretMergesAllKeys(t *testing.T) {
 	g := NewFakeGetter().WithSecret("ns", "sec", map[string]string{"TOKEN": "s3cr3t"})
 	w := workload("Deployment", "ns", "app", []any{
@@ -82,8 +84,33 @@ func TestExtract_EnvFromSecretMergesAllKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["TOKEN"] != "s3cr3t" {
-		t.Errorf("TOKEN = %q, want %q", got["TOKEN"], "s3cr3t")
+	if got["TOKEN"] != "<secret:sec/TOKEN>" {
+		t.Errorf("TOKEN = %q, want %q", got["TOKEN"], "<secret:sec/TOKEN>")
+	}
+}
+
+// TestExtract_EnvFromPrefix: the kubelet prepends an envFrom entry's
+// prefix to each key it injects.
+func TestExtract_EnvFromPrefix(t *testing.T) {
+	g := NewFakeGetter().
+		WithConfigMap("ns", "cm", map[string]string{"FOO": "bar"}).
+		WithSecret("ns", "sec", map[string]string{"TOKEN": "s3cr3t"})
+	w := workload("Deployment", "ns", "app", []any{
+		container("main", nil, []any{
+			map[string]any{"configMapRef": map[string]any{"name": "cm"}, "prefix": "P_"},
+			map[string]any{"secretRef": map[string]any{"name": "sec"}, "prefix": "S_"},
+		}),
+	})
+
+	got, err := Extract(context.Background(), g, w, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["P_FOO"] != "bar" || got["S_TOKEN"] != "<secret:sec/TOKEN>" {
+		t.Errorf("got %v, want P_FOO=bar and S_TOKEN as a placeholder", got)
+	}
+	if _, ok := got["FOO"]; ok {
+		t.Errorf("got the unprefixed FOO too: %v", got)
 	}
 }
 
@@ -138,8 +165,8 @@ func TestExtract_SecretKeyRef(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["PW"] != "hunter2" {
-		t.Errorf("PW = %q, want %q", got["PW"], "hunter2")
+	if got["PW"] != "<secret:sec/PASSWORD>" {
+		t.Errorf("PW = %q, want the placeholder, never the Secret's value", got["PW"])
 	}
 }
 
@@ -185,7 +212,9 @@ func TestExtract_ResourceFieldRef(t *testing.T) {
 	}
 }
 
-func TestExtract_MissingConfigMapWarnsAndYieldsEmptyString(t *testing.T) {
+// TestExtract_MissingConfigMapWarnsAndYieldsPlaceholder: an unresolvable
+// reference is never mistaken for a real empty value.
+func TestExtract_MissingConfigMapWarnsAndYieldsPlaceholder(t *testing.T) {
 	w := workload("Deployment", "ns", "app", []any{
 		container("main", []any{
 			map[string]any{"name": "FOO", "valueFrom": map[string]any{
@@ -201,8 +230,8 @@ func TestExtract_MissingConfigMapWarnsAndYieldsEmptyString(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["FOO"] != "" {
-		t.Errorf("FOO = %q, want empty string", got["FOO"])
+	if got["FOO"] != "<unresolved:configMapKeyRef:missing-cm/K>" {
+		t.Errorf("FOO = %q, want an unresolved placeholder", got["FOO"])
 	}
 	if warnCount != 1 {
 		t.Fatalf("warnCount = %d, want exactly 1", warnCount)
@@ -224,8 +253,8 @@ func TestExtract_MissingKeyInConfigMapWarns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["FOO"] != "" || !warned {
-		t.Errorf("FOO = %q, warned = %v, want empty string and a warning", got["FOO"], warned)
+	if got["FOO"] != "<unresolved:configMapKeyRef:cm/MISSING>" || !warned {
+		t.Errorf("FOO = %q, warned = %v, want an unresolved placeholder and a warning", got["FOO"], warned)
 	}
 }
 

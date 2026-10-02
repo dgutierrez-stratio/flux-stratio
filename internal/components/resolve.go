@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Stratio/flux-stratio/internal/config"
@@ -98,7 +99,7 @@ func Resolve(opts Options, name string) (config.App, error) {
 	if asEntry != "" {
 		chosen.Entry = asEntry
 	}
-	if err := resolveEntry(opts, &chosen, asEntry != ""); err != nil {
+	if err := resolveEntry(opts, &chosen, asEntry != "", false); err != nil {
 		return config.App{}, err
 	}
 	return toApp(chosen, opts.Tenant)
@@ -245,8 +246,23 @@ func isHelmRelease(obj *unstructured.Unstructured) bool {
 // managedByTenant is ownedByTenant for a Helm-rendered object, which keeps
 // keos's tenant label but not CCT's tenant annotation.
 func managedByTenant(obj *unstructured.Unstructured, tenant string) bool {
-	owner, ok := obj.GetLabels()[keosTenantLabel]
-	return ownedByTenant(obj, tenant) && (!ok || owner == "" || tenant == "" || owner == tenant)
+	return BelongsToTenant(obj, tenant)
+}
+
+// BelongsToTenant reports whether obj isn't marked as some other
+// tenant's, by CCT's tenant annotation or keos's tenant label — an
+// object carrying neither isn't excluded. Exported for
+// internal/tenantimport, so `tenant import` and `apps` agree on which
+// objects are a tenant's.
+func BelongsToTenant(obj metav1.Object, tenant string) bool {
+	if tenant == "" {
+		return true
+	}
+	if owner := obj.GetAnnotations()[TenantAnnotation]; owner != "" && owner != tenant {
+		return false
+	}
+	owner := obj.GetLabels()[keosTenantLabel]
+	return owner == "" || owner == tenant
 }
 
 // ResolveAll resolves every instance Classify finds. With opts.Doc set, an
@@ -288,7 +304,11 @@ func ResolveAll(opts Options) (apps []config.App, unresolved []error, err error)
 				continue
 			}
 		}
-		if err := resolveEntry(opts, &inst, false); err != nil {
+		if err := resolveEntry(opts, &inst, false, true); err != nil {
+			if errors.Is(err, ErrSkipped) {
+				opts.Log.Warningf("skipping %s: you chose to leave it out of this run", inst.Label())
+				continue
+			}
 			if !errors.Is(err, ErrNoAnswer) {
 				return nil, nil, err
 			}
@@ -302,17 +322,21 @@ func ResolveAll(opts Options) (apps []config.App, unresolved []error, err error)
 		byKey[k] = append(byKey[k], inst)
 	}
 
-	apps = make([]config.App, 0, len(order))
+	var chosen []Instance
 	for _, k := range order {
 		group := byKey[k]
-		chosen := group[0]
+		pick := group[0]
 		if len(group) > 1 {
 			labels := make([]string, len(group))
 			for i, g := range group {
 				labels[i] = g.Label()
 			}
-			i, err := prompter(opts).Choose(
+			i, skipped, err := chooseOrSkip(opts,
 				fmt.Sprintf("more than one live object maps to %s entry %q; which one is the real one?", k.typ, k.entry), labels)
+			if skipped {
+				opts.Log.Warningf("skipping %s entry %q: you chose to leave it out of this run", k.typ, k.entry)
+				continue
+			}
 			if err != nil {
 				err = answerError(fmt.Sprintf("%s entry %q has %d live candidates (%s)", k.typ, k.entry, len(group), strings.Join(labels, "; ")), err)
 				if !errors.Is(err, ErrNoAnswer) {
@@ -321,9 +345,20 @@ func ResolveAll(opts Options) (apps []config.App, unresolved []error, err error)
 				unresolved = append(unresolved, err)
 				continue
 			}
-			chosen = group[i]
+			pick = group[i]
 		}
-		app, err := toApp(chosen, opts.Tenant)
+		chosen = append(chosen, pick)
+	}
+
+	chosen, conflicts, err := oneTypePerObject(opts, chosen)
+	if err != nil {
+		return nil, nil, err
+	}
+	unresolved = append(unresolved, conflicts...)
+
+	apps = make([]config.App, 0, len(chosen))
+	for _, inst := range chosen {
+		app, err := toApp(inst, opts.Tenant)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -332,11 +367,67 @@ func ResolveAll(opts Options) (apps []config.App, unresolved []error, err error)
 	return apps, unresolved, nil
 }
 
+// oneTypePerObject keeps one instance per live anchor object: an object
+// two catalog types both select (overlapping selectors) would otherwise
+// become two apps — backed up twice, and migrated into two tenant-file
+// entries, each running its own prepare step. Like Resolve, it asks which
+// type is meant; an unanswered question leaves that object out, reported
+// in unresolved.
+func oneTypePerObject(opts Options, instances []Instance) (kept []Instance, unresolved []error, err error) {
+	type objectKey struct{ gvk, namespace, name string }
+	keyOf := func(i Instance) objectKey {
+		p := i.Primary()
+		return objectKey{p.GroupVersionKind().GroupKind().String(), p.GetNamespace(), p.GetName()}
+	}
+	byObject := map[objectKey][]int{}
+	for i, inst := range instances {
+		byObject[keyOf(inst)] = append(byObject[keyOf(inst)], i)
+	}
+	decided := map[objectKey]int{}
+	for _, inst := range instances {
+		k := keyOf(inst)
+		idx := byObject[k]
+		if len(idx) == 1 {
+			kept = append(kept, inst)
+			continue
+		}
+		if _, done := decided[k]; done {
+			continue
+		}
+		labels := make([]string, len(idx))
+		for j, n := range idx {
+			labels[j] = instances[n].Label()
+		}
+		p := inst.Primary()
+		choice, skipped, err := chooseOrSkip(opts,
+			fmt.Sprintf("%s %s/%s is selected by more than one catalog type; which one is it?", p.GetKind(), p.GetNamespace(), p.GetName()), labels)
+		decided[k] = -1
+		if skipped {
+			opts.Log.Warningf("skipping %s %s/%s: you chose to leave it out of this run", p.GetKind(), p.GetNamespace(), p.GetName())
+			continue
+		}
+		if err != nil {
+			err = answerError(fmt.Sprintf("%s %s/%s is selected by %d catalog types (%s)", p.GetKind(), p.GetNamespace(), p.GetName(), len(idx), strings.Join(labels, "; ")), err)
+			if !errors.Is(err, ErrNoAnswer) {
+				return nil, nil, err
+			}
+			unresolved = append(unresolved, err)
+			continue
+		}
+		decided[k] = idx[choice]
+		kept = append(kept, instances[idx[choice]])
+	}
+	return kept, unresolved, nil
+}
+
 // resolveEntry checks inst.Entry against the tenant file's
 // components.<Component> entries, asking the operator to pick one when the
 // derived name isn't declared. pinned means the entry came from --as: it
-// must exist as given, never be second-guessed with a prompt.
-func resolveEntry(opts Options, inst *Instance, pinned bool) error {
+// must exist as given, never be second-guessed with a prompt. skippable
+// adds a "skip" choice to the question (ResolveAll's: one instance the
+// operator can't map shouldn't stop the others) and returns ErrSkipped when
+// it's picked.
+func resolveEntry(opts Options, inst *Instance, pinned, skippable bool) error {
 	if opts.Doc == nil {
 		return nil
 	}
@@ -355,9 +446,17 @@ func resolveEntry(opts Options, inst *Instance, pinned bool) error {
 		return fmt.Errorf("%s: %s", inst.Label(), undeclaredReason(opts.Doc, inst.Type.Component))
 	}
 
-	i, err := prompter(opts).Choose(
-		fmt.Sprintf("%s: entry %q isn't declared under components.%s in the tenant file; which entry does it migrate into?",
-			inst.Label(), inst.Entry, inst.Type.Component), names)
+	question := fmt.Sprintf("%s: entry %q isn't declared under components.%s in the tenant file; which entry does it migrate into?",
+		inst.Label(), inst.Entry, inst.Type.Component)
+	var i int
+	if skippable {
+		var skipped bool
+		if i, skipped, err = chooseOrSkip(opts, question, names); skipped {
+			return ErrSkipped
+		}
+	} else {
+		i, err = prompter(opts).Choose(question, names)
+	}
 	if err != nil {
 		return answerError(fmt.Sprintf("%s: entry %q isn't declared under components.%s (declared: %s)",
 			inst.Label(), inst.Entry, inst.Type.Component, strings.Join(names, ", ")), err)
@@ -493,6 +592,23 @@ func (e *unansweredError) Error() string {
 }
 
 func (e *unansweredError) Unwrap() error { return ErrNoAnswer }
+
+// skipOption is the extra last choice chooseOrSkip offers.
+const skipOption = "none of these: skip it (leave it out of this run)"
+
+// chooseOrSkip asks like Choose, with skipOption added after options.
+// skipped is true when the operator picks it; i then means nothing.
+func chooseOrSkip(opts Options, question string, options []string) (i int, skipped bool, err error) {
+	withSkip := append(append(make([]string, 0, len(options)+1), options...), skipOption)
+	i, err = prompter(opts).Choose(question, withSkip)
+	if err != nil {
+		return 0, false, err
+	}
+	if i == len(options) {
+		return 0, true, nil
+	}
+	return i, false, nil
+}
 
 func prompter(opts Options) Prompter {
 	if opts.Prompter == nil {

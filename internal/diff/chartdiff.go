@@ -26,6 +26,19 @@ const (
 	// another variable that already matches (Shared) — and one path can
 	// carry only one of them.
 	UnmappedConflict UnmappedReason = "conflicting live values"
+	// UnmappedLiveUnknown means the live value is a placeholder — read
+	// from a Secret, or a reference that couldn't be resolved (see
+	// internal/envvars) — while the chart renders a concrete value: the
+	// real live value isn't known here, and a Secret's must never be
+	// written to the tenant file anyway.
+	UnmappedLiveUnknown UnmappedReason = "live value from a Secret or unresolved"
+	// UnmappedNotReproduced means the variable was mapped to a .Values
+	// path (Candidates[0]), but the chart rendered again with the patch
+	// applied still doesn't render the live value — the template does
+	// more with the value than the mapping assumed (a default that
+	// replaces an empty live value, say) — so the path was taken back out
+	// of the patch rather than written wrong.
+	UnmappedNotReproduced UnmappedReason = "patching its .Values path doesn't reproduce it"
 	// UnmappedInline means a container sets the variable in its own env,
 	// overriding the chart's ConfigMaps, and no values env entry renders
 	// it as-is (a hardcoded or templated env value).
@@ -38,6 +51,18 @@ type LiveOnlyVar struct {
 	// against, or "" for a flat live side (see UnmappedDiff.Workload).
 	Workload   string
 	Name, Live string
+}
+
+// ExcludedDiff is a live variable that differs from the chart's rendered
+// value through a .Values path the app's exclude list keeps out of the
+// patch: the GitOps side stays authoritative, but the difference is
+// reported rather than dropped without a trace.
+type ExcludedDiff struct {
+	// Workload is as in UnmappedDiff.
+	Workload             string
+	Name, Rendered, Live string
+	// Path is the excluded .Values dot path the variable maps to.
+	Path string
 }
 
 // UnmappedDiff is a variable whose rendered and live values differ but
@@ -119,15 +144,32 @@ type ChartDiffResult struct {
 	// lost after migration, since nothing in the chart can carry them
 	// forward.
 	LiveOnly []LiveOnlyVar
+	// Excluded are the differences Exclude kept out of the patch, sorted
+	// by workload and name: informational, nothing was left unpatched by
+	// mistake.
+	Excluded []ExcludedDiff
 	// RenderedOnlyCount is how many variables the chart renders that have
 	// no live counterpart (e.g. new defaults introduced since the app was
 	// last deployed).
 	RenderedOnlyCount int
+	// Mapped are the variables Patch sets through a .Values path from a
+	// chart file's mapping, for VerifyMapped to check against a render of
+	// the patched chart.
+	Mapped []MappedVar
 	// Workloads are the compared sides, one per Live entry in order —
 	// exposed so a caller can present a full before/after view (e.g.
 	// internal/appdiff builds a unified diff from it), not just the
 	// mapped subset that became a patch.
 	Workloads []WorkloadComparison
+}
+
+// MappedVar is one variable a chart-mode patch sets through Path.
+type MappedVar struct {
+	// Workload is as in UnmappedDiff.
+	Workload             string
+	Name, Rendered, Live string
+	// Path is the .Values dot path the patch sets.
+	Path string
 }
 
 // resolvedVar is a rendered variable's value and the .Values paths it
@@ -210,6 +252,10 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 				result.RenderedOnlyCount++
 			case !hasRendered:
 				result.LiveOnly = append(result.LiveOnly, LiveOnlyVar{Workload: workload, Name: name, Live: liveVal})
+			case isPlaceholder(liveVal) && !isPlaceholder(rv.value):
+				result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
+					Workload: workload, Name: name, Rendered: rv.value, Live: liveVal, Reason: UnmappedLiveUnknown,
+				})
 			case isPlaceholder(rv.value) || isPlaceholder(liveVal):
 				// An unresolvable placeholder on either side can't be diffed.
 			case rv.value == liveVal:
@@ -254,10 +300,15 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 
 	values := map[string]any{}
 	for _, path := range sortedMapKeys(mapped) {
+		entries := mapped[path]
 		if isExcluded(path, in.Exclude) {
+			for _, e := range entries {
+				result.Excluded = append(result.Excluded, ExcludedDiff{
+					Workload: e.workload, Name: e.name, Rendered: e.rendered, Live: e.live, Path: path,
+				})
+			}
 			continue
 		}
-		entries := mapped[path]
 		var shared []string
 		var pins []inlineEdit
 		pinnable := true
@@ -275,6 +326,9 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 		}
 		if distinctLive(entries) == 1 && (len(shared) == 0 || pinnable) {
 			setDotPath(values, path, CoerceValue(entries[0].live))
+			for _, e := range entries {
+				result.Mapped = append(result.Mapped, MappedVar{Workload: e.workload, Name: e.name, Rendered: e.rendered, Live: e.live, Path: path})
+			}
 			inlineEdits = append(inlineEdits, pins...)
 			continue
 		}
@@ -292,8 +346,9 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 		}
 	}
 	result.UnmappedDiffs = append(result.UnmappedDiffs, applyInlineEdits(values, in.Values, keptEdits)...)
-	sort.SliceStable(result.UnmappedDiffs, func(i, j int) bool {
-		a, b := result.UnmappedDiffs[i], result.UnmappedDiffs[j]
+	sortUnmapped(result.UnmappedDiffs)
+	sort.SliceStable(result.Excluded, func(i, j int) bool {
+		a, b := result.Excluded[i], result.Excluded[j]
 		if a.Workload != b.Workload {
 			return a.Workload < b.Workload
 		}
@@ -465,4 +520,14 @@ func setDotPath(root map[string]any, dotPath string, value any) {
 		cur = next
 	}
 	cur[parts[len(parts)-1]] = value
+}
+
+// sortUnmapped orders unmapped diffs by workload, then name.
+func sortUnmapped(u []UnmappedDiff) {
+	sort.SliceStable(u, func(i, j int) bool {
+		if u[i].Workload != u[j].Workload {
+			return u[i].Workload < u[j].Workload
+		}
+		return u[i].Name < u[j].Name
+	})
 }

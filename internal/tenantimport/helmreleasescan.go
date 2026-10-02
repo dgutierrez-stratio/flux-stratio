@@ -20,15 +20,19 @@ var helmReleaseGVK = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Ve
 // entry's storage type and HelmReleaseSpec; if it isn't discovered at all
 // (a HelmRelease with no backing Deployment — unusual, but possible), a
 // new entry is added. A no-op, not an error, when the HelmRelease CRD
-// isn't installed — a pre-migration cluster has none.
+// isn't installed — a pre-migration cluster has none; any other failure
+// to list them is an error.
 func scanHelmReleases(ctx context.Context, c client.Client, cat *catalog.Catalog, tenantName string, components Components) error {
 	list, err := kubeclient.ListUnstructured(ctx, c, helmReleaseGVK, "")
+	if kubeclient.IsNoMatch(err) {
+		return nil
+	}
 	if err != nil {
-		return nil //nolint:nilerr // absence of the CRD is expected pre-migration, not a failure
+		return err
 	}
 	for i := range list.Items {
 		hr := &list.Items[i]
-		if !inTenantNamespace(hr.GetNamespace(), tenantName) {
+		if !tenantObject(hr, tenantName) {
 			continue
 		}
 		chartName, _, _ := unstructured.NestedString(hr.Object, "spec", "chart", "spec", "chart")

@@ -74,3 +74,50 @@ func settled(u UnmappedDiff, envs map[string]map[string]renderedVar) bool {
 	}
 	return found
 }
+
+// VerifyMapped checks every variable result's patch sets through a mapped
+// .Values path against patched — the chart rendered again with that patch
+// applied. One that still doesn't render its live value (a template that
+// does more with the value than chartValueLineRe could see) has its path
+// taken back out of the patch and is reported as UnmappedNotReproduced
+// instead: a value the patch can't reproduce is never written. Patch
+// becomes nil if nothing is left in it.
+func VerifyMapped(result *ChartDiffResult, patched []*unstructured.Unstructured) {
+	if result.Patch == nil || len(result.Mapped) == 0 {
+		return
+	}
+	r := indexRendered(patched)
+	envs := map[string]map[string]renderedVar{}
+	for _, w := range r.workloads {
+		envs[w.GetName()] = r.workloadEnv(w)
+	}
+	failed := map[string]bool{}
+	for _, m := range result.Mapped {
+		u := UnmappedDiff{Workload: m.Workload, Name: m.Name, Rendered: m.Rendered, Live: m.Live}
+		if !settled(u, envs) {
+			failed[m.Path] = true
+		}
+	}
+	if len(failed) == 0 {
+		return
+	}
+	obj, _ := result.Patch.Patch.(map[string]any)
+	var kept []MappedVar
+	for _, m := range result.Mapped {
+		if !failed[m.Path] {
+			kept = append(kept, m)
+			continue
+		}
+		removeDotPath(obj, "spec.values."+m.Path)
+		result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
+			Workload: m.Workload, Name: m.Name, Rendered: m.Rendered, Live: m.Live,
+			Reason: UnmappedNotReproduced, Candidates: []string{m.Path},
+		})
+	}
+	result.Mapped = kept
+	sortUnmapped(result.UnmappedDiffs)
+	pruneEmptyMaps(obj)
+	if len(PatchValues(result.Patch)) == 0 {
+		result.Patch = nil
+	}
+}

@@ -62,3 +62,38 @@ func TestPatchValues(t *testing.T) {
 		t.Errorf("PatchValues(nil) = %+v, want nil", got)
 	}
 }
+
+// TestVerifyMapped: a mapped value the patched chart still doesn't render
+// (here, a default replacing an empty live value) is taken back out of
+// the patch and reported; one it does render stays.
+func TestVerifyMapped(t *testing.T) {
+	values := map[string]any{"a": map[string]any{"level": "DEBUG", "region": ""}}
+	result := &ChartDiffResult{
+		Patch: &PatchDoc{TargetKind: "HelmRelease", Patch: map[string]any{"spec": map[string]any{"values": values}}},
+		Mapped: []MappedVar{
+			{Workload: "app", Name: "LEVEL", Rendered: "INFO", Live: "DEBUG", Path: "a.level"},
+			{Workload: "app", Name: "REGION", Rendered: "eu", Live: "", Path: "a.region"},
+		},
+	}
+	patched := singleWorkload(map[string]any{"LEVEL": "DEBUG", "REGION": "eu"})
+
+	VerifyMapped(result, patched)
+
+	if got, want := PatchValues(result.Patch), map[string]any{"a": map[string]any{"level": "DEBUG"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("patch values = %v, want %v", got, want)
+	}
+	want := []UnmappedDiff{{Workload: "app", Name: "REGION", Rendered: "eu", Live: "", Reason: UnmappedNotReproduced, Candidates: []string{"a.region"}}}
+	if !reflect.DeepEqual(result.UnmappedDiffs, want) {
+		t.Errorf("UnmappedDiffs = %+v, want %+v", result.UnmappedDiffs, want)
+	}
+
+	// Nothing reproduced: no patch at all.
+	result = &ChartDiffResult{
+		Patch:  &PatchDoc{TargetKind: "HelmRelease", Patch: map[string]any{"spec": map[string]any{"values": map[string]any{"a": map[string]any{"region": ""}}}}},
+		Mapped: []MappedVar{{Workload: "app", Name: "REGION", Rendered: "eu", Live: "", Path: "a.region"}},
+	}
+	VerifyMapped(result, patched)
+	if result.Patch != nil {
+		t.Errorf("Patch = %+v, want nil", result.Patch)
+	}
+}

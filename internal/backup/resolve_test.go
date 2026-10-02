@@ -82,3 +82,20 @@ func TestResolveBaseline_NothingFoundErrors(t *testing.T) {
 		t.Fatal("ResolveBaseline with nothing present: got nil error, want non-nil")
 	}
 }
+
+// TestResolveBaseline_LatestIgnoresPartialCaptures: a capture still in
+// progress (or abandoned) is never picked over a complete backup.
+func TestResolveBaseline_LatestIgnoresPartialCaptures(t *testing.T) {
+	appDir := filepath.Join(t.TempDir(), "psql")
+	complete := filepath.Join(appDir, "2026-01-01T00-00-00Z")
+	writeMarker(t, complete, "cr.yaml")
+	writeMarker(t, filepath.Join(appDir, ".partial-2026-06-01T00-00-00Z"), "cr.yaml")
+
+	got, err := ResolveBaseline(appDir, "psql")
+	if err != nil {
+		t.Fatalf("ResolveBaseline returned error: %v", err)
+	}
+	if got != complete {
+		t.Errorf("got %q, want %q (the only complete one)", got, complete)
+	}
+}

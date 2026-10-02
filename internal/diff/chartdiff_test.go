@@ -122,6 +122,27 @@ func TestChartDiff_PlaceholderValuesSkipped(t *testing.T) {
 	}
 }
 
+// TestChartDiff_SecretLiveValueReportedNotPatched: legacy read the
+// variable from a Secret (internal/envvars resolves it to a placeholder)
+// while the chart renders it from a ConfigMap. The value isn't known
+// and must never reach the tenant file, so it's reported for review.
+func TestChartDiff_SecretLiveValueReportedNotPatched(t *testing.T) {
+	docs := singleWorkload(map[string]any{"DB_PASSWORD": "changeme"})
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, HRName: "hr",
+		Files: []ChartFile{{Values: map[string]string{"DB_PASSWORD": "db.password"}}},
+		Live:  []LiveWorkloadEnv{liveFor(docs, "app", map[string]string{"DB_PASSWORD": "<secret:db-creds/password>"})},
+	})
+
+	if result.Patch != nil {
+		t.Errorf("Patch = %+v, want nil: a Secret-sourced value is never patched", result.Patch)
+	}
+	want := []UnmappedDiff{{Workload: "app", Name: "DB_PASSWORD", Rendered: "changeme", Live: "<secret:db-creds/password>", Reason: UnmappedLiveUnknown}}
+	if !reflect.DeepEqual(result.UnmappedDiffs, want) {
+		t.Errorf("UnmappedDiffs = %+v, want %+v", result.UnmappedDiffs, want)
+	}
+}
+
 func TestChartDiff_ExcludePathsApplied(t *testing.T) {
 	docs := singleWorkload(map[string]any{"APPROLENAME": "rendered", "OTHER": "rendered-other"})
 	files := []ChartFile{{Values: map[string]string{
@@ -137,6 +158,128 @@ func TestChartDiff_ExcludePathsApplied(t *testing.T) {
 	want := map[string]any{"datarestPgInternal": map[string]any{"general": map[string]any{"other": "live-other"}}}
 	if got := patchValues(t, result); !reflect.DeepEqual(got, want) {
 		t.Errorf("values = %v, want %v (general.identity excluded and pruned)", got, want)
+	}
+}
+
+func TestChartDiff_ExcludedDifferenceIsReportedNotPatched(t *testing.T) {
+	docs := singleWorkload(map[string]any{"APPROLENAME": "rendered", "OTHER": "rendered-other", "SAME": "same"})
+	files := []ChartFile{{Values: map[string]string{
+		"APPROLENAME": "datarestPgInternal.general.identity.approlename",
+		"OTHER":       "datarestPgInternal.general.other",
+		"SAME":        "datarestPgInternal.general.identity.same",
+	}}}
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, Files: files, HRName: "hr",
+		Exclude: []string{"spec.values.datarestPgInternal.general.identity"},
+		Live: []LiveWorkloadEnv{liveFor(docs, "app", map[string]string{
+			"APPROLENAME": "live-role", "OTHER": "live-other", "SAME": "same",
+		})},
+	})
+
+	want := []ExcludedDiff{{
+		Workload: "app", Name: "APPROLENAME", Rendered: "rendered", Live: "live-role",
+		Path: "datarestPgInternal.general.identity.approlename",
+	}}
+	if !reflect.DeepEqual(result.Excluded, want) {
+		t.Errorf("Excluded = %+v, want %+v (only the excluded variable that differs)", result.Excluded, want)
+	}
+	// The policy is unchanged: the excluded value still never reaches the patch.
+	wantValues := map[string]any{"datarestPgInternal": map[string]any{"general": map[string]any{"other": "live-other"}}}
+	if got := patchValues(t, result); !reflect.DeepEqual(got, wantValues) {
+		t.Errorf("values = %v, want %v", got, wantValues)
+	}
+}
+
+// An excluded path two sibling workloads read comes out once per workload,
+// ordered by workload then name — and a variable that is excluded for one
+// workload's path only is reported there only.
+func TestChartDiff_ExcludedIsPerWorkloadAndSorted(t *testing.T) {
+	docs := siblingsRendered()
+	files := scanFiles(t, "testdata/siblings")
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, Files: files, HRName: "rel",
+		Exclude: []string{"spec.values.api.identity", "spec.values.ui.identity"},
+		Live: []LiveWorkloadEnv{
+			liveFor(docs, "rel-ui", map[string]string{"VAULT_ROLE": "ui-legacy"}),
+			liveFor(docs, "rel-api", map[string]string{"VAULT_ROLE": "api-legacy"}),
+		},
+	})
+
+	want := []ExcludedDiff{
+		{Workload: "rel-api", Name: "VAULT_ROLE", Rendered: "rel_rel-api", Live: "api-legacy", Path: "api.identity.approlename"},
+		{Workload: "rel-ui", Name: "VAULT_ROLE", Rendered: "rel_rel-ui", Live: "ui-legacy", Path: "ui.identity.approlename"},
+	}
+	if !reflect.DeepEqual(result.Excluded, want) {
+		t.Errorf("Excluded = %+v, want %+v", result.Excluded, want)
+	}
+	if result.Patch != nil {
+		t.Errorf("Patch = %+v, want nil: everything that differs is excluded", result.Patch)
+	}
+}
+
+// Two workloads reading one excluded path are reported in workload order,
+// whatever order the live side was given in.
+func TestChartDiff_ExcludedIsSortedByWorkload(t *testing.T) {
+	docs := siblingsRendered()
+	files := scanFiles(t, "testdata/siblings")
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, Files: files, HRName: "rel", Exclude: []string{"spec.values.common"},
+		Live: []LiveWorkloadEnv{
+			liveFor(docs, "rel-ui", map[string]string{"TENANT": "globex"}),
+			liveFor(docs, "rel-api", map[string]string{"TENANT": "acme"}),
+		},
+	})
+	var workloads []string
+	for _, e := range result.Excluded {
+		workloads = append(workloads, e.Workload)
+	}
+	if !reflect.DeepEqual(workloads, []string{"rel-api", "rel-ui"}) {
+		t.Errorf("Excluded workloads = %v, want [rel-api rel-ui]", workloads)
+	}
+}
+
+// Excluded is ordered by workload and name, not by the order of the paths
+// the variables map to.
+func TestChartDiff_ExcludedIsSortedByNameNotPath(t *testing.T) {
+	docs := singleWorkload(map[string]any{"A_VAR": "ra", "B_VAR": "rb"})
+	files := []ChartFile{{Values: map[string]string{"A_VAR": "z.last", "B_VAR": "a.first"}}}
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, Files: files, HRName: "hr", Exclude: []string{"spec.values.z", "spec.values.a"},
+		Live: []LiveWorkloadEnv{liveFor(docs, "app", map[string]string{"A_VAR": "la", "B_VAR": "lb"})},
+	})
+	var names []string
+	for _, e := range result.Excluded {
+		names = append(names, e.Name)
+	}
+	if !reflect.DeepEqual(names, []string{"A_VAR", "B_VAR"}) {
+		t.Errorf("Excluded names = %v, want [A_VAR B_VAR]", names)
+	}
+}
+
+// Excluding a path whose live value already equals the rendered one hides
+// nothing, so nothing is reported.
+func TestChartDiff_ExcludedPathThatMatchesIsNotReported(t *testing.T) {
+	docs := singleWorkload(map[string]any{"APPROLENAME": "same"})
+	files := []ChartFile{{Values: map[string]string{"APPROLENAME": "x.identity.approlename"}}}
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, Files: files, HRName: "hr", Exclude: []string{"spec.values.x.identity"},
+		Live: []LiveWorkloadEnv{liveFor(docs, "app", map[string]string{"APPROLENAME": "same"})},
+	})
+	if len(result.Excluded) != 0 {
+		t.Errorf("Excluded = %+v, want none", result.Excluded)
+	}
+}
+
+func TestChartDiff_NothingExcludedLeavesExcludedEmpty(t *testing.T) {
+	docs := singleWorkload(map[string]any{"OTHER": "rendered-other"})
+	files := []ChartFile{{Values: map[string]string{"OTHER": "datarestPgInternal.general.other"}}}
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, Files: files, HRName: "hr",
+		Exclude: []string{"spec.values.datarestPgInternal.general.identity"},
+		Live:    []LiveWorkloadEnv{liveFor(docs, "app", map[string]string{"OTHER": "live-other"})},
+	})
+	if len(result.Excluded) != 0 {
+		t.Errorf("Excluded = %+v, want none", result.Excluded)
 	}
 }
 

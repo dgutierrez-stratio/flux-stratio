@@ -21,10 +21,31 @@ import (
 // order among themselves; ordering here is a safety aid, not a
 // correctness requirement enforced on the input.
 func OrderApps(doc *tenantfile.Doc, cat *catalog.Catalog, apps []config.App) []config.App {
+	return topoSort(apps, dependencyGraph(doc, cat, apps))
+}
+
+// Dependencies maps each app's ID to the IDs of the apps among apps it
+// depends on, by the same tenant-file edges OrderApps sorts by — so
+// `apps migrate --all` can leave out an app whose dependency wasn't
+// migrated.
+func Dependencies(doc *tenantfile.Doc, cat *catalog.Catalog, apps []config.App) map[string][]string {
+	graph := dependencyGraph(doc, cat, apps)
+	out := make(map[string][]string, len(apps))
+	for i, deps := range graph {
+		for _, j := range deps {
+			out[apps[i].ID] = append(out[apps[i].ID], apps[j].ID)
+		}
+	}
+	return out
+}
+
+// dependencyGraph returns, for each app, the indices of the apps it
+// depends on.
+func dependencyGraph(doc *tenantfile.Doc, cat *catalog.Catalog, apps []config.App) [][]int {
 	ownerToIndex := make(map[string]int, len(apps))
 	for i, app := range apps {
 		if anchor, err := cat.ResolveAnchor(app.Kustomization); err == nil {
-			ownerToIndex[tenantfile.OwnerName(app.Kustomization, anchor)] = i
+			ownerToIndex[tenantfile.OwnerOf(app, anchor)] = i
 		}
 	}
 
@@ -34,7 +55,7 @@ func OrderApps(doc *tenantfile.Doc, cat *catalog.Catalog, apps []config.App) []c
 		if err != nil {
 			continue
 		}
-		entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerName(app.Kustomization, anchor))
+		entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerOf(app, anchor))
 		if err != nil {
 			continue // not present in the tenant file yet: no known deps
 		}
@@ -44,8 +65,7 @@ func OrderApps(doc *tenantfile.Doc, cat *catalog.Catalog, apps []config.App) []c
 			}
 		}
 	}
-
-	return topoSort(apps, graph)
+	return graph
 }
 
 // topoSort returns apps in DFS post-order over graph (edges point from an

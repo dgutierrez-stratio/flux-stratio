@@ -62,12 +62,24 @@ func NeedsJSON6902(local, live map[string]any) bool {
 // JSON-Pointer root (e.g. "/spec"): a dict key only in live is "add"; a
 // key in both recurses; a key only in local is skipped (this plugin never
 // emits "remove" — a field the chart declares that live lacks just stays
-// at its chart default, needing no override). A list is walked index-wise:
-// an index past local's length is "add"; a dict element at a shared index
-// recurses; anything else that differs is "replace".
+// at its chart default, needing no override). A live map where local has
+// no map is "replace"d whole, since there's no parent to add keys under.
+// A list is walked index-wise while that's faithful — every shared index
+// holds the same element on both sides (see sameElement), so an index
+// past local's length is "add", a dict element at a shared index
+// recurses, and anything else that differs is "replace". Otherwise (the
+// elements were reordered, or live has fewer of them) index-wise ops
+// would leave a hybrid of both lists — and never shrink one — so the
+// whole list is "replace"d with live's.
 func ToJSON6902Ops(local, live any, path string) []JSONPatchOp {
 	switch liveVal := live.(type) {
 	case map[string]any:
+		if _, ok := local.(map[string]any); !ok {
+			if !reflect.DeepEqual(local, live) {
+				return []JSONPatchOp{{Op: "replace", Path: path, Value: live}}
+			}
+			return nil
+		}
 		return objectOps(local, liveVal, path)
 	case []any:
 		return listOps(local, liveVal, path)
@@ -102,7 +114,13 @@ func objectOps(local any, live map[string]any, path string) []JSONPatchOp {
 }
 
 func listOps(local any, live []any, path string) []JSONPatchOp {
-	localList, _ := local.([]any)
+	localList, ok := local.([]any)
+	if !ok || !indexWiseFaithful(localList, live) {
+		if !reflect.DeepEqual(local, any(live)) {
+			return []JSONPatchOp{{Op: "replace", Path: path, Value: live}}
+		}
+		return nil
+	}
 	var ops []JSONPatchOp
 	for i, liveItem := range live {
 		childPath := fmt.Sprintf("%s/%d", path, i)
@@ -120,6 +138,38 @@ func listOps(local any, live []any, path string) []JSONPatchOp {
 		}
 	}
 	return ops
+}
+
+// indexWiseFaithful reports whether index-wise ops turn local into live:
+// live has at least as many elements, and each index local has holds the
+// same element on both sides.
+func indexWiseFaithful(local, live []any) bool {
+	if len(live) < len(local) {
+		return false
+	}
+	for i := range local {
+		if !sameElement(local[i], live[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameElement reports whether a and b are the same list element: two
+// maps with the same "name" (the key Kubernetes lists are merged by), or
+// any two elements when neither names itself — positional, as before.
+func sameElement(a, b any) bool {
+	am, aok := a.(map[string]any)
+	bm, bok := b.(map[string]any)
+	if !aok || !bok {
+		return aok == bok
+	}
+	an, aHas := am["name"]
+	bn, bHas := bm["name"]
+	if !aHas && !bHas {
+		return true
+	}
+	return aHas && bHas && reflect.DeepEqual(an, bn)
 }
 
 // escapeJSONPointer escapes a JSON-Pointer reference token per RFC 6901:

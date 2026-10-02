@@ -9,14 +9,18 @@ func TestCoerceValue(t *testing.T) {
 	}{
 		{"", ""},
 		{"true", true},
-		{"True", true},
-		{"TRUE", true},
+		{"True", "True"}, // a bool would render back as "true"
+		{"TRUE", "TRUE"},
 		{"false", false},
-		{"False", false},
+		{"False", "False"},
 		{"3", 3},
 		{"0", 0},
 		{"-5", -5},
-		{"0755", 755}, // matches the documented Python quirk faithfully, not "fixed" into octal
+		{"0755", "0755"}, // an int would render back as 755
+		{"0022", "0022"},
+		{"007", "007"},
+		{"+1", "+1"},
+		{"-0", "-0"},
 		{"1.5", "1.5"},
 		{"yes", "yes"},
 		{"null", "null"},

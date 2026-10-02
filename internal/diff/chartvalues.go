@@ -11,10 +11,19 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// chartValueLineRe matches a config/*_env_vars.yaml-style line mapping an
-// env var name to a single .Values dot path, e.g.
+// chartValueLineRe matches an unindented config/*_env_vars.yaml-style
+// line mapping an env var name to a single .Values dot path, e.g.
 // `DEPLOYMENT_ENVIRONMENT: {{ .Values.general.deploymentEnvironment | quote }}`.
-var chartValueLineRe = regexp.MustCompile(`^([A-Za-z0-9_-]+):\s*['"]?\{\{\s*\.Values\.([\w.]+)\s*(?:\|[^}]*)?\}\}['"]?\s*$`)
+//
+// Only pipelines that render the value unchanged are accepted — quote,
+// squote, toString, and default with a literal (which only applies when
+// the value is empty; ChartDiff's re-render check catches that case). A
+// transforming one (printf "https://%s", b64enc, upper) would make the
+// live value the function's output, and patching it back into the path
+// that feeds the function would apply it twice.
+var chartValueLineRe = regexp.MustCompile(`^([A-Za-z0-9_-]+):\s*['"]?\{\{-?\s*\.Values\.([\w.]+)\s*` +
+	`(?:\|\s*(?:quote|squote|toString|default\s+(?:"[^"]*"|'[^']*'|[\w.-]+))\s*)*` +
+	`-?\}\}['"]?\s*$`)
 
 // topLevelKeyRe matches an unindented `KEY:` line — one top-level key of
 // a key-value env-vars file, whatever its value is.
@@ -90,7 +99,9 @@ func scanChartFile(content string) ChartFile {
 		if m := topLevelKeyRe.FindStringSubmatch(line); m != nil {
 			file.Keys[m[1]] = true
 		}
-		if m := chartValueLineRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+		// Unindented only: an indented line is a nested key (a .tpl's
+		// template body), never one of a key-value env file's variables.
+		if m := chartValueLineRe.FindStringSubmatch(strings.TrimRight(line, " \t\r")); m != nil {
 			file.Values[m[1]] = m[2]
 		}
 	}

@@ -111,3 +111,51 @@ func TestLoadEnvironment_ChartsBaseRejectedWithGuidance(t *testing.T) {
 		t.Errorf("LoadEnvironment error = %v, want it to point at repos.charts with the old value's charts dir", err)
 	}
 }
+
+// TestLoadEnvironment_PathsResolveAgainstTheFileAndExpandHome: a relative
+// path in the file is relative to the file, never to the working
+// directory of a later command; a relative flag is relative to the
+// working directory; ~ is the home directory in both.
+func TestLoadEnvironment_PathsResolveAgainstTheFileAndExpandHome(t *testing.T) {
+	t.Setenv(EnvEnvironmentFile, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := writeFile(t, "environment.yaml",
+		"base: gitops\nrepos:\n  charts: ~/charts\n  keos-fleet: ../fleet\ncluster: eosdev\ntenant: stratio\n")
+	dir := filepath.Dir(path)
+
+	env, err := LoadEnvironment(path, Environment{Repos: map[string]string{RepoApps: "apps-wt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := env.RepoPaths()
+	want := RepoPaths{
+		Apps:           filepath.Join(cwd, "apps-wt"),
+		UseCases:       filepath.Join(dir, "gitops", "keos-use-cases"),
+		Fleet:          filepath.Join(filepath.Dir(dir), "fleet"),
+		SystemServices: filepath.Join(dir, "gitops", "keos-system-services"),
+		Charts:         filepath.Join(home, "charts"),
+	}
+	if got != want {
+		t.Errorf("RepoPaths() = %+v\nwant %+v", got, want)
+	}
+}
+
+func TestParseEnvironmentRepos_RelativeDirStillGivesAbsolutePaths(t *testing.T) {
+	t.Chdir(t.TempDir())
+	got, err := ParseEnvironmentRepos([]byte("repos:\n  charts: ../charts\n"), "cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs("charts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["charts"] != want || !filepath.IsAbs(got["charts"]) {
+		t.Errorf("charts = %q, want the absolute %q (cfg/../charts)", got["charts"], want)
+	}
+}

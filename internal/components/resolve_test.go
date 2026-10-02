@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
 )
@@ -530,5 +531,113 @@ func TestResolve_DatamarketAgentObjectIsFixedWhateverTheEntry(t *testing.T) {
 				t.Errorf("entry/object/kustomization = %q/%q/%q, want %s/governance-datamarket-agent/apps-%s", app.Entry, app.Object, app.Kustomization, c.entry, c.entry)
 			}
 		})
+	}
+}
+
+// TestResolveAll_ObjectTwoTypesSelectBecomesOneApp: a live object two
+// catalog types both select (overlapping selectors) is one app, never
+// two — --all asks which type it is, as Resolve does, and without an
+// answer leaves it out.
+func TestResolveAll_ObjectTwoTypesSelectBecomesOneApp(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Doc = nil
+	overlap := *opts.Catalog.Find("postgres-gosec-agent")
+	overlap.Type = "postgres-gosec-agent-copy"
+	opts.Catalog.Types = append(opts.Catalog.Types, overlap)
+	psqlAgent := func(apps []config.App) []string {
+		var out []string
+		for _, a := range apps {
+			if a.LiveName() == "psql-agent" {
+				out = append(out, a.Type)
+			}
+		}
+		return out
+	}
+
+	apps, unresolved, err := ResolveAll(opts) // NonInteractive
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := psqlAgent(apps); len(got) != 0 {
+		t.Errorf("unanswered: psql-agent resolved as %v, want left out", got)
+	}
+	if len(unresolved) != 1 || !errors.Is(unresolved[0], ErrNoAnswer) || !strings.Contains(unresolved[0].Error(), "psql-agent") {
+		t.Errorf("unresolved = %v, want the one psql-agent question", unresolved)
+	}
+
+	p := &scripted{answers: []int{1}}
+	opts.Prompter = p
+	apps, unresolved, err = ResolveAll(opts)
+	if err != nil || len(unresolved) > 0 {
+		t.Fatalf("ResolveAll: %v, unresolved %v", err, unresolved)
+	}
+	if got := psqlAgent(apps); len(got) != 1 || got[0] != "postgres-gosec-agent-copy" {
+		t.Errorf("answered: psql-agent resolved as %v, want exactly the chosen type", got)
+	}
+	if len(p.questions) != 1 || !strings.Contains(p.questions[0], "more than one catalog type") {
+		t.Errorf("questions = %v, want the one type question", p.questions)
+	}
+}
+
+// skipping is a Prompter that picks the trailing "skip" option for any
+// question mentioning skipWhen, and the first real option otherwise.
+type skipping struct {
+	skipWhen string
+	options  [][]string
+}
+
+func (s *skipping) Choose(q string, options []string) (int, error) {
+	s.options = append(s.options, options)
+	if strings.Contains(q, s.skipWhen) {
+		return len(options) - 1, nil
+	}
+	return 0, nil
+}
+
+// TestResolveAll_OperatorCanSkipAnInstance: an entry question in an --all
+// run offers a way out, and taking it leaves that instance out — warned
+// about, not reported as unresolved — while the rest carry on.
+func TestResolveAll_OperatorCanSkipAnInstance(t *testing.T) {
+	opts := baseOptions(t)
+	var logs bytes.Buffer
+	opts.Log = log.New(&logs, false)
+	p := &skipping{skipWhen: "dg-postgresql-internal-agent"}
+	opts.Prompter = p
+
+	apps, unresolved, err := ResolveAll(opts)
+	if err != nil || len(unresolved) > 0 {
+		t.Fatalf("ResolveAll returned error %v, unresolved %v (a skip is not a failure)", err, unresolved)
+	}
+	for _, a := range apps {
+		for _, ref := range a.Live {
+			if ref.Name == "dg-postgresql-internal-agent" {
+				t.Errorf("skipped instance still in the result: %+v", a)
+			}
+		}
+	}
+	if len(apps) == 0 {
+		t.Error("the other instances should still resolve")
+	}
+	if !strings.Contains(logs.String(), `skipping dg-agent stratio-datastores/dg-postgresql-internal-agent → entry "dg-postgresql-internal-agent": you chose to leave it out of this run`) {
+		t.Errorf("no skip warning in the log:\n%s", logs.String())
+	}
+	for _, opts := range p.options {
+		if len(opts) < 2 || opts[len(opts)-1] != skipOption {
+			t.Errorf("question offered %v, want the skip option last", opts)
+		}
+	}
+}
+
+// TestResolve_SingleInstanceHasNoSkipOption: asking for one named app
+// offers only the real entries — skipping the thing you asked for is a no-op.
+func TestResolve_SingleInstanceHasNoSkipOption(t *testing.T) {
+	opts := baseOptions(t)
+	p := &scripted{answers: []int{0}}
+	opts.Prompter = p
+	if _, err := Resolve(opts, "dg-postgresql-internal-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.options) != 1 || len(p.options[0]) != 1 || p.options[0][0] != "dg-hdfs-agent" {
+		t.Errorf("options = %v, want only [dg-hdfs-agent]", p.options)
 	}
 }

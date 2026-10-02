@@ -92,7 +92,10 @@ func TestScanCRDs_DiscoversInTenantNamespaceOnly(t *testing.T) {
 		pgCluster("other-psql", "other-datastores"),
 	).Build()
 
-	components := scanCRDs(context.Background(), c, cat, "stratio")
+	components, err := scanCRDs(context.Background(), c, cat, "stratio")
+	if err != nil {
+		t.Fatal(err)
+	}
 	names := components.names("postgres")
 	if len(names) != 1 || names[0] != "psql" {
 		t.Errorf("postgres entries = %v, want [psql]", names)
@@ -105,7 +108,10 @@ func TestScanCRDs_DepSpecPathResolvesDependency(t *testing.T) {
 		pgBouncer("pool-psql", "stratio-datastores", "psql"),
 	).Build()
 
-	components := scanCRDs(context.Background(), c, cat, "stratio")
+	components, err := scanCRDs(context.Background(), c, cat, "stratio")
+	if err != nil {
+		t.Fatal(err)
+	}
 	entry := components.find("pgbouncer", "pool-psql")
 	if entry == nil {
 		t.Fatal("pgbouncer entry not discovered")
@@ -118,7 +124,10 @@ func TestScanCRDs_DepSpecPathResolvesDependency(t *testing.T) {
 func TestScanCRDs_UnknownCRDSkippedWithoutError(t *testing.T) {
 	cat := loadFixtureCatalog(t)
 	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).Build() // no CRDs registered at all
-	components := scanCRDs(context.Background(), c, cat, "stratio")
+	components, err := scanCRDs(context.Background(), c, cat, "stratio")
+	if err != nil {
+		t.Fatalf("scanCRDs: %v, want an uninstalled CRD skipped", err)
+	}
 	if len(components) != 0 {
 		t.Errorf("components = %+v, want empty", components)
 	}
@@ -136,6 +145,41 @@ func TestScanDeployments_ExactNameMatch(t *testing.T) {
 	}
 	if names := components.names("connectors"); len(names) != 1 || names[0] != "connectors" {
 		t.Errorf("connectors entries = %v", names)
+	}
+}
+
+// TestScanDeployments_SameTenantRulesAsApps: a Deployment marked as
+// another tenant's (CCT's annotation or keos's label), or owned by
+// another object, is never imported — the same objects `apps` leaves out,
+// so the generated file never declares an entry apps can't resolve.
+func TestScanDeployments_SameTenantRulesAsApps(t *testing.T) {
+	cat := loadFixtureCatalog(t)
+	otherAnnotated := deployment("connectors", "keos-core")
+	otherAnnotated.Annotations = map[string]string{"cct.stratio.com/application_tenant": "platform"}
+	otherLabelled := deployment("connectors", "keos-apps")
+	otherLabelled.Labels = map[string]string{"keos.stratio.com/tenant": "platform"}
+	owned := deployment("connectors", "keos-owned")
+	owned.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Foo", Name: "foo", UID: "uid"}}
+	mine := deployment("connectors", "keos-mine")
+	mine.Annotations = map[string]string{"cct.stratio.com/application_tenant": "keos"}
+	for _, tc := range []struct {
+		name string
+		obj  *appsv1.Deployment
+		want int
+	}{
+		{"another tenant's, by annotation", otherAnnotated, 0},
+		{"another tenant's, by label", otherLabelled, 0},
+		{"owned", owned, 0},
+		{"the tenant's own", mine, 1},
+	} {
+		c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(tc.obj).Build()
+		components := Components{}
+		if err := scanDeployments(context.Background(), c, cat, "keos", components); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(components["connectors"]); got != tc.want {
+			t.Errorf("%s: connectors entries = %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }
 

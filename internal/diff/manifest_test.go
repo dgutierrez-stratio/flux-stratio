@@ -244,3 +244,40 @@ func TestManifestDiff_JSON6902ModeExcludePathsApplied(t *testing.T) {
 		t.Errorf("ops = %+v, want a single add at /spec/items/1", ops)
 	}
 }
+
+// TestToJSON6902Ops_ReorderedListReplacedWhole: index-wise ops on a
+// reordered list would build a hybrid matching neither side.
+func TestToJSON6902Ops_ReorderedListReplacedWhole(t *testing.T) {
+	liveNodes := []any{map[string]any{"name": "b"}, map[string]any{"name": "a", "x": 1}}
+	local := map[string]any{"nodes": []any{map[string]any{"name": "a", "x": 1}, map[string]any{"name": "b"}}}
+	live := map[string]any{"nodes": liveNodes}
+	ops := ToJSON6902Ops(local, live, "/spec")
+	want := []JSONPatchOp{{Op: "replace", Path: "/spec/nodes", Value: liveNodes}}
+	if !reflect.DeepEqual(ops, want) {
+		t.Errorf("ops = %+v, want %+v", ops, want)
+	}
+}
+
+// TestToJSON6902Ops_ShorterLiveListReplacedWhole: index-wise ops never
+// remove, so a list live has fewer elements of would keep the extras.
+func TestToJSON6902Ops_ShorterLiveListReplacedWhole(t *testing.T) {
+	local := map[string]any{"hosts": []any{"a", "b", "c"}}
+	live := map[string]any{"hosts": []any{"a", "b"}}
+	ops := ToJSON6902Ops(local, live, "/spec")
+	want := []JSONPatchOp{{Op: "replace", Path: "/spec/hosts", Value: []any{"a", "b"}}}
+	if !reflect.DeepEqual(ops, want) {
+		t.Errorf("ops = %+v, want %+v", ops, want)
+	}
+}
+
+// TestToJSON6902Ops_LiveMapOverLocalScalarReplaced: there's no parent map
+// to add live's keys under, so the value is replaced whole.
+func TestToJSON6902Ops_LiveMapOverLocalScalarReplaced(t *testing.T) {
+	local := map[string]any{"backup": nil}
+	live := map[string]any{"backup": map[string]any{"enabled": true}}
+	ops := ToJSON6902Ops(local, live, "/spec")
+	want := []JSONPatchOp{{Op: "replace", Path: "/spec/backup", Value: map[string]any{"enabled": true}}}
+	if !reflect.DeepEqual(ops, want) {
+		t.Errorf("ops = %+v, want %+v", ops, want)
+	}
+}

@@ -26,6 +26,11 @@ trap 'rm -rf "$TMPDIR"' EXIT
 tar xzf "$FILE" -C "$TMPDIR"
 mkdir -p "$PLUGIN_DIR"
 chmod +x "$TMPDIR/flux-stratio"
-cp "$TMPDIR/flux-stratio" "$PLUGIN_DIR/flux-stratio"
+# Copy next to the target, then rename over it: cp onto a binary that is
+# running (a flux stratio command waiting at a prompt, say) fails with
+# "Text file busy", while a rename swaps the file and leaves the running
+# process on the old one.
+cp "$TMPDIR/flux-stratio" "$PLUGIN_DIR/.flux-stratio.new"
+mv -f "$PLUGIN_DIR/.flux-stratio.new" "$PLUGIN_DIR/flux-stratio"
 
 echo "Installed to $PLUGIN_DIR/flux-stratio"

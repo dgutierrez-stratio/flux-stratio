@@ -51,6 +51,14 @@ func TestGenaiRunQuery_FindsThePrimaryAndSubstitutesTenant(t *testing.T) {
 	if want := "genai"; len(call.Command) == 0 || call.Command[len(call.Command)-1] != want {
 		t.Errorf("Command = %v, want it to target the %q database", call.Command, want)
 	}
+	// Without ON_ERROR_STOP psql exits 0 after a failed statement, and
+	// without --single-transaction a failed DELETE leaves the UPDATE in.
+	cmd := strings.Join(call.Command, " ")
+	for _, want := range []string{"-v ON_ERROR_STOP=1", "--single-transaction"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("Command = %v, want it to carry %q", call.Command, want)
+		}
+	}
 	for _, want := range []string{`UPDATE "genai-api.stratio-genai".chain`, `to_regclass('"genai-gateway.stratio-genai".endpoint')`} {
 		if !strings.Contains(call.Stdin, want) {
 			t.Errorf("SQL sent to stdin lacks %q:\n%s", want, call.Stdin)
@@ -109,5 +117,17 @@ func TestGenaiRunQuery_ExecErrorIsWrapped(t *testing.T) {
 	}
 	if stderr != "syntax error" {
 		t.Errorf("stderr = %q, want it surfaced even on a failed run", stderr)
+	}
+}
+
+// TestGenAISQL_UpdateOnlyRewritesRowsHoldingTheOldName: the UPDATE carries
+// the legacy script's WHERE, so a re-run (or a database already migrated)
+// rewrites no row.
+func TestGenAISQL_UpdateOnlyRewritesRowsHoldingTheOldName(t *testing.T) {
+	update := genaiSQL[:strings.Index(genaiSQL, "DO $$")]
+	for _, col := range []string{"chain_params", "worker_config", "invoke_schema"} {
+		if !strings.Contains(update, col+"::text LIKE '%dg-businessglossary-api%'") {
+			t.Errorf("UPDATE has no WHERE guard on %s:\n%s", col, update)
+		}
 	}
 }

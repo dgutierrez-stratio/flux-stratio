@@ -2,6 +2,7 @@ package tenantimport
 
 import (
 	"context"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,17 +30,24 @@ var crdDepSpecPaths = map[string][]crdDepSpecPath{
 // scanCRDs lists every live instance of every CRD internal/catalog found a
 // healthCheckExprs declaration for, in the tenant's namespaces, and turns
 // each into a skeleton Entry with whatever dependency names its own spec
-// directly supplies.
-func scanCRDs(ctx context.Context, c client.Client, cat *catalog.Catalog, tenantName string) Components {
+// directly supplies. A CRD that isn't installed is skipped — not every
+// cluster runs every component — but any other failure to list it
+// (Forbidden, a timeout) is an error: treated as absent, its instances
+// would be replaced by placeholder entries (expandMandatoryComponents)
+// that dependents then get wired to.
+func scanCRDs(ctx context.Context, c client.Client, cat *catalog.Catalog, tenantName string) (Components, error) {
 	components := Components{}
 	for plural, info := range cat.CRDs {
 		list, err := kubeclient.ListUnstructured(ctx, c, info.GVK, "")
+		if kubeclient.IsNoMatch(err) {
+			continue
+		}
 		if err != nil {
-			continue // this CRD isn't installed on the cluster — not every tenant has every component
+			return nil, fmt.Errorf("listing %s: %w", plural, err)
 		}
 		for i := range list.Items {
 			item := &list.Items[i]
-			if !inTenantNamespace(item.GetNamespace(), tenantName) {
+			if !tenantObject(item, tenantName) {
 				continue
 			}
 			name := item.GetName()
@@ -56,5 +64,5 @@ func scanCRDs(ctx context.Context, c client.Client, cat *catalog.Catalog, tenant
 			components[info.ComponentKey] = append(components[info.ComponentKey], entry)
 		}
 	}
-	return components
+	return components, nil
 }

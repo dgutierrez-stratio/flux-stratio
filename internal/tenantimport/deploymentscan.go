@@ -2,6 +2,7 @@ package tenantimport
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -27,7 +28,9 @@ func scanDeployments(ctx context.Context, c client.Client, cat *catalog.Catalog,
 	nsMatched := map[string]bool{}
 	nsVisited := map[string]bool{}
 	for _, d := range deployments.Items {
-		if !inTenantNamespace(d.Namespace, tenantName) {
+		// An owned Deployment (an operator's, a PgBouncer's) is never a
+		// component of its own — classification skips it the same way.
+		if !tenantObject(&d, tenantName) || len(d.OwnerReferences) > 0 {
 			continue
 		}
 		nsVisited[d.Namespace] = true
@@ -43,7 +46,12 @@ func scanDeployments(ctx context.Context, c client.Client, cat *catalog.Catalog,
 		components[compKey] = append(components[compKey], &Entry{Name: d.Name, Deps: map[string]string{}})
 	}
 
+	namespaces := make([]string, 0, len(nsVisited))
 	for ns := range nsVisited {
+		namespaces = append(namespaces, ns)
+	}
+	sort.Strings(namespaces) // deterministic entry order in the generated file
+	for _, ns := range namespaces {
 		if nsMatched[ns] || !strings.HasPrefix(ns, tenantName+"-") {
 			continue
 		}

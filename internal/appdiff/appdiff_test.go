@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
@@ -310,5 +312,41 @@ func TestDiff_ManifestMode_ReportsFluxManagedLive(t *testing.T) {
 				t.Errorf("FluxManagedBy = %q, want %q", result.FluxManagedBy, c.want)
 			}
 		})
+	}
+}
+
+func TestDroppedFromExisting(t *testing.T) {
+	computed := diff.PatchDoc{TargetKind: "HelmRelease", Patch: map[string]any{
+		"spec": map[string]any{"values": map[string]any{
+			"app": map[string]any{"logLevel": "DEBUG"},
+		}},
+	}}
+	existing := []string{
+		"spec:\n  values:\n    app:\n      logLevel: INFO\n      replicas: 3\n    handEdited: true\n",
+		"spec:\n  values:\n    other: [a, b]\n",
+	}
+	got, err := droppedFromExisting(computed, existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"spec.values.app.replicas", "spec.values.handEdited", "spec.values.other"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dropped = %v, want %v (a changed value is the update, not a loss)", got, want)
+	}
+
+	none, err := droppedFromExisting(computed, []string{"spec:\n  values:\n    app:\n      logLevel: INFO\n", "not: [valid"})
+	if err != nil || len(none) != 0 {
+		t.Errorf("dropped = %v (err %v), want none: same path, new value; an unparseable body is skipped", none, err)
+	}
+}
+
+func TestDroppedFromExisting_JSON6902OpsByPath(t *testing.T) {
+	computed := diff.PatchDoc{TargetKind: "PgCluster", Patch: []diff.JSONPatchOp{{Op: "replace", Path: "/spec/a", Value: 1}}}
+	got, err := droppedFromExisting(computed, []string{"- op: replace\n  path: /spec/a\n  value: 0\n- op: add\n  path: /spec/b\n  value: 2\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/spec/b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("dropped = %v, want %v", got, want)
 	}
 }

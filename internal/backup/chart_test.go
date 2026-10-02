@@ -3,6 +3,7 @@ package backup
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -254,7 +255,7 @@ func TestRun_ChartMode_MultiWorkload_WritesEachWorkloadsOwnEnvFile(t *testing.T)
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-gateway.env"}
+	wantFiles := []string{"deployment.yaml", "workload.deployment.genai-gateway.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-gateway.env"}
 	if !equalStrings(result.Files, wantFiles) {
 		t.Errorf("Files = %v, want %v (genai-litellm isn't live)", result.Files, wantFiles)
 	}
@@ -321,9 +322,13 @@ metadata:
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	wantFiles := []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-ui.env"}
+	wantFiles := []string{"deployment.yaml", "workload.deployment.genai-ui.yaml", "env-vars.env", "env-vars.deployment.genai-api.env", "env-vars.deployment.genai-ui.env"}
 	if !equalStrings(result.Files, wantFiles) {
 		t.Errorf("Files = %v, want %v", result.Files, wantFiles)
+	}
+	ui, err := os.ReadFile(filepath.Join(result.Dir, "workload.deployment.genai-ui.yaml"))
+	if err != nil || !strings.Contains(string(ui), "name: genai-ui") {
+		t.Errorf("workload.deployment.genai-ui.yaml = %q (err %v), want the sibling's own manifest", ui, err)
 	}
 }
 
@@ -628,4 +633,51 @@ func chartsRepoAt(base, charts string) config.RepoPaths {
 	repos := config.ReposUnder(base)
 	repos.Charts = charts
 	return repos
+}
+
+// TestRun_ChartMode_HelmTemplateFails_FallsBackToClassifiedWorkloads: a chart
+// that won't template must not cost the capture of the workload that is live
+// right there, classified and known — only an app with no such workload
+// still fails.
+func TestRun_ChartMode_HelmTemplateFails_FallsBackToClassifiedWorkloads(t *testing.T) {
+	base := fixtureBase(t)
+	chartPath := fixtureChart(t, base, "gosec-agent")
+	var logbuf bytes.Buffer
+	logger := log.New(&logbuf, false)
+
+	hr := helmRelease("psql-gosec-agent", "stratio-datastores", map[string]any{})
+	live := deploymentWithEnv("psql-agent", "stratio-datastores", "DEBUG")
+	// Adopted by the HelmRelease, as in an already-migrated app: that is what
+	// sends the capture through templating in the first place.
+	live.Labels = map[string]string{"helm.toolkit.fluxcd.io/name": "psql-gosec-agent", "helm.toolkit.fluxcd.io/namespace": "stratio-datastores"}
+	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(hr, live).Build()
+	idx, err := discovery.Scan(context.Background(), c, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := config.App{
+		ID: "psql-gosec-agent", Object: "psql-gosec-agent", ChartPath: chartPath,
+		Live: []config.ObjectRef{{GVK: deploymentGVK, Namespace: "stratio-datastores", Name: "psql-agent"}},
+	}
+	for name, resp := range map[string]runner.FakeResponse{
+		"helm fails":                 {Err: errors.New("template: no such chart version")},
+		"chart renders nothing live": {Stdout: []byte("")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := Run(context.Background(), Options{
+				Repos: config.ReposUnder(base), App: app, Index: idx, Client: c, Dir: t.TempDir(), Clock: fixedClock, Log: logger,
+				Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{"helm": resp}},
+			})
+			if err != nil {
+				t.Fatalf("Run returned error: %v", err)
+			}
+			if !equalStrings(result.Files, []string{"deployment.yaml", "env-vars.env", "env-vars.deployment.psql-agent.env"}) {
+				t.Errorf("Files = %v, want the classified Deployment's capture", result.Files)
+			}
+		})
+	}
+	if !strings.Contains(logbuf.String(), "captured the classified live workloads directly instead") {
+		t.Errorf("the fallback isn't announced: %s", logbuf.String())
+	}
 }

@@ -1,7 +1,6 @@
 package appdiff
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +10,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	"github.com/Stratio/flux-stratio/internal/envvars"
 	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
 
@@ -78,8 +78,8 @@ func readBaselineWorkloadEnv(dir, name string) (env map[string]string, ok bool, 
 }
 
 // readBaselineEnvFile reads name (e.g. "env-vars.env") from a backup
-// directory — the same "KEY=VALUE" format internal/backup's envFile writer
-// produces — into a map.
+// directory — envvars.EncodeFile's format, which internal/backup writes —
+// into a map.
 func readBaselineEnvFile(dir, name string) (map[string]string, error) {
 	path := filepath.Join(dir, name)
 	f, err := os.Open(path)
@@ -88,20 +88,8 @@ func readBaselineEnvFile(dir, name string) (map[string]string, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	out := map[string]string{}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		out[key] = value
-	}
-	if err := scanner.Err(); err != nil {
+	out, err := envvars.DecodeFile(f)
+	if err != nil {
 		return nil, fmt.Errorf("reading baseline %s: %w", path, err)
 	}
 	return out, nil

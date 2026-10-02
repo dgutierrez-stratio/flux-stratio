@@ -11,7 +11,21 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// SubprocessTimeout bounds every external process Exec runs, so a hung
+// helm or flux-operator can't block a migration forever.
+const SubprocessTimeout = 10 * time.Minute
+
+// WithDefaultTimeout returns ctx bounded by d, unless ctx already carries
+// an earlier deadline of its own.
+func WithDefaultTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= d {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, d)
+}
 
 // Runner runs an external command and returns its captured stdout and
 // stderr separately — never merged. The Python client captured a
@@ -29,6 +43,8 @@ type Exec struct{}
 
 // Run implements Runner.
 func (Exec) Run(ctx context.Context, name string, args ...string) (stdout, stderr []byte, err error) {
+	ctx, cancel := WithDefaultTimeout(ctx, SubprocessTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // name/args come from this plugin's own fixed call sites, never user input
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf

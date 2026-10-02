@@ -323,9 +323,9 @@ func SeedCatalog() Catalog {
 			Match: cctMatch(kindDeployment, "rocket", "default"),
 			Chart: &Chart{Path: "rocket"},
 			Exclude: []string{
-				"spec.values.rocketCommon.settings.governanceIntegration.crossdataCatalogGovernanceUri",
-				"spec.values.rocketCommon.settings.governanceIntegration.crossdataCatalogGovernancePost",
-				"spec.values.rocketCommon.settings.governanceIntegration.lineageHttpRequestUri",
+				"spec.values.rocketServer.settings.governanceIntegration.crossdataCatalogGovernanceUri",
+				"spec.values.rocketServer.settings.governanceIntegration.crossdataCatalogGovernancePost",
+				"spec.values.rocketServer.settings.governanceIntegration.lineageHttpRequestUri",
 				"spec.values.rocketCommon.general.genAI.genaiLayerConf.chainsGovernanceUrl",
 				"spec.values.rocketCommon.general.governanceRegistration.governanceDeployment",
 				"spec.values.rocketCommon.general.governanceRegistration.governanceBaseUri",

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
@@ -27,8 +28,16 @@ const datamarketAgentHelmRelease = "datamarket-agent"
 // it isn't already suspended (a HelmRelease Flux itself applies is the
 // GitOps side, never touched), then scales every legacy Deployment still
 // running to 0 and waits for its pods to go. The Deployments are kept.
+//
+// A legacy Deployment is one CCT deployed (legacyObjects) or one the
+// legacy HelmRelease rendered: helm-controller labels what it renders
+// with helm.toolkit.fluxcd.io/name, the label legacyObjects reads as
+// "Flux-managed", and needn't carry CCT's label at all — so without this
+// second lookup, an environment with the legacy HelmRelease had nothing
+// scaled down and the legacy agent kept running alongside the new one.
 func planDatamarketAgent(ctx context.Context, opts Options) ([]Operation, error) {
 	var ops []Operation
+	var legacyHR *unstructured.Unstructured
 
 	hr, err := kubeclient.GetUnstructured(ctx, opts.Client, gvkHelmRelease, opts.LiveNamespace, datamarketAgentHelmRelease)
 	switch {
@@ -37,14 +46,24 @@ func planDatamarketAgent(ctx context.Context, opts Options) ([]Operation, error)
 		return nil, fmt.Errorf("fetching HelmRelease %s/%s: %w", opts.LiveNamespace, datamarketAgentHelmRelease, err)
 	default:
 		suspended, _, _ := unstructured.NestedBool(hr.Object, "spec", "suspend")
-		if !suspended && !fluxManaged(hr) {
-			ops = append(ops, patchOp("suspend", hr, map[string]any{"suspend": true}))
+		if !fluxManaged(hr) {
+			legacyHR = hr
+			if !suspended {
+				ops = append(ops, patchOp("suspend", hr, map[string]any{"suspend": true}))
+			}
 		}
 	}
 
 	deps, err := legacyObjects(ctx, opts, gvkDeployment)
 	if err != nil {
 		return nil, err
+	}
+	if legacyHR != nil {
+		rendered, err := renderedBy(ctx, opts, legacyHR, gvkDeployment)
+		if err != nil {
+			return nil, err
+		}
+		deps = appendNew(deps, rendered)
 	}
 	for _, dep := range deps {
 		if n, found, _ := unstructured.NestedInt64(dep.Object, "spec", "replicas"); found && n == 0 {
@@ -78,4 +97,47 @@ func scaleToZeroOp(dep *unstructured.Unstructured) Operation {
 		return waitForNoPods(ctx, c, dep.GetNamespace(), selector, 2*time.Minute)
 	}
 	return op
+}
+
+// renderedBy lists the objects of kind gvk helm-controller rendered for
+// hr, by the labels it stamps on each one.
+func renderedBy(ctx context.Context, opts Options, hr *unstructured.Unstructured, gvk schema.GroupVersionKind) ([]*unstructured.Unstructured, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
+	labels := client.MatchingLabels{
+		"helm.toolkit.fluxcd.io/name":      hr.GetName(),
+		"helm.toolkit.fluxcd.io/namespace": hr.GetNamespace(),
+	}
+	if err := opts.Client.List(ctx, list, labels); err != nil {
+		return nil, fmt.Errorf("listing the %ss HelmRelease %s/%s rendered: %w", gvk.Kind, hr.GetNamespace(), hr.GetName(), err)
+	}
+	out := make([]*unstructured.Unstructured, 0, len(list.Items))
+	for i := range list.Items {
+		obj := &list.Items[i]
+		obj.SetGroupVersionKind(gvk)
+		out = append(out, obj)
+	}
+	return out, nil
+}
+
+// appendNew appends to objs each of more not already in it (by UID, or
+// namespace/name when there's none).
+func appendNew(objs, more []*unstructured.Unstructured) []*unstructured.Unstructured {
+	key := func(o *unstructured.Unstructured) string {
+		if uid := o.GetUID(); uid != "" {
+			return string(uid)
+		}
+		return o.GetNamespace() + "/" + o.GetName()
+	}
+	seen := map[string]bool{}
+	for _, o := range objs {
+		seen[key(o)] = true
+	}
+	for _, o := range more {
+		if !seen[key(o)] {
+			seen[key(o)] = true
+			objs = append(objs, o)
+		}
+	}
+	return objs
 }

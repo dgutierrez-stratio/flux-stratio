@@ -1,10 +1,12 @@
 package appmigrate
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
 // Confirm prints prompt to out — the narration stream, never stdout, which
@@ -19,8 +21,8 @@ func Confirm(in io.Reader, out io.Writer, prompt string) (bool, error) {
 	if _, err := fmt.Fprint(out, prompt); err != nil {
 		return false, fmt.Errorf("writing confirmation prompt: %w", err)
 	}
-	line, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && err != io.EOF { //nolint:errorlint // matching flux-keos's own Confirm exactly
+	line, err := ui.ReadLine(in)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return false, fmt.Errorf("reading confirmation: %w", err)
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))

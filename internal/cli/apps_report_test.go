@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -49,6 +50,34 @@ func TestReportChartReview(t *testing.T) {
 	}
 }
 
+func TestReportChartReview_ExcludedIsInformationOnly(t *testing.T) {
+	review := chartReview{
+		Excluded: []diff.ExcludedDiff{
+			{Workload: "genai-api", Name: "VAULT_ROLE", Rendered: "genai_genai-api", Live: "legacy-role", Path: "genaiApi.general.identity.approlename"},
+			{Name: "ROLE", Rendered: "a", Live: "b", Path: "x.role"},
+		},
+		Source: "backup",
+	}
+	if review.hasWarnings() {
+		t.Error("hasWarnings() = true with only Excluded set: it must not make --yes stop")
+	}
+
+	var buf bytes.Buffer
+	reportChartReview(log.New(&buf, false), review)
+	out := buf.String()
+	for _, want := range []string{
+		`excluded by the catalog: genai-api/VAULT_ROLE live "legacy-role", GitOps default "genai_genai-api" (genaiApi.general.identity.approlename)`,
+		`excluded by the catalog: ROLE live "b", GitOps default "a" (x.role)`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "⚠") {
+		t.Errorf("excluded differences were printed as warnings:\n%s", out)
+	}
+}
+
 func TestReportChartReview_NothingToReportIsSilent(t *testing.T) {
 	var buf bytes.Buffer
 	reportChartReview(log.New(&buf, false), chartReview{Source: "live cluster"})
@@ -65,6 +94,21 @@ func TestReportNoChange_UnmappedIsNotNoDifferences(t *testing.T) {
 	reportNoChange(log.New(&buf, false), false, 0, chartReview{Unmapped: []diff.UnmappedDiff{{Name: "X"}}})
 	if out := buf.String(); strings.Contains(out, "no differences") || !strings.Contains(out, "need manual review") {
 		t.Errorf("output = %q, want a manual-review warning, not \"no differences\"", out)
+	}
+}
+
+func TestReportLegacyAgentPatches(t *testing.T) {
+	app := config.App{Object: "opensearch1-gosec-agent"}
+	var buf bytes.Buffer
+	reportLegacyAgentPatches(log.New(&buf, false), app, 0)
+	if buf.Len() != 0 {
+		t.Errorf("no legacy patch: output = %q, want nothing", buf.String())
+	}
+	reportLegacyAgentPatches(log.New(&buf, false), app, 1)
+	for _, want := range []string{"opensearch1-gosec-agent", "config.agent.patches", "remove"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("output missing %q: %s", want, buf.String())
+		}
 	}
 }
 
@@ -86,19 +130,27 @@ func TestReportUnresolvedDeps(t *testing.T) {
 	}
 }
 
+// TestConfirmWarnings: warnings stop the app until the operator says to
+// go on — a decline is errNotConfirmed, never a quiet success — and
+// --yes doesn't answer for them: only --accept-warnings does.
 func TestConfirmWarnings(t *testing.T) {
 	app := config.App{Name: "Rocket rocket"}
 	tests := []struct {
-		name                 string
-		warned, dryRun, yes  bool
-		stdin                string
-		wantProceed, prompts bool
+		name         string
+		warned       bool
+		flags        migrateFlags
+		stdin        string
+		wantErr      string
+		notConfirmed bool
+		prompts      bool
 	}{
-		{name: "no warnings", wantProceed: true},
-		{name: "accepted", warned: true, stdin: "y\n", wantProceed: true, prompts: true},
-		{name: "declined", warned: true, stdin: "n\n", prompts: true},
-		{name: "dry run never asks", warned: true, dryRun: true, wantProceed: true},
-		{name: "yes never asks", warned: true, yes: true, wantProceed: true},
+		{name: "no warnings"},
+		{name: "accepted", warned: true, stdin: "y\n", prompts: true},
+		{name: "declined", warned: true, stdin: "n\n", prompts: true, wantErr: "not confirmed", notConfirmed: true},
+		{name: "dry run never asks", warned: true, flags: migrateFlags{dryRun: true}},
+		{name: "yes stops on warnings", warned: true, flags: migrateFlags{yes: true}, wantErr: "--accept-warnings"},
+		{name: "yes with accept-warnings goes on", warned: true, flags: migrateFlags{yes: true, acceptWarnings: true}},
+		{name: "yes without warnings goes on", flags: migrateFlags{yes: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,12 +158,15 @@ func TestConfirmWarnings(t *testing.T) {
 			cmd := &cobra.Command{}
 			cmd.SetIn(strings.NewReader(tt.stdin))
 			cmd.SetErr(&stderr)
-			proceed, err := confirmWarnings(cmd, log.New(&stderr, false), app, tt.warned, tt.dryRun, tt.yes)
-			if err != nil {
-				t.Fatal(err)
+			err := confirmWarnings(cmd, app, tt.warned, tt.flags, "Show the patch")
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("err = %v, want nil", err)
 			}
-			if proceed != tt.wantProceed {
-				t.Errorf("proceed = %v, want %v", proceed, tt.wantProceed)
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("err = %v, want it to mention %q", err, tt.wantErr)
+			}
+			if got := errors.Is(err, errNotConfirmed); got != tt.notConfirmed {
+				t.Errorf("errors.Is(err, errNotConfirmed) = %v, want %v", got, tt.notConfirmed)
 			}
 			if asked := strings.Contains(stderr.String(), "Review the warnings above"); asked != tt.prompts {
 				t.Errorf("prompted = %v, want %v:\n%s", asked, tt.prompts, stderr.String())

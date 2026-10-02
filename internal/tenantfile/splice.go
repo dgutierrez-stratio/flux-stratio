@@ -76,7 +76,7 @@ func Splice(d *Doc, cat *catalog.Catalog, app config.App, patch diff.PatchDoc) e
 		)
 	}
 
-	entry, err := FindComponentEntry(d, OwnerName(app.Kustomization, anchor))
+	entry, err := FindComponentEntry(d, OwnerOf(app, anchor))
 	if err != nil {
 		return fmt.Errorf("app %q: %w", app.ID, err)
 	}
@@ -101,4 +101,17 @@ func Splice(d *Doc, cat *catalog.Catalog, app config.App, patch diff.PatchDoc) e
 func OwnerName(kustomizationName string, anchor catalog.ResolvedAnchor) string {
 	name := strings.TrimPrefix(kustomizationName, "apps-")
 	return strings.TrimSuffix(name, anchor.Suffix)
+}
+
+// OwnerOf is the name of the components.<key>[] entry that owns app: the
+// Entry it was resolved to, which is what the tenant file declares. Only an
+// App with no Entry (one built by hand) falls back to OwnerName, deriving it
+// from the Kustomization name — which stopped being the entry name once a
+// template pinned a Kustomization to a fixed name ("apps-litellm", whose
+// entry is still "genai-litellm").
+func OwnerOf(app config.App, anchor catalog.ResolvedAnchor) string {
+	if app.Entry != "" {
+		return app.Entry
+	}
+	return OwnerName(app.Kustomization, anchor)
 }

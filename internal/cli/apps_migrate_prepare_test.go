@@ -75,24 +75,38 @@ type prepareRun struct {
 	stdout, stderr bytes.Buffer
 	muts           mutations
 	c              client.Client
+	// backups counts calls to the backupFirst hook; backupErr is what it
+	// returns.
+	backups   int
+	backupErr error
 }
 
 // runPrepare runs ensurePrepared for app against objs, answering prompts
 // from stdin. execer is nil unless the step under test has a Query.
 func runPrepare(t *testing.T, app config.App, stdin io.Reader, dryRun, yes bool, deleteErr error, execer kubeclient.Execer, objs ...client.Object) (*prepareRun, error) {
 	t.Helper()
+	return runPrepareWithBackup(t, app, stdin, dryRun, yes, deleteErr, nil, execer, objs...)
+}
+
+// runPrepareWithBackup is runPrepare with backupFirst returning backupErr.
+func runPrepareWithBackup(t *testing.T, app config.App, stdin io.Reader, dryRun, yes bool, deleteErr, backupErr error, execer kubeclient.Execer, objs ...client.Object) (*prepareRun, error) {
+	t.Helper()
 	scheme, err := kubeclient.NewScheme()
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &prepareRun{}
+	r := &prepareRun{backupErr: backupErr}
 	r.c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithInterceptorFuncs(r.muts.funcs(deleteErr)).Build()
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetIn(stdin)
 	cmd.SetOut(&r.stdout)
 	cmd.SetErr(&r.stderr)
-	err = ensurePrepared(cmd, app, "stratio", r.c, execer, log.New(&r.stderr, true), dryRun, yes)
+	backupFirst := func() error {
+		r.backups++
+		return r.backupErr
+	}
+	err = ensurePrepared(cmd, app, "stratio", r.c, execer, backupFirst, log.New(&r.stderr, true), dryRun, yes)
 	return r, err
 }
 
@@ -114,8 +128,8 @@ func TestEnsurePrepared_DryRunShowsThePlanAndChangesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensurePrepared: %v", err)
 	}
-	if r.muts.deletes+r.muts.patches != 0 || !r.ingressExists(t) {
-		t.Errorf("dry run mutated the cluster: %+v", r.muts)
+	if r.muts.deletes+r.muts.patches != 0 || !r.ingressExists(t) || r.backups != 0 {
+		t.Errorf("dry run mutated the cluster or took a backup: %+v, backups = %d", r.muts, r.backups)
 	}
 	const op = "1. delete Ingress stratio-datastores/dg-datarest-pgi-admin.eosdev.int"
 	if !strings.Contains(r.stderr.String(), op) || !strings.Contains(r.stderr.String(), "dry run: would run prepare step") {
@@ -152,6 +166,9 @@ func TestEnsurePrepared_ConfirmedRunsExactlyThePlan(t *testing.T) {
 	if r.muts.deletes != 1 || r.ingressExists(t) {
 		t.Errorf("deletes = %d, Ingress still there = %v; want exactly the one planned delete", r.muts.deletes, r.ingressExists(t))
 	}
+	if r.backups != 1 {
+		t.Errorf("backups = %d, want 1 taken before the delete", r.backups)
+	}
 	if !strings.Contains(r.stderr.String(), `prepare step "prepare-datarest" complete`) {
 		t.Errorf("stderr:\n%s", r.stderr.String())
 	}
@@ -175,10 +192,25 @@ func TestEnsurePrepared_YesSkipsTheAutomatedPrompt(t *testing.T) {
 	}
 }
 
+// TestEnsurePrepared_FailedBackupChangesNothing: an automated step never
+// deletes anything it couldn't back up first.
+func TestEnsurePrepared_FailedBackupChangesNothing(t *testing.T) {
+	r, err := runPrepareWithBackup(t, datarestApp, noRead{t}, false, true, nil, errors.New("disk full"), nil, legacyIngress())
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("err = %v, want the backup's error", err)
+	}
+	if r.muts.deletes != 0 || !r.ingressExists(t) {
+		t.Errorf("the Ingress was deleted although its backup failed")
+	}
+}
+
 func TestEnsurePrepared_SatisfiedIsSilent(t *testing.T) {
 	r, err := runPrepare(t, datarestApp, noRead{t}, false, false, nil, nil)
 	if err != nil {
 		t.Fatalf("ensurePrepared: %v", err)
+	}
+	if r.backups != 0 {
+		t.Errorf("an already-satisfied step took a backup")
 	}
 	if r.stdout.Len() != 0 || strings.Contains(r.stderr.String(), "is required") {
 		t.Errorf("an already-satisfied step printed a plan:\nstdout: %s\nstderr: %s", r.stdout.String(), r.stderr.String())
@@ -224,14 +256,18 @@ func genaiMasterPod() *corev1.Pod {
 	return pod
 }
 
-// TestEnsurePrepared_GenaiAlwaysAsks: apps migrate runs the query itself
-// (against the resolved pod) and shows the real output, but the
-// confirmation is never skipped by --yes, a no stops the migration, and
-// --dry-run resolves the pod and shows the SQL without running anything.
+// TestEnsurePrepared_GenaiAlwaysAsks: apps migrate shows the SQL and its
+// target pod and asks before running anything, then shows the real output
+// and asks again; --yes answers neither, a no to either stops the
+// migration, and --dry-run resolves the pod and shows the SQL without
+// running anything.
 func TestEnsurePrepared_GenaiAlwaysAsks(t *testing.T) {
 	app := config.App{ID: "genai", Name: "GenAI genai", Prepare: "prepare-genai"}
-	execer := &kubeclient.FakeExecer{Response: kubeclient.FakeExecResponse{Stdout: "UPDATE 1\nDELETE 1\n"}}
+	newExecer := func() *kubeclient.FakeExecer {
+		return &kubeclient.FakeExecer{Response: kubeclient.FakeExecResponse{Stdout: "UPDATE 1\nDELETE 1\n"}}
+	}
 
+	execer := newExecer()
 	r, err := runPrepare(t, app, noRead{t}, true, false, nil, execer, genaiMasterPod())
 	if err != nil || !strings.Contains(r.stderr.String(), `UPDATE "genai-api.stratio-genai".chain`) {
 		t.Errorf("dry run: err = %v, want the tenant's SQL shown and no question asked:\n%s", err, r.stderr.String())
@@ -240,10 +276,28 @@ func TestEnsurePrepared_GenaiAlwaysAsks(t *testing.T) {
 		t.Errorf("dry run: execer was called: %v", execer.Calls)
 	}
 
-	if _, err := runPrepare(t, app, strings.NewReader("n\n"), false, true, nil, execer, genaiMasterPod()); err == nil || !strings.Contains(err.Error(), "not confirmed") {
-		t.Errorf("--yes with a no: err = %v, want not confirmed (--yes must not answer it)", err)
+	execer = newExecer()
+	r, err = runPrepare(t, app, strings.NewReader("n\n"), false, true, nil, execer, genaiMasterPod())
+	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Errorf("--yes with a no before running: err = %v, want not confirmed (--yes must not answer it)", err)
 	}
-	r, err = runPrepare(t, app, strings.NewReader("y\n"), false, true, nil, execer, genaiMasterPod())
+	if len(execer.Calls) != 0 {
+		t.Errorf("declined before running: execer was called: %v", execer.Calls)
+	}
+	if !strings.Contains(r.stderr.String(), `UPDATE "genai-api.stratio-genai".chain`) {
+		t.Errorf("the SQL wasn't shown before the question:\n%s", r.stderr.String())
+	}
+
+	execer = newExecer()
+	if _, err := runPrepare(t, app, strings.NewReader("y\nn\n"), false, true, nil, execer, genaiMasterPod()); err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Errorf("no to the output: err = %v, want not confirmed", err)
+	}
+	if len(execer.Calls) != 1 {
+		t.Errorf("execer calls = %d, want 1", len(execer.Calls))
+	}
+
+	execer = newExecer()
+	r, err = runPrepare(t, app, strings.NewReader("y\ny\n"), false, true, nil, execer, genaiMasterPod())
 	if err != nil {
 		t.Errorf("confirmed: err = %v", err)
 	}
@@ -257,5 +311,31 @@ func TestEnsurePrepared_UnknownStepFails(t *testing.T) {
 	app.Prepare = "prepare-nothing"
 	if _, err := runPrepare(t, app, noRead{t}, false, true, nil, nil); err == nil || !strings.Contains(err.Error(), "unknown prepare step") {
 		t.Errorf("err = %v, want unknown prepare step", err)
+	}
+}
+
+// TestSaveThenPrepare_SaveFailureRunsNoPrepare: a prepare step may delete
+// the live workload the patch came from, so it never runs unless the
+// patch was saved first.
+func TestSaveThenPrepare_SaveFailureRunsNoPrepare(t *testing.T) {
+	var order []string
+	save := func() error { order = append(order, "save"); return errors.New("read-only file system") }
+	prepared := func() error { order = append(order, "prepare"); return nil }
+	if err := saveThenPrepare(datarestApp, save, prepared); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("err = %v, want the save's error", err)
+	}
+	if strings.Join(order, ",") != "save" {
+		t.Errorf("ran %v, want only the save", order)
+	}
+
+	order = nil
+	save = func() error { order = append(order, "save"); return nil }
+	prepared = func() error { order = append(order, "prepare"); return errors.New("not confirmed") }
+	err := saveThenPrepare(datarestApp, save, prepared)
+	if strings.Join(order, ",") != "save,prepare" {
+		t.Errorf("ran %v, want save then prepare", order)
+	}
+	if err == nil || !strings.Contains(err.Error(), "now carries") || !strings.Contains(err.Error(), "not confirmed") {
+		t.Errorf("err = %v, want it to say the patch is saved and why prepare stopped", err)
 	}
 }

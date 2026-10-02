@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,7 +28,6 @@ import (
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
-	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
 
 // Options configures one Render call.
@@ -46,6 +46,12 @@ type Options struct {
 	// Object is the exact object name, inside that Kustomization, to
 	// select and return.
 	Object string
+	// Kind, if set, is the kind of that object — a chart-mode app's
+	// HelmRelease. Several objects of a Kustomization can share a name (a
+	// storage overlay's Secret named like the app's HelmRelease); Kind is
+	// what picks the right one. Left empty, core-group objects (Secret,
+	// ConfigMap, Service...) lose to a custom resource of the same name.
+	Kind string
 
 	Runner runner.Runner
 	// Client is used only to resolve postBuild.substituteFrom against the
@@ -126,14 +132,46 @@ func Render(ctx context.Context, opts Options) (*Result, error) {
 }
 
 func findObject(docs []*unstructured.Unstructured, opts Options) (*unstructured.Unstructured, error) {
-	obj := yamldocs.FindByName(docs, opts.Object)
-	if obj == nil {
+	var matches []*unstructured.Unstructured
+	for _, d := range docs {
+		if d.GetName() == opts.Object {
+			matches = append(matches, d)
+		}
+	}
+	if len(matches) == 0 {
 		return nil, fmt.Errorf(
 			"object %q not found among the %d object(s) rendered by kustomization %q (rset %q)",
 			opts.Object, len(docs), opts.Kustomization, opts.Rset,
 		)
 	}
-	return obj, nil
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+
+	var preferred []*unstructured.Unstructured
+	for _, m := range matches {
+		if opts.Kind != "" && m.GetKind() == opts.Kind || opts.Kind == "" && strings.Contains(m.GetAPIVersion(), "/") {
+			preferred = append(preferred, m)
+		}
+	}
+	kinds := make([]string, 0, len(matches))
+	for _, m := range matches {
+		kinds = append(kinds, m.GetKind())
+	}
+	if len(preferred) == 0 {
+		if opts.Kind != "" {
+			return nil, fmt.Errorf(
+				"kustomization %q (rset %q) renders %d objects named %q (%s), none of them a %s",
+				opts.Kustomization, opts.Rset, len(matches), opts.Object, strings.Join(kinds, ", "), opts.Kind,
+			)
+		}
+		preferred = matches
+	}
+	if len(preferred) > 1 {
+		opts.Log.Warningf("kustomization %q renders %d objects named %q (%s) and nothing says which one is the app; using the %s",
+			opts.Kustomization, len(matches), opts.Object, strings.Join(kinds, ", "), preferred[0].GetKind())
+	}
+	return preferred[0], nil
 }
 
 // withoutPatchesFor returns the patch bodies of ks's spec.patches entries

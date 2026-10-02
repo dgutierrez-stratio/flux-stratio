@@ -2,8 +2,10 @@ package render
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -46,6 +48,17 @@ func resolveSubstituteFrom(ctx context.Context, c client.Client, ks *unstructure
 		}
 
 		data, err := fetchKeyValues(ctx, c, kind, namespace, name)
+		if apierrors.IsNotFound(err) {
+			// Flux reads substituteFrom in the Kustomization's own namespace,
+			// so a ConfigMap present elsewhere (flux-system's
+			// keos-runtime-info) doesn't count. The tenant's ResourceSets copy
+			// those in; until they have reconciled, there's nothing to render
+			// the app's variables from, and rendering without them would
+			// substitute empty strings and invent differences.
+			return nil, fmt.Errorf("%s %s/%s not found: Flux reads substituteFrom in the Kustomization's own namespace (%s), "+
+				"where the tenant's ResourceSets copy such ConfigMaps in; check they have reconciled "+
+				"(`kubectl get resourcesets -A`, e.g. tenant-runtime-info): %w", kind, namespace, name, namespace, err)
+		}
 		if err != nil {
 			return nil, err
 		}

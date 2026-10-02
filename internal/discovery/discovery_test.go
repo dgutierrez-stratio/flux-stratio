@@ -12,7 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/Stratio/flux-stratio/internal/log"
 )
@@ -243,5 +245,31 @@ func TestIndex_GetMatchesKindAndNamespace(t *testing.T) {
 	pgdb := schema.GroupVersionKind{Group: "postgres.stratio.com", Version: "v1", Kind: "PgDatabase"}
 	if got, ok := idx.Get(pgdb, "stratio-datastores", "genai"); !ok || got.GetKind() != "PgDatabase" {
 		t.Errorf("Get(PgDatabase) = %v, %v", got, ok)
+	}
+}
+
+// TestScan_ForbiddenKindIsWarnedAbout: a kind the client may not list is
+// still skipped, so the scan goes on, but always with a visible warning —
+// whatever it holds is missing from every backup and lookup that follows.
+// An uninstalled kind stays a debug-only skip.
+func TestScan_ForbiddenKindIsWarnedAbout(t *testing.T) {
+	var out bytes.Buffer
+	logger := log.New(&out, false)
+	c := fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(
+		obj("postgres.stratio.com/v1", "PgCluster", "stratio-datastores", "psql"),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == "PgCluster" {
+				return apierrors.NewForbidden(schema.GroupResource{Group: "postgres.stratio.com", Resource: "pgclusters"}, "", fmt.Errorf("denied"))
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}).Build()
+
+	if _, err := Scan(context.Background(), c, logger); err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if got := strings.Count(out.String(), "not allowed to list"); got != 1 {
+		t.Errorf("warnings = %d, want 1 (PgCluster only; uninstalled kinds stay quiet):\n%s", got, out.String())
 	}
 }

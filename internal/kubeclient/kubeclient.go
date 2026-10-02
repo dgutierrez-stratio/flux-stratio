@@ -9,6 +9,7 @@ package kubeclient
 
 import (
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +17,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -23,11 +25,20 @@ import (
 // server-side write (e.g. prepare-datamarket-agent's scale-to-zero).
 const fieldOwner = "flux-stratio"
 
+// RequestTimeout bounds each API request the client makes when the
+// kubeconfig doesn't set a timeout of its own, so an unreachable API
+// server fails a command instead of hanging it.
+const RequestTimeout = 2 * time.Minute
+
 // New builds a controller-runtime client from the given kubeconfig flags.
 func New(kubeconfigArgs *genericclioptions.ConfigFlags) (client.Client, error) {
 	cfg, err := kubeconfigArgs.ToRESTConfig()
 	if err != nil {
 		return nil, fmt.Errorf("loading kubeconfig failed: %w", err)
+	}
+	if cfg.Timeout == 0 {
+		cfg = rest.CopyConfig(cfg)
+		cfg.Timeout = RequestTimeout
 	}
 
 	restMapper, err := kubeconfigArgs.ToRESTMapper()

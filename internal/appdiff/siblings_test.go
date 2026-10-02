@@ -2,14 +2,20 @@ package appdiff
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/diff"
@@ -121,11 +127,11 @@ func genaiDiffOptions(t *testing.T) Options {
 			ID: "genai", Rset: "apps/components/resourceset-apps-genai.yaml",
 			Kustomization: "apps-genai", Object: "genai", ChartPath: "genai",
 		},
-		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+		Runner: helmSim{&runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputGenai)},
 			"flux":          {Stdout: []byte(kustomizationBuildOutputGenai)},
 			"helm":          {Stdout: []byte(helmTemplateOutputGenai)},
-		}},
+		}}},
 		Log: log.New(io.Discard, false),
 	}
 }
@@ -298,5 +304,28 @@ func TestWorkloadEnvFile(t *testing.T) {
 		if got := IsWorkloadEnvFile(file); got != want {
 			t.Errorf("IsWorkloadEnvFile(%q) = %v, want %v", file, got, want)
 		}
+	}
+}
+
+// TestDiff_ChartMode_UnreadableSiblingFails: only a NotFound sibling is
+// "missing". One the client can't read (Forbidden) must fail the diff —
+// treated as absent, its variables would stop protecting shared .Values
+// paths and the patch could change them.
+func TestDiff_ChartMode_UnreadableSiblingFails(t *testing.T) {
+	opts := genaiDiffOptions(t)
+	opts.Client = fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
+		liveGenaiWorkload(t, "genai-api", "VAULT_ROLE", "stratio-genai-genai-api"),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if key.Name == "genai-ui" {
+				return apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, key.Name, errors.New("rbac"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+
+	_, err := Diff(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "genai-ui") || !apierrors.IsForbidden(err) {
+		t.Errorf("err = %v, want the Forbidden read of genai-ui", err)
 	}
 }

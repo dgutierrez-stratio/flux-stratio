@@ -2,6 +2,7 @@ package drift
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -388,6 +389,7 @@ func TestCompare_PerWorkloadEnvFiles_ShowSiblingDrift(t *testing.T) {
 	writeBackupFile(t, backupDir, "env-vars.env", "VAULT_ROLE=api-role\n")
 	writeBackupFile(t, backupDir, "env-vars.deployment.genai-api.env", "VAULT_ROLE=api-role\n")
 	writeBackupFile(t, backupDir, "env-vars.deployment.genai-ui.env", "VAULT_ROLE=ui-role\n")
+	writeBackupFile(t, liveDir, "deployment.yaml", "kind: Deployment\n")
 	writeBackupFile(t, liveDir, "env-vars.env", "VAULT_ROLE=api-role\n")
 	writeBackupFile(t, liveDir, "env-vars.deployment.genai-api.env", "VAULT_ROLE=api-role\n")
 	writeBackupFile(t, liveDir, "env-vars.deployment.genai-ui.env", "VAULT_ROLE=changed-ui-role\n")
@@ -402,6 +404,44 @@ func TestCompare_PerWorkloadEnvFiles_ShowSiblingDrift(t *testing.T) {
 	wantAfter := "# env-vars.deployment.genai-api.env\nVAULT_ROLE=api-role\n# env-vars.deployment.genai-ui.env\nVAULT_ROLE=changed-ui-role\n"
 	if result.Before != wantBefore || result.After != wantAfter {
 		t.Errorf("Before = %q, After = %q, want %q / %q", result.Before, result.After, wantBefore, wantAfter)
+	}
+}
+
+// TestCompare_WorkloadManifests_ShowSpecDriftByIdentity: an image or
+// replica change shows up in the diff, siblings are matched by what their
+// manifest names (not by which file the capture put them in), and a
+// workload only one side holds is not reported as drift.
+func TestCompare_WorkloadManifests_ShowSpecDriftByIdentity(t *testing.T) {
+	manifest := func(name, image string, replicas int) string {
+		return fmt.Sprintf("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\nspec:\n  replicas: %d\n  image: %s\n", name, replicas, image)
+	}
+	backupDir, liveDir := t.TempDir(), t.TempDir()
+	// The backup's anchor is genai-api; the live capture found genai-ui first.
+	writeBackupFile(t, backupDir, "deployment.yaml", manifest("genai-api", "api:1", 1))
+	writeBackupFile(t, backupDir, "workload.deployment.genai-ui.yaml", manifest("genai-ui", "ui:1", 1))
+	writeBackupFile(t, backupDir, "env-vars.env", "A=1\n")
+	writeBackupFile(t, liveDir, "deployment.yaml", manifest("genai-ui", "ui:2", 1))
+	writeBackupFile(t, liveDir, "workload.deployment.genai-api.yaml", manifest("genai-api", "api:1", 1))
+	writeBackupFile(t, liveDir, "workload.deployment.genai-proxy.yaml", manifest("genai-proxy", "proxy:1", 1))
+	writeBackupFile(t, liveDir, "env-vars.env", "A=1\n")
+
+	result, err := compare(backupDir, liveDir, []string{
+		"deployment.yaml", "workload.deployment.genai-api.yaml", "workload.deployment.genai-proxy.yaml", "env-vars.env",
+	})
+	if err != nil {
+		t.Fatalf("compare returned error: %v", err)
+	}
+	if !strings.Contains(result.Before, "# Deployment/genai-ui (spec)\nimage: ui:1") ||
+		!strings.Contains(result.After, "# Deployment/genai-ui (spec)\nimage: ui:2") {
+		t.Errorf("genai-ui's image change missing:\nBefore=%q\nAfter=%q", result.Before, result.After)
+	}
+	if strings.Contains(result.Before, "genai-proxy") || strings.Contains(result.After, "genai-proxy") {
+		t.Errorf("genai-proxy exists only live and must not be compared: %q", result.After)
+	}
+	for _, side := range []string{result.Before, result.After} {
+		if !strings.Contains(side, "# Deployment/genai-api (spec)\nimage: api:1") {
+			t.Errorf("genai-api should be matched across deployment.yaml and its workload file: %q", side)
+		}
 	}
 }
 

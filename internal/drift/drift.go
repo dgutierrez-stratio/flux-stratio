@@ -109,12 +109,97 @@ func compare(backupDir, liveDir string, liveFiles []string) (*Result, error) {
 		return compareSpec(backupDir, liveDir, signal)
 	}
 	if signal == "env-vars.env" {
-		backupEnvs, liveEnvs := workloadEnvFiles(listFiles(backupDir)), workloadEnvFiles(liveFiles)
-		if len(backupEnvs) > 0 && len(liveEnvs) > 0 {
-			return compareWorkloadEnvs(backupDir, backupEnvs, liveDir, liveEnvs)
-		}
+		return compareWorkloads(backupDir, liveDir, liveFiles)
 	}
 	return compareText(backupDir, liveDir, signal)
+}
+
+// compareWorkloads diffs two chart-mode/workload captures: their env vars
+// (workload by workload when both sides have per-workload files, else the
+// merged env-vars.env), then the .spec of every workload manifest both
+// sides hold — so a changed image, replica count, resource, probe or
+// volume shows up too, not just an env var.
+func compareWorkloads(backupDir, liveDir string, liveFiles []string) (*Result, error) {
+	var res *Result
+	var err error
+	backupEnvs, liveEnvs := workloadEnvFiles(listFiles(backupDir)), workloadEnvFiles(liveFiles)
+	if len(backupEnvs) > 0 && len(liveEnvs) > 0 {
+		res, err = compareWorkloadEnvs(backupDir, backupEnvs, liveDir, liveEnvs)
+	} else {
+		res, err = compareText(backupDir, liveDir, "env-vars.env")
+	}
+	if err != nil {
+		return nil, err
+	}
+	before, after, err := workloadSpecs(backupDir, listFiles(backupDir), liveDir, liveFiles)
+	if err != nil {
+		return nil, err
+	}
+	res.Before += before
+	res.After += after
+	return res, nil
+}
+
+// workloadSpecs renders, for each workload (kind/name) whose manifest both
+// captures hold, its .spec on each side under a "# <kind>/<name> (spec)"
+// header. Workloads are matched by what the manifest says they are, not by
+// file name: the anchor is deployment.yaml in every capture, but which
+// workload that is depends on how the capture found them. A workload only
+// one side has — a backup taken before siblings' manifests were captured,
+// a hand-trimmed manifest with no name — is skipped rather than reported as
+// drift.
+func workloadSpecs(backupDir string, backupFiles []string, liveDir string, liveFiles []string) (before, after string, err error) {
+	backupSpecs, err := manifestSpecs(backupDir, backupFiles)
+	if err != nil {
+		return "", "", err
+	}
+	liveSpecs, err := manifestSpecs(liveDir, liveFiles)
+	if err != nil {
+		return "", "", err
+	}
+	var ids []string
+	for id := range liveSpecs {
+		if _, ok := backupSpecs[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var b, a strings.Builder
+	for _, id := range ids {
+		fmt.Fprintf(&b, "# %s (spec)\n%s", id, backupSpecs[id])
+		fmt.Fprintf(&a, "# %s (spec)\n%s", id, liveSpecs[id])
+	}
+	return b.String(), a.String(), nil
+}
+
+// manifestSpecs maps "<kind>/<name>" to the marshaled .spec of every
+// workload manifest in files (deployment.yaml and
+// backup.WorkloadManifestFile names) that names its object.
+func manifestSpecs(dir string, files []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, f := range files {
+		if f != "deployment.yaml" && !backup.IsWorkloadManifestFile(f) {
+			continue
+		}
+		path := filepath.Join(dir, f)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		docs, err := yamldocs.Decode(data)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		if len(docs) == 0 || docs[0].GetName() == "" {
+			continue
+		}
+		spec, err := yaml.Marshal(specOf(docs[0]))
+		if err != nil {
+			return nil, fmt.Errorf("marshaling %s's spec: %w", path, err)
+		}
+		out[docs[0].GetKind()+"/"+docs[0].GetName()] = string(spec)
+	}
+	return out, nil
 }
 
 // workloadEnvFiles is files' per-workload env files

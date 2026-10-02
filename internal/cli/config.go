@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -49,12 +52,17 @@ func newConfigInitCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "directory to write catalog.yaml and environment.yaml into (default: ~/.fluxcd/flux-stratio)")
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite catalog.yaml/environment.yaml if they already exist")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite catalog.yaml/environment.yaml if they already exist, keeping a timestamped .bak copy of each and the existing environment file's repos entries no --repo replaces")
 	return cmd
 }
 
 func runConfigInit(cmd *cobra.Command, dir string, force bool) error {
-	env := config.SeedEnvironment(baseFlag, clusterFlag, tenantFlag, repoFlag)
+	// Written absolute: a relative --base would otherwise resolve against
+	// wherever a later command runs from.
+	env, err := config.SeedEnvironment(baseFlag, clusterFlag, tenantFlag, repoFlag).AbsPaths("")
+	if err != nil {
+		return err
+	}
 	if err := env.Validate(); err != nil {
 		return fmt.Errorf("%w (there is no environment file yet to read them from)", err)
 	}
@@ -74,19 +82,46 @@ func runConfigInit(cmd *cobra.Command, dir string, force bool) error {
 		{config.EnvironmentFile, environmentHeader, env},
 	}
 
-	if !force {
-		for _, f := range files {
-			path := filepath.Join(dir, f.name)
-			if _, err := os.Stat(path); err == nil {
-				return fmt.Errorf("%s already exists; pass --force to overwrite", path)
-			}
+	logger := rootLogger(cmd)
+	for _, f := range files {
+		path := filepath.Join(dir, f.name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		if !force {
+			return fmt.Errorf("%s already exists; pass --force to overwrite", path)
 		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
+	// --force never loses what it replaces: each existing file is copied
+	// aside first, and an existing environment file's repos entries (a
+	// charts worktree, say) carry over unless a --repo flag replaces them.
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	for i, f := range files {
+		path := filepath.Join(dir, f.name)
+		data, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
+		backup := path + ".bak-" + stamp
+		if err := os.WriteFile(backup, data, 0o644); err != nil {
+			return fmt.Errorf("backing up %s: %w", path, err)
+		}
+		logger.Successf("backed up %s to %s", path, backup)
+		if f.name == config.EnvironmentFile {
+			if existing, err := config.ParseEnvironmentRepos(data, dir); err == nil && len(existing) > 0 {
+				kept := config.Environment{Repos: existing}.Override(config.Environment{Repos: env.Repos})
+				env.Repos = kept.Repos
+				files[i].value = env
+			}
+		}
+	}
 
-	logger := rootLogger(cmd)
 	for _, f := range files {
 		body, err := config.Marshal(f.value)
 		if err != nil {

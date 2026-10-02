@@ -16,6 +16,7 @@ import (
 
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/envvars"
+	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/render"
 	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
@@ -56,8 +57,8 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		ValuesRoot: opts.App.ValuesRoot, HRName: opts.App.Object, Exclude: opts.App.Exclude,
 		Values: values,
 	})
-	if result.Patch != nil && len(result.UnmappedDiffs) > 0 {
-		result.UnmappedDiffs = settleUnmapped(ctx, opts, rendered, result)
+	if err := verifyPatch(ctx, opts, rendered, result); err != nil {
+		return nil, err
 	}
 	before, after := formatComparisons(result.Workloads)
 	return &Result{
@@ -66,6 +67,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		After:             after,
 		UnmappedDiffs:     result.UnmappedDiffs,
 		LiveOnly:          result.LiveOnly,
+		Excluded:          result.Excluded,
 		RenderedOnlyCount: result.RenderedOnlyCount,
 		MissingWorkloads:  missing,
 		FluxManagedBy:     managedBy,
@@ -78,7 +80,10 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 // against its own rendered workload, never a merge of all of them.
 // missing names the rendered workloads not found live.
 func liveWorkloadEnvs(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) ([]diff.LiveWorkloadEnv, []string, string, error) {
-	pairs, missing := fetchWorkloadPairs(ctx, opts, hrNamespace, renderedDocs)
+	pairs, missing, err := fetchWorkloadPairs(ctx, opts, hrNamespace, renderedDocs)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	if len(pairs) == 0 {
 		return nil, nil, "", fmt.Errorf("no live workload found for chart %q among %v", opts.App.ChartPath, workloadKinds)
 	}
@@ -89,7 +94,7 @@ func liveWorkloadEnvs(ctx context.Context, opts Options, hrNamespace string, ren
 		if managedBy == "" {
 			managedBy = fluxManagedBy(p.Live)
 		}
-		env, err := envvars.Extract(ctx, getter, p.Live, nil)
+		env, err := envvars.Extract(ctx, getter, p.Live, opts.Log.Warningf)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("extracting env vars for %s %s/%s: %w", p.Live.GetKind(), p.Live.GetNamespace(), p.Live.GetName(), err)
 		}
@@ -181,19 +186,32 @@ func chartValues(opts Options, rendered *render.Result) (map[string]any, error) 
 	return diff.MergeValues(defaults, hrValues), nil
 }
 
-// settleUnmapped renders the chart again with result's patch applied
-// and drops the unmapped diffs that render already settles (see
-// diff.SettledByPatch), so review only lists what the patch really
-// leaves different. If that render fails, every diff is kept.
-func settleUnmapped(ctx context.Context, opts Options, rendered *render.Result, result *diff.ChartDiffResult) []diff.UnmappedDiff {
+// verifyPatch renders the chart again with result's patch applied, takes
+// back out of the patch every mapped value that render doesn't reproduce
+// (diff.VerifyMapped), then drops the unmapped diffs the remaining patch
+// settles anyway (diff.SettledByPatch), so review only lists what the
+// patch really leaves different. A render that fails with the patch
+// applied is an error: Flux would fail the same way reconciling it.
+func verifyPatch(ctx context.Context, opts Options, rendered *render.Result, result *diff.ChartDiffResult) error {
+	if result.Patch == nil {
+		return nil
+	}
 	patched, _, err := renderChartWith(ctx, opts, rendered, diff.PatchValues(result.Patch))
 	if err != nil {
-		if opts.Log != nil {
-			opts.Log.Debugf("rendering %s with its patch applied: %v; keeping every unmapped difference", opts.App.Object, err)
-		}
-		return result.UnmappedDiffs
+		return fmt.Errorf("rendering %s with its patch applied: %w", opts.App.Object, err)
 	}
-	return diff.SettledByPatch(result.UnmappedDiffs, patched)
+	mapped := len(result.Mapped)
+	diff.VerifyMapped(result, patched)
+	if result.Patch == nil {
+		return nil
+	}
+	if len(result.Mapped) != mapped {
+		if patched, _, err = renderChartWith(ctx, opts, rendered, diff.PatchValues(result.Patch)); err != nil {
+			return fmt.Errorf("rendering %s with its patch applied: %w", opts.App.Object, err)
+		}
+	}
+	result.UnmappedDiffs = diff.SettledByPatch(result.UnmappedDiffs, patched)
+	return nil
 }
 
 // renderChart runs `helm template` for opts.App's chart against the
@@ -206,7 +224,15 @@ func renderChart(ctx context.Context, opts Options, rendered *render.Result) ([]
 
 // renderChartWith is renderChart with extraValues deep-merged over the
 // rendered HelmRelease's spec.values, as a tenant patch would be.
+//
+// A HelmRelease with spec.valuesFrom is refused: those values live in
+// ConfigMaps/Secrets this render never reads, so it wouldn't be what
+// helm-controller renders, and a patch to spec.values — which takes
+// precedence over valuesFrom — would silently override them.
 func renderChartWith(ctx context.Context, opts Options, rendered *render.Result, extraValues map[string]any) ([]*unstructured.Unstructured, string, error) {
+	if from, _, _ := unstructured.NestedSlice(rendered.Object.Object, "spec", "valuesFrom"); len(from) > 0 {
+		return nil, "", fmt.Errorf("HelmRelease %s sets spec.valuesFrom, which chart-mode diffing can't render faithfully; diff it by hand", rendered.Object.GetName())
+	}
 	hrValues, _, err := unstructured.NestedMap(rendered.Object.Object, "spec", "values")
 	if err != nil {
 		return nil, "", fmt.Errorf("reading rendered HelmRelease spec.values: %w", err)
@@ -227,19 +253,24 @@ func renderChartWith(ctx context.Context, opts Options, rendered *render.Result,
 // renderedDocs declares from the live cluster, translating the one named
 // App.Object to its live name (App.LiveName, when the redesign renamed it)
 // and falling back to App.LiveNamespace. A workload the chart renders but that never
-// existed live is skipped, not an error — the caller decides whether
-// finding none of them is a failure. Exported for internal/backup, which
+// existed live (NotFound) is skipped, not an error — the caller decides
+// whether finding none of them is a failure; any other failure to read
+// one (Forbidden, a timeout) is an error, since treating it as absent
+// would compare, and patch, the app without it. Exported for internal/backup, which
 // runs the same chart-templating pipeline against a live (not
 // flux-rendered) HelmRelease's own values to capture every sibling
 // workload a multi-workload chart declares, not just the one named after
 // the app itself.
-func FetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) []*unstructured.Unstructured {
-	pairs, _ := fetchWorkloadPairs(ctx, opts, hrNamespace, renderedDocs)
+func FetchLiveWorkloads(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
+	pairs, _, err := fetchWorkloadPairs(ctx, opts, hrNamespace, renderedDocs)
+	if err != nil {
+		return nil, err
+	}
 	live := make([]*unstructured.Unstructured, 0, len(pairs))
 	for _, p := range pairs {
 		live = append(live, p.Live)
 	}
-	return live
+	return live, nil
 }
 
 // workloadPair is a rendered workload and its live counterpart.
@@ -250,18 +281,21 @@ type workloadPair struct {
 // fetchWorkloadPairs is FetchLiveWorkloads keeping each live workload
 // paired with the rendered one it was fetched for; missing names the
 // rendered workloads not found live.
-func fetchWorkloadPairs(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) ([]workloadPair, []string) {
+func fetchWorkloadPairs(ctx context.Context, opts Options, hrNamespace string, renderedDocs []*unstructured.Unstructured) ([]workloadPair, []string, error) {
 	var pairs []workloadPair
 	var missing []string
 	for _, t := range workloadTargets(opts, hrNamespace, renderedDocs) {
 		obj, err := fetchWorkload(ctx, opts, t.gvk, t.namespace, t.name)
-		if err != nil {
+		if kubeclient.IsNotFound(err) {
 			missing = append(missing, t.String())
 			continue
 		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading live %s: %w", t, err)
+		}
 		pairs = append(pairs, workloadPair{Rendered: t.rendered, Live: obj})
 	}
-	return pairs, missing
+	return pairs, missing, nil
 }
 
 // RenderedWorkloadNames describes every workload renderedDocs declares as
@@ -338,7 +372,7 @@ func LiveWorkloadEnvs(ctx context.Context, opts Options, liveWorkloads []*unstru
 	getter := envvars.ClientGetter{Client: opts.Client}
 	envs := make([]map[string]string, 0, len(liveWorkloads))
 	for _, live := range liveWorkloads {
-		env, err := envvars.Extract(ctx, getter, live, nil)
+		env, err := envvars.Extract(ctx, getter, live, opts.Log.Warningf)
 		if err != nil {
 			return nil, fmt.Errorf("extracting env vars for %s %s/%s: %w", live.GetKind(), live.GetNamespace(), live.GetName(), err)
 		}
@@ -381,7 +415,10 @@ func LiveChartWorkloads(ctx context.Context, opts Options) ([]*unstructured.Unst
 	if err != nil {
 		return nil, err
 	}
-	live := FetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
+	live, err := FetchLiveWorkloads(ctx, opts, hrNamespace, renderedDocs)
+	if err != nil {
+		return nil, err
+	}
 	if len(live) == 0 {
 		return nil, fmt.Errorf("no live workload found for chart %q among %v", opts.App.ChartPath, workloadKinds)
 	}

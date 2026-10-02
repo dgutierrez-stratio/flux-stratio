@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -142,8 +143,8 @@ func TestRun_AllChecksPass(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("report.OK() = false, want true; error: %v", report.Err())
 	}
-	if len(report.Checks) != 10 {
-		t.Errorf("len(Checks) = %d, want 10", len(report.Checks))
+	if len(report.Checks) != 12 {
+		t.Errorf("len(Checks) = %d, want 12", len(report.Checks))
 	}
 }
 
@@ -158,8 +159,8 @@ func TestRun_MissingBinaries_OtherChecksStillRun(t *testing.T) {
 	if report.OK() {
 		t.Fatal("report.OK() = true, want false")
 	}
-	if len(report.Checks) != 10 {
-		t.Fatalf("len(Checks) = %d, want 10 (downstream checks must still run)", len(report.Checks))
+	if len(report.Checks) != 12 {
+		t.Fatalf("len(Checks) = %d, want 12 (downstream checks must still run)", len(report.Checks))
 	}
 	if report.Checks[0].Name != CheckBinaries || report.Checks[0].OK {
 		t.Errorf("Checks[0] = %+v, want a failing binaries check", report.Checks[0])
@@ -205,7 +206,7 @@ func TestRun_InvalidCatalog_SkipsCatalogDependentChecks(t *testing.T) {
 	for _, c := range report.Checks {
 		names = append(names, string(c.Name))
 	}
-	want := "binaries,meld (optional),catalog,environment,repo layout,cluster access,tenant file"
+	want := "binaries,meld (optional),catalog,environment,repo layout,cluster access,repo revisions,tenant file"
 	if strings.Join(names, ",") != want {
 		t.Errorf("checks = %s, want %s", strings.Join(names, ","), want)
 	}
@@ -445,4 +446,116 @@ func TestRun_NarratesThroughLog(t *testing.T) {
 			t.Errorf("log output missing %q; got:\n%s", want, out)
 		}
 	}
+}
+
+func TestCheckExcludePaths(t *testing.T) {
+	charts := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(charts, "rocket"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	values := "rocketServer:\n  settings:\n    governanceIntegration:\n      uri: x\nfreeForm: {}\nunset:\n"
+	if err := os.WriteFile(filepath.Join(charts, "rocket", "values.yaml"), []byte(values), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat := func(exclude ...string) *config.Catalog {
+		return &config.Catalog{Types: []config.ComponentType{{
+			Type: "rocket", Chart: &config.Chart{Path: "rocket"}, Exclude: exclude,
+		}}}
+	}
+
+	good := checkExcludePaths(cat(
+		"spec.values.rocketServer.settings.governanceIntegration.uri",
+		"spec.values.freeForm.anything.below",
+		"spec.values.unset.anything",
+		"spec.image", // not under spec.values: nothing to check it against
+	), charts)
+	if !good.OK || !good.Optional {
+		t.Errorf("valid excludes: %+v, want an OK optional check", good)
+	}
+
+	bad := checkExcludePaths(cat("spec.values.rocketCommon.settings.governanceIntegration.uri"), charts)
+	if bad.OK || !bad.Optional || !strings.Contains(bad.Detail, "rocket: spec.values.rocketCommon.settings.governanceIntegration.uri") {
+		t.Errorf("misplaced exclude: %+v, want a failing optional check naming the path", bad)
+	}
+}
+
+func gitRepository(name, url, revision string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "source.toolkit.fluxcd.io/v1", "kind": "GitRepository",
+		"metadata": map[string]any{"name": name, "namespace": "flux-system"},
+		"spec":     map[string]any{"url": url},
+		"status":   map[string]any{"artifact": map[string]any{"revision": revision}},
+	}}
+}
+
+// fakeGit answers `git -C dir ...` per directory: the HEAD+branch of each
+// checkout and the worktree list of any.
+func fakeGit(heads map[string]string, worktrees string) func(context.Context, string, ...string) (string, error) {
+	return func(_ context.Context, dir string, args ...string) (string, error) {
+		if args[0] == "worktree" {
+			return worktrees, nil
+		}
+		head, ok := heads[dir]
+		if !ok {
+			return "", errors.New("not a git repository")
+		}
+		return head, nil
+	}
+}
+
+func TestCheckRepoRevisions(t *testing.T) {
+	const clusterSHA = "030c37537e5752da0123b7f7b343cad36655db23"
+	repos := config.RepoPaths{Apps: "/r/keos-apps", UseCases: "/r/keos-use-cases", Fleet: "/r/keos-fleet", SystemServices: "/r/keos-system-services"}
+	cluster := func(objs ...client.Object) Options {
+		o := baseOptions()
+		o.NewClient = fakeClientFactory(objs...)
+		return o
+	}
+	useCases := gitRepository("keos-use-cases", "https://github.com/Stratio/keos-use-cases.git", "refs/heads/feature@sha1:"+clusterSHA)
+	fleet := gitRepository("flux-system", "https://github.com/Stratio/keos-fleet.git", "refs/heads/main@sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	t.Run("matching checkouts", func(t *testing.T) {
+		o := cluster(useCases, fleet)
+		o.Git = fakeGit(map[string]string{
+			"/r/keos-use-cases": clusterSHA + "\nfeature\n",
+			"/r/keos-fleet":     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nmain\n",
+		}, "")
+		c := checkRepoRevisions(context.Background(), o, repos)
+		if !c.OK || !c.Optional || !strings.Contains(c.Detail, "2 repo(s) match") {
+			t.Errorf("check = %+v, want 2 matches (keos-fleet found through the flux-system GitRepository's URL)", c)
+		}
+	})
+
+	t.Run("a checkout on another commit names the worktree that matches", func(t *testing.T) {
+		o := cluster(useCases)
+		o.Git = fakeGit(map[string]string{"/r/keos-use-cases": "b7f5c2eb7f5c2eb7f5c2eb7f5c2eb7f5c2eb7f5c\nmain\n"},
+			"worktree /r/keos-use-cases\nHEAD b7f5c2eb7f5c2eb7f5c2eb7f5c2eb7f5c2eb7f5c\nbranch refs/heads/main\n\n"+
+				"worktree /w/keos-use-cases-feature\nHEAD "+clusterSHA+"\nbranch refs/heads/feature\n")
+		c := checkRepoRevisions(context.Background(), o, repos)
+		if c.OK || !c.Optional {
+			t.Fatalf("check = %+v, want a failing optional check", c)
+		}
+		for _, want := range []string{"keos-use-cases: the cluster runs refs/heads/feature @ 030c375", "is at b7f5c2e (main)",
+			"/w/keos-use-cases-feature", "repos.keos-use-cases"} {
+			if !strings.Contains(c.Detail, want) {
+				t.Errorf("detail lacks %q:\n%s", want, c.Detail)
+			}
+		}
+	})
+
+	t.Run("an unreadable checkout is reported", func(t *testing.T) {
+		o := cluster(useCases)
+		o.Git = fakeGit(nil, "")
+		if c := checkRepoRevisions(context.Background(), o, repos); c.OK || !strings.Contains(c.Detail, "couldn't read the checkout at /r/keos-use-cases") {
+			t.Errorf("check = %+v", c)
+		}
+	})
+
+	t.Run("nothing to compare with is a pass, not a warning", func(t *testing.T) {
+		o := cluster()
+		o.Git = fakeGit(nil, "")
+		if c := checkRepoRevisions(context.Background(), o, repos); !c.OK || !strings.Contains(c.Detail, "skipped") {
+			t.Errorf("check = %+v, want skipped", c)
+		}
+	})
 }

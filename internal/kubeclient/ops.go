@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -25,6 +26,12 @@ func IgnoreNotFound(err error) error {
 // IsNotFound reports whether err is a Kubernetes "not found" error.
 func IsNotFound(err error) bool {
 	return apierrors.IsNotFound(err)
+}
+
+// IsNoMatch reports whether err says the kind isn't served by the cluster
+// at all — its CRD isn't installed.
+func IsNoMatch(err error) bool {
+	return apimeta.IsNoMatchError(err)
 }
 
 // GetUnstructured fetches a single object of the given kind by namespace

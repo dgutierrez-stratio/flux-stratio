@@ -12,11 +12,21 @@
 // That is what both the Python client and this plugin actually need it
 // for — a flat "effective config" view to diff against a chart's rendered
 // values — not a per-container inspection tool.
+//
+// Unlike the Python client, a Secret's values never leave this package:
+// a variable read from a Secret resolves to a "<secret:NAME/KEY>"
+// placeholder, the same one internal/diff renders a chart's secretKeyRef
+// as, so backups, diffs and warnings can't print or store a credential,
+// and a patch can't write one into the tenant file. A reference that
+// can't be resolved (a missing ConfigMap or key, a failed read) resolves
+// to an "<unresolved:...>" placeholder instead of "", so it's never
+// mistaken for a real empty value and patched over a chart default.
 package envvars
 
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -69,25 +79,48 @@ func applyEnvFrom(ctx context.Context, g Getter, namespace string, container map
 		if !ok {
 			continue
 		}
+		// The kubelet prepends prefix to every key an envFrom source
+		// injects; internal/diff's rendered side does the same.
+		prefix, _ := entry["prefix"].(string)
 		if ref, ok := entry["configMapRef"].(map[string]any); ok {
-			mergeFrom(ctx, g.ConfigMap, namespace, ref, "envFrom configMapRef", result, warn)
+			mergeFrom(ctx, g.ConfigMap, namespace, ref, prefix, "envFrom configMapRef", false, result, warn)
 		}
 		if ref, ok := entry["secretRef"].(map[string]any); ok {
-			mergeFrom(ctx, g.Secret, namespace, ref, "envFrom secretRef", result, warn)
+			mergeFrom(ctx, g.Secret, namespace, ref, prefix, "envFrom secretRef", true, result, warn)
 		}
 	}
 }
 
-func mergeFrom(ctx context.Context, fetch func(context.Context, string, string) (map[string]string, error), namespace string, ref map[string]any, label string, result map[string]string, warn Warnf) {
+// mergeFrom adds every key of the ConfigMap or Secret ref names to result,
+// each under prefix; a Secret's keys get placeholders, not their values.
+// A source that can't be read adds nothing — there are no keys to name —
+// but is always warned about.
+func mergeFrom(ctx context.Context, fetch func(context.Context, string, string) (map[string]string, error), namespace string, ref map[string]any, prefix, label string, secret bool, result map[string]string, warn Warnf) {
 	name, _ := ref["name"].(string)
 	data, err := fetch(ctx, namespace, name)
 	if err != nil {
 		warnf(warn, "%s %s/%s: %v", label, namespace, name, err)
 		return
 	}
-	for k, v := range data {
-		result[k] = v
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if secret {
+			result[prefix+k] = SecretPlaceholder(name, k)
+			continue
+		}
+		result[prefix+k] = data[k]
+	}
+}
+
+// SecretPlaceholder is what a variable read from key of Secret name
+// resolves to — the same form internal/diff renders a chart's
+// secretKeyRef as.
+func SecretPlaceholder(name, key string) string {
+	return "<secret:" + name + "/" + key + ">"
 }
 
 func applyEnv(ctx context.Context, g Getter, namespace, workloadName string, container map[string]any, result map[string]string, warn Warnf) {
@@ -115,10 +148,10 @@ func resolveValueFrom(ctx context.Context, g Getter, namespace, workloadName, va
 		return ""
 	}
 	if ref, ok := valueFrom["configMapKeyRef"].(map[string]any); ok {
-		return resolveKeyRef(ctx, g.ConfigMap, namespace, ref, "configMapKeyRef", varName, warn)
+		return resolveKeyRef(ctx, g.ConfigMap, namespace, ref, "configMapKeyRef", varName, false, warn)
 	}
 	if ref, ok := valueFrom["secretKeyRef"].(map[string]any); ok {
-		return resolveKeyRef(ctx, g.Secret, namespace, ref, "secretKeyRef", varName, warn)
+		return resolveKeyRef(ctx, g.Secret, namespace, ref, "secretKeyRef", varName, true, warn)
 	}
 	if ref, ok := valueFrom["fieldRef"].(map[string]any); ok {
 		path, _ := ref["fieldPath"].(string)
@@ -135,22 +168,31 @@ func resolveValueFrom(ctx context.Context, g Getter, namespace, workloadName, va
 		resource, _ := ref["resource"].(string)
 		return "<" + resource + ">"
 	}
-	return ""
+	warnf(warn, "env %s: unsupported valueFrom source", varName)
+	return "<valueFrom:unknown>"
 }
 
-func resolveKeyRef(ctx context.Context, fetch func(context.Context, string, string) (map[string]string, error), namespace string, ref map[string]any, label, varName string, warn Warnf) string {
+// resolveKeyRef resolves a configMapKeyRef or secretKeyRef: the key's
+// value for a ConfigMap, a placeholder for a Secret. A Secret is still
+// read, so a missing one is reported like a missing ConfigMap.
+func resolveKeyRef(ctx context.Context, fetch func(context.Context, string, string) (map[string]string, error), namespace string, ref map[string]any, label, varName string, secret bool, warn Warnf) string {
 	refName, _ := ref["name"].(string)
 	key, _ := ref["key"].(string)
+	unresolved := "<unresolved:" + label + ":" + refName + "/" + key + ">"
 	data, err := fetch(ctx, namespace, refName)
 	if err != nil {
 		warnf(warn, "env %s: %s %s/%s[%s]: %v", varName, label, namespace, refName, key, err)
-		return ""
+		return unresolved
 	}
-	if v, ok := data[key]; ok {
-		return v
+	v, ok := data[key]
+	if !ok {
+		warnf(warn, "env %s: %s %s/%s has no key %q", varName, label, namespace, refName, key)
+		return unresolved
 	}
-	warnf(warn, "env %s: %s %s/%s has no key %q", varName, label, namespace, refName, key)
-	return ""
+	if secret {
+		return SecretPlaceholder(refName, key)
+	}
+	return v
 }
 
 func warnf(warn Warnf, format string, a ...any) {

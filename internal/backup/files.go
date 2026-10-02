@@ -1,17 +1,24 @@
 package backup
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Stratio/flux-stratio/internal/envvars"
 )
 
-// writeYAMLFile creates dir (if needed) and writes obj as name inside it,
-// mode 0644.
+// A backup holds live manifests and values that may carry credentials
+// (a HelmRelease's inline values, a CR's spec), so only its owner can
+// read it: directories 0700, files 0600.
+const (
+	dirMode  os.FileMode = 0o700
+	fileMode os.FileMode = 0o600
+)
+
+// writeYAMLFile creates dir (if needed) and writes obj as name inside it.
 func writeYAMLFile(dir, name string, obj map[string]any) error {
 	data, err := yaml.Marshal(obj)
 	if err != nil {
@@ -21,29 +28,18 @@ func writeYAMLFile(dir, name string, obj map[string]any) error {
 }
 
 // writeEnvFile creates dir (if needed) and writes env as name inside it,
-// as sorted "KEY=VALUE\n" lines — the same format
-// internal/appdiff.readBaselineEnvFile reads back for `apps diff
-// --baseline`.
+// in envvars.EncodeFile's format — what internal/appdiff reads back
+// (envvars.DecodeFile) for `apps diff --baseline`.
 func writeEnvFile(dir, name string, env map[string]string) error {
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var buf bytes.Buffer
-	for _, k := range keys {
-		fmt.Fprintf(&buf, "%s=%s\n", k, env[k])
-	}
-	return writeFile(dir, name, buf.Bytes())
+	return writeFile(dir, name, envvars.EncodeFile(env))
 }
 
 func writeFile(dir, name string, data []byte) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, fileMode); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil

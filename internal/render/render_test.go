@@ -351,3 +351,57 @@ func TestRender_NoOwnPatchesRendersOnce(t *testing.T) {
 		t.Errorf("flux build ran %d times, want 1", builds)
 	}
 }
+
+func TestFindObject_SameNameDifferentKinds(t *testing.T) {
+	obj := func(apiVersion, kind string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": apiVersion, "kind": kind, "metadata": map[string]any{"name": "rocket"},
+		}}
+	}
+	secret, hr, other := obj("v1", "Secret"), obj("helm.toolkit.fluxcd.io/v2", "HelmRelease"), obj("postgres.stratio.com/v1", "PgCluster")
+
+	cases := []struct {
+		name    string
+		docs    []*unstructured.Unstructured
+		kind    string
+		want    *unstructured.Unstructured
+		wantErr bool
+	}{
+		{"kind picks the HelmRelease over an earlier Secret", []*unstructured.Unstructured{secret, hr}, "HelmRelease", hr, false},
+		{"no kind: a core object loses to a custom resource", []*unstructured.Unstructured{secret, other}, "", other, false},
+		{"no kind, only core objects: the first", []*unstructured.Unstructured{secret}, "", secret, false},
+		{"kind required but absent is an error, not a Secret", []*unstructured.Unstructured{secret, other}, "HelmRelease", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := findObject(tc.docs, Options{Object: "rocket", Kind: tc.kind})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveSubstituteFrom_MissingSourceNamesNamespaceAndWhy(t *testing.T) {
+	ks := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+		"metadata": map[string]any{"name": "apps-psql", "namespace": "stratio-datastores"},
+		"spec": map[string]any{"postBuild": map[string]any{"substituteFrom": []any{
+			map[string]any{"kind": "ConfigMap", "name": "keos-runtime-info"},
+		}}},
+	}}
+	// The ConfigMap exists, but in flux-system, not where Flux looks.
+	c := fake.NewClientBuilder().WithScheme(mustCoreScheme(t)).Build()
+	_, err := resolveSubstituteFrom(context.Background(), c, ks)
+	if err == nil {
+		t.Fatal("got nil error for a missing substituteFrom source")
+	}
+	for _, want := range []string{"ConfigMap stratio-datastores/keos-runtime-info not found", "own namespace", "ResourceSets"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}

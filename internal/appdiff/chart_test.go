@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/runner"
 )
@@ -91,11 +94,11 @@ func chartDiffOptions(t *testing.T, base string) Options {
 			Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent",
 			ChartPath: fixtureChart(t, base),
 		},
-		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+		Runner: helmSim{&runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputHelmRelease)},
 			"flux":          {Stdout: []byte(kustomizationBuildOutputHelmRelease)},
 			"helm":          {Stdout: []byte(helmTemplateOutputGosec)},
-		}},
+		}}},
 		Log: log.New(io.Discard, false),
 	}
 }
@@ -126,6 +129,33 @@ func TestDiff_ChartMode_ProducesMappedPatch(t *testing.T) {
 	logSection, _ := general["log"].(map[string]any)
 	if logSection["level"] != "DEBUG" {
 		t.Errorf("level = %v, want %q", logSection["level"], "DEBUG")
+	}
+}
+
+// A difference the app's exclude keeps out of the patch isn't dropped: it
+// comes back in Result.Excluded, and the patch stays empty.
+func TestDiff_ChartMode_ExcludedDifferenceIsReportedNotPatched(t *testing.T) {
+	base := fixtureBase(t)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "gosec-agent", "app", "overlays", "postgres", "S"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := chartDiffOptions(t, base)
+	opts.App.Exclude = []string{"spec.values.gosecAgent.general.log"}
+	liveDeployment := deploymentWithEnv(t, "psql-gosec-agent", "stratio-datastores", "DEBUG")
+	opts.Client = fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(liveDeployment).Build()
+
+	result, err := Diff(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Diff returned error: %v", err)
+	}
+	if result.Patch != nil {
+		t.Errorf("Patch = %+v, want nil: the only difference is excluded", result.Patch)
+	}
+	want := []diff.ExcludedDiff{{
+		Workload: "psql-gosec-agent", Name: "LOG_LEVEL", Rendered: "INFO", Live: "DEBUG", Path: "gosecAgent.general.log.level",
+	}}
+	if !reflect.DeepEqual(result.Excluded, want) {
+		t.Errorf("Excluded = %+v, want %+v", result.Excluded, want)
 	}
 }
 
@@ -223,11 +253,11 @@ func TestDiff_ChartMode_ChartsRepoOutsideBase(t *testing.T) {
 			Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent",
 			ChartPath: fixtureChart(t, chartsRoot),
 		},
-		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+		Runner: helmSim{&runner.Fake{Responses: map[string]runner.FakeResponse{
 			"flux-operator": {Stdout: []byte(rsetOutputHelmRelease)},
 			"flux":          {Stdout: []byte(kustomizationBuildOutputHelmRelease)},
 			"helm":          {Stdout: []byte(helmTemplateOutputGosec)},
-		}},
+		}}},
 		Log: log.New(io.Discard, false),
 	}
 	liveDeployment := deploymentWithEnv(t, "psql-gosec-agent", "stratio-datastores", "DEBUG")
@@ -279,4 +309,28 @@ func chartsRepoAt(base, charts string) config.RepoPaths {
 	repos := config.ReposUnder(base)
 	repos.Charts = charts
 	return repos
+}
+
+// TestDiff_ChartMode_ValuesFromRefused: a HelmRelease whose values come
+// partly from spec.valuesFrom can't be rendered as helm-controller would,
+// and a spec.values patch would silently override those values.
+func TestDiff_ChartMode_ValuesFromRefused(t *testing.T) {
+	base := fixtureBase(t)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "gosec-agent", "app", "overlays", "postgres", "S"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := chartDiffOptions(t, base)
+	withValuesFrom := strings.Replace(kustomizationBuildOutputHelmRelease, "spec:\n",
+		"spec:\n  valuesFrom:\n    - kind: ConfigMap\n      name: gosec-agent-values\n", 1)
+	opts.Runner = helmSim{&runner.Fake{Responses: map[string]runner.FakeResponse{
+		"flux-operator": {Stdout: []byte(rsetOutputHelmRelease)},
+		"flux":          {Stdout: []byte(withValuesFrom)},
+		"helm":          {Stdout: []byte(helmTemplateOutputGosec)},
+	}}}
+	opts.Client = fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
+		deploymentWithEnv(t, "psql-gosec-agent", "stratio-datastores", "DEBUG")).Build()
+
+	if _, err := Diff(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "valuesFrom") {
+		t.Errorf("err = %v, want valuesFrom refused", err)
+	}
 }

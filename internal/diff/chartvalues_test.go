@@ -2,6 +2,7 @@ package diff
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -141,6 +142,46 @@ func TestIsScannableChartFile(t *testing.T) {
 	for path, want := range cases {
 		if got := isScannableChartFile(path); got != want {
 			t.Errorf("isScannableChartFile(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// TestScanChartFile_OnlyValuePreservingPipelines: a line is mapped only
+// when its pipeline renders the value unchanged, and only when it's
+// unindented (a key-value env file's own variable).
+func TestScanChartFile_OnlyValuePreservingPipelines(t *testing.T) {
+	mapped := map[string]string{
+		"PLAIN":     `PLAIN: {{ .Values.a.plain }}`,
+		"QUOTE":     `QUOTE: {{ .Values.a.quote | quote }}`,
+		"SQUOTE":    `SQUOTE: '{{ .Values.a.squote | squote }}'`,
+		"TOSTRING":  `TOSTRING: {{ .Values.a.tostring | toString | quote }}`,
+		"DEFAULT":   `DEFAULT: {{ .Values.a.default | default "x" | quote }}`,
+		"DEFAULTB":  `DEFAULTB: {{ .Values.a.defaultb | default false | quote }}`,
+		"NOSPACE":   `NOSPACE: {{ .Values.a.nospace | quote}}`,
+		"TRIM_DASH": `TRIM_DASH: {{- .Values.a.trimdash | quote -}}`,
+	}
+	notMapped := []string{
+		`PRINTF: {{ .Values.a.host | printf "https://%s" | quote }}`,
+		`B64: {{ .Values.a.secret | b64enc }}`,
+		`UPPER: {{ .Values.a.level | upper | quote }}`,
+		`TRIM: {{ .Values.a.url | trimSuffix "/" | quote }}`,
+		`  INDENTED: {{ .Values.a.indented | quote }}`,
+	}
+	var lines []string
+	for _, l := range mapped {
+		lines = append(lines, l)
+	}
+	lines = append(lines, notMapped...)
+	file := scanChartFile(strings.Join(lines, "\n"))
+	for key, line := range mapped {
+		if file.Values[key] == "" {
+			t.Errorf("%q not mapped", line)
+		}
+	}
+	for _, line := range notMapped {
+		key := strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
+		if path, ok := file.Values[key]; ok {
+			t.Errorf("%q mapped to %q, want it left unmapped", line, path)
 		}
 	}
 }

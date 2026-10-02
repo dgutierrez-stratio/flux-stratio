@@ -51,6 +51,9 @@ type Result struct {
 	UpToDate        bool
 	ObsoletePatches int
 	FluxManagedBy   string
+	// DroppedFromExisting — see appdiff.Result: what migrating loses of the
+	// patch the tenant file already carries for this object's kind.
+	DroppedFromExisting []string
 	// Before and After are the tenant file's content before and after the
 	// edit, for a diff preview (apps migrate --dry-run) via
 	// internal/ui.FileDiff. Equal when Migrated is false.
@@ -60,10 +63,18 @@ type Result struct {
 	UnmappedDiffs    []diff.UnmappedDiff
 	LiveOnly         []diff.LiveOnlyVar
 	MissingWorkloads []string
+	// Excluded are the differences the app's exclude list kept out of the
+	// patch — see appdiff.Result.
+	Excluded []diff.ExcludedDiff
 	// UnresolvedDeps are the app's tenant-file dependencies naming an
 	// entry the tenant file doesn't declare: migrating writes nothing
 	// wrong itself, but Flux won't reconcile the app until they're fixed.
 	UnresolvedDeps []tenantfile.UnresolvedDependency
+	// LegacyAgentPatches counts the patches for a gosec agent's HelmRelease
+	// the legacy client left in its parent entry's top-level patches: inert
+	// (the agent reads config.agent.patches), so worth removing by hand.
+	// Never edited here.
+	LegacyAgentPatches int
 
 	// doc and tenantPath are the edited tenant file and where it's
 	// saved, for Save.
@@ -128,12 +139,15 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	}
 	result := &Result{
 		UpToDate: diffResult.UpToDate, ObsoletePatches: diffResult.ObsoletePatches, FluxManagedBy: diffResult.FluxManagedBy,
-		Before: string(before), After: string(before),
+		DroppedFromExisting: diffResult.DroppedFromExisting,
+		Before:              string(before), After: string(before),
 		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnly: diffResult.LiveOnly, MissingWorkloads: diffResult.MissingWorkloads,
+		Excluded: diffResult.Excluded,
 	}
 	if result.UnresolvedDeps, err = unresolvedDeps(doc, opts.Catalog, opts.App); err != nil {
 		return nil, nil, "", err
 	}
+	result.LegacyAgentPatches = legacyAgentPatches(doc, opts.Catalog, opts.App)
 	if diffResult.Patch == nil || diffResult.UpToDate {
 		return result, doc, tenantPath, nil
 	}
@@ -160,7 +174,7 @@ func unresolvedDeps(doc *tenantfile.Doc, cat *catalog.Catalog, app config.App) (
 	if err != nil {
 		return nil, nil
 	}
-	entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerName(app.Kustomization, anchor))
+	entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerOf(app, anchor))
 	if err != nil {
 		return nil, nil
 	}
@@ -168,4 +182,23 @@ func unresolvedDeps(doc *tenantfile.Doc, cat *catalog.Catalog, app config.App) (
 		_, ok := cat.Schemas[key]
 		return ok
 	})
+}
+
+// legacyAgentPatches counts the patches app's parent entry carries in its
+// top-level patches for app's own HelmRelease — only meaningful for an app
+// anchored below its entry (a gosec agent), whose patch Go writes to
+// config.agent.patches instead. Anything that can't be resolved counts none.
+func legacyAgentPatches(doc *tenantfile.Doc, cat *catalog.Catalog, app config.App) int {
+	if cat == nil {
+		return 0
+	}
+	anchor, err := cat.ResolveAnchor(app.Kustomization)
+	if err != nil || anchor.Kind != catalog.AnchorNested {
+		return 0
+	}
+	entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerOf(app, anchor))
+	if err != nil {
+		return 0
+	}
+	return tenantfile.LegacyAgentPatches(entry, app.Object)
 }

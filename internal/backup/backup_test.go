@@ -113,6 +113,64 @@ func TestRun_ManifestMode_WritesCRYAML(t *testing.T) {
 	}
 }
 
+// TestRun_BackupIsPrivate: a backup can carry credentials, so only its
+// owner can read it.
+func TestRun_BackupIsPrivate(t *testing.T) {
+	backupsDir := t.TempDir()
+	logger := log.New(io.Discard, false)
+	live := obj("postgres.stratio.com/v1", "PgCluster", "stratio-datastores", "psql", nil)
+	result, err := Run(context.Background(), Options{
+		Repos: config.ReposUnder(fixtureBase(t)), App: config.App{ID: "psql", Object: "psql"},
+		Index: scan(t, logger, live), Dir: backupsDir, Clock: fixedClock, Log: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]os.FileMode{
+		filepath.Join(backupsDir, "psql"):    0o700,
+		result.Dir:                           0o700,
+		filepath.Join(result.Dir, "cr.yaml"): 0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %o, want %o", path, got, want)
+		}
+	}
+}
+
+// TestRun_FailureLeavesNoPartialBackup: a capture that fails leaves neither
+// a timestamped directory nor a partial one, so --baseline latest can never
+// pick it over an older, complete backup.
+func TestRun_FailureLeavesNoPartialBackup(t *testing.T) {
+	backupsDir := t.TempDir()
+	logger := log.New(io.Discard, false)
+	older := filepath.Join(backupsDir, "psql", "2026-03-04T10-30-00Z")
+	if err := os.MkdirAll(older, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(older, "cr.yaml"), []byte("kind: Old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing live by that name: the capture fails.
+	_, err := Run(context.Background(), Options{
+		Repos: config.ReposUnder(fixtureBase(t)), App: config.App{ID: "psql", Object: "psql"},
+		Index: scan(t, logger), Dir: backupsDir, Clock: fixedClock, Log: logger,
+	})
+	if err == nil {
+		t.Fatal("Run with nothing live: got nil error")
+	}
+	entries, err := os.ReadDir(filepath.Join(backupsDir, "psql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "2026-03-04T10-30-00Z" {
+		t.Errorf("entries = %v, want only the pre-existing backup", entries)
+	}
+}
+
 func TestRun_ManifestMode_LiveObjectNotFoundErrors(t *testing.T) {
 	backupsDir := t.TempDir()
 	logger := log.New(io.Discard, false)

@@ -25,7 +25,9 @@ package backup
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -88,68 +90,224 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if clock == nil {
 		clock = time.Now
 	}
-	dir := filepath.Join(opts.Dir, opts.App.ID, clock().UTC().Format(timestampFormat))
+	// The timestamp has one-second resolution, and a capture is renamed into
+	// place (which fails onto a non-empty directory): a second capture of the
+	// same app within the second (backupBeforePrepare right after a backup)
+	// takes the next free second rather than failing.
+	when := clock().UTC()
+	stamp := when.Format(timestampFormat)
+	dir := filepath.Join(opts.Dir, opts.App.ID, stamp)
+	for {
+		if _, err := os.Stat(dir); err != nil {
+			break
+		}
+		when = when.Add(time.Second)
+		stamp = when.Format(timestampFormat)
+		dir = filepath.Join(opts.Dir, opts.App.ID, stamp)
+	}
+	// Everything is captured into a partial directory first, renamed to
+	// its timestamp only once complete: a capture that fails halfway (a
+	// Secret read denied, say) must never leave a timestamped directory
+	// behind, since --baseline latest would pick it over an older,
+	// complete one. latestTimestampSubdir ignores the partial name.
+	partial := filepath.Join(opts.Dir, opts.App.ID, ".partial-"+stamp)
+	if err := os.RemoveAll(partial); err != nil {
+		return nil, fmt.Errorf("clearing %s: %w", partial, err)
+	}
 	name := opts.App.LiveName()
 
 	var files []string
 	var err error
 	if opts.App.ChartPath != "" {
-		files, err = captureChartMode(ctx, opts, dir, name)
+		files, err = captureChartMode(ctx, opts, partial, name)
 	} else {
-		files, err = captureManifestMode(ctx, opts, dir, name)
+		files, err = captureManifestMode(ctx, opts, partial, name)
 	}
-	if err != nil {
-		return nil, err
-	}
-	if len(files) == 0 {
+	if err != nil || len(files) == 0 {
+		if rmErr := os.RemoveAll(partial); rmErr != nil && err == nil {
+			err = fmt.Errorf("clearing %s: %w", partial, rmErr)
+		}
+		if err != nil {
+			return nil, err
+		}
 		return &Result{}, nil
+	}
+	if err := os.Rename(partial, dir); err != nil {
+		_ = os.RemoveAll(partial)
+		return nil, fmt.Errorf("moving the completed backup into place at %s: %w", dir, err)
 	}
 	return &Result{Dir: dir, Files: files}, nil
 }
 
 // DiscoveredApps returns catalogApps (the instances internal/components
 // classified, captured exactly as `apps backup --catalog` would capture
-// them) plus one minimal synthetic App per remaining live name idx found —
-// for `apps backup --all`, "everything, no filters applied". A name is
-// covered, and gets no synthetic App of its own, when it's the name of any
-// live object a catalog app was classified from: so the "genai-api"
-// Deployment the genai chart app anchors on isn't captured twice, while
-// the same-named-but-unrelated "genai" PgDatabase still is, on its own.
+// them) plus one minimal synthetic App per remaining live object idx found —
+// for `apps backup --all`, "everything, no filters applied".
 //
-// A synthetic App (ID and Object both the discovered name, no Type or
-// ChartPath) goes through the exact same Run dispatch — it just can't run
-// chart-templating without a catalog type's chart to locate on disk, so it
-// falls back to whatever Run's manifest-mode cascade finds.
+// An object is covered, and gets no synthetic App of its own, only when it
+// is exactly (group, kind, namespace, name) one of the live objects a
+// catalog app was classified from: so the "genai-api" Deployment the genai
+// chart app anchors on isn't captured twice, while a same-named-but-unrelated
+// "genai" PgDatabase, or another tenant's "opensearch1" in a different
+// namespace, still is. (Matching on the bare name, as this once did, silently
+// dropped every PgDatabase that shares its Deployment's name, and every
+// same-named object in a second namespace.)
 //
-// A synthetic App's ID is suffixed "-live" if it would otherwise collide
-// with a catalog App's ID — e.g. a renamed app's new, post-migration name
-// live alongside its legacy object (a legitimate mid-migration state):
-// without disambiguation, both would be captured under the same
-// <dir>/<App.ID>/<timestamp>/ directory, silently mixing two different
-// captures together and corrupting later --baseline/--drift resolution.
+// Per name, a synthetic App is made for each uncovered object except:
+//   - a Kustomization, unless nothing else carries that name (then one
+//     Live-less App is kept, which Run reports as having nothing to back up);
+//   - a HelmRelease with a workload of the same name in its namespace — the
+//     workload is what gets captured, as in the legacy client.
+//
+// A synthetic App has Object set to the discovered name and Live pinned to
+// its one object (no Type or ChartPath), so Run captures exactly that
+// object; it can't run chart-templating without a catalog type's chart to
+// locate on disk.
+//
+// A synthetic App's ID is the object's name — for the first of several
+// uncovered objects sharing it, see syntheticIDs; the others add their
+// namespace (and kind, if still ambiguous) — and gets "-live" if it would
+// otherwise collide with another App's ID
+// — e.g. a renamed app's new, post-migration name live alongside its legacy
+// object (a legitimate mid-migration state): without disambiguation, both
+// would be captured under the same <dir>/<App.ID>/<timestamp>/ directory,
+// silently mixing two different captures together and corrupting later
+// --baseline/--drift resolution.
 func DiscoveredApps(catalogApps []config.App, idx *discovery.Index) []config.App {
-	covered := map[string]bool{}
+	covered := map[liveKey]bool{}
 	usedIDs := make(map[string]bool, len(catalogApps))
 	for _, app := range catalogApps {
 		usedIDs[app.ID] = true
 		for _, ref := range app.Live {
-			covered[ref.Name] = true
+			covered[liveKey{ref.GVK.Group, ref.GVK.Kind, ref.Namespace, ref.Name}] = true
 		}
 	}
 
-	apps := append(make([]config.App, 0, len(catalogApps)+len(idx.Names())), catalogApps...)
-	for _, name := range idx.Names() {
-		if covered[name] {
+	byName := map[string][]*unstructured.Unstructured{}
+	for _, obj := range idx.Objects() {
+		byName[obj.GetName()] = append(byName[obj.GetName()], obj)
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	apps := append(make([]config.App, 0, len(catalogApps)+len(names)), catalogApps...)
+	add := func(id string, app config.App) {
+		for usedIDs[id] {
+			id += "-live"
+		}
+		usedIDs[id] = true
+		app.ID = id
+		apps = append(apps, app)
+	}
+	for _, name := range names {
+		objs := byName[name]
+		if onlyKustomizations(objs) {
+			if !allCovered(objs, covered) {
+				add(name, config.App{Name: name, Object: name})
+			}
 			continue
 		}
-		id := name
-		if usedIDs[id] {
-			id = name + "-live"
+		var pick []*unstructured.Unstructured
+		for _, obj := range objs {
+			if obj.GetKind() == "Kustomization" || covered[keyOf(obj)] || hasWorkloadSibling(obj, objs) {
+				continue
+			}
+			pick = append(pick, obj)
 		}
-		apps = append(apps, config.App{ID: id, Name: name, Object: name})
-		usedIDs[id] = true
+		ids := syntheticIDs(name, pick)
+		for i, obj := range pick {
+			add(ids[i], config.App{
+				Name: name, Object: name,
+				Live: []config.ObjectRef{{GVK: obj.GroupVersionKind(), Namespace: obj.GetNamespace(), Name: name}},
+			})
+		}
 	}
 	return apps
+}
+
+// liveKey identifies one live object the way discovery.Index.Get does:
+// version-independent.
+type liveKey struct{ group, kind, namespace, name string }
+
+func keyOf(obj *unstructured.Unstructured) liveKey {
+	gvk := obj.GroupVersionKind()
+	return liveKey{gvk.Group, gvk.Kind, obj.GetNamespace(), obj.GetName()}
+}
+
+func onlyKustomizations(objs []*unstructured.Unstructured) bool {
+	for _, obj := range objs {
+		if obj.GetKind() != "Kustomization" {
+			return false
+		}
+	}
+	return true
+}
+
+func allCovered(objs []*unstructured.Unstructured, covered map[liveKey]bool) bool {
+	for _, obj := range objs {
+		if !covered[keyOf(obj)] {
+			return false
+		}
+	}
+	return true
+}
+
+// hasWorkloadSibling reports whether obj is a HelmRelease and objs holds a
+// workload in its namespace — the same-named workload it rendered.
+func hasWorkloadSibling(obj *unstructured.Unstructured, objs []*unstructured.Unstructured) bool {
+	if obj.GetKind() != "HelmRelease" {
+		return false
+	}
+	for _, other := range objs {
+		if isWorkload(other) && other.GetNamespace() == obj.GetNamespace() {
+			return true
+		}
+	}
+	return false
+}
+
+// syntheticIDs are the ID bases for pick, in order: the first object keeps
+// the bare name (the one the legacy cascade would have captured — a custom
+// resource, else a workload, else a HelmRelease, then the alphabetically
+// first namespace), so an app that already has backups under that name
+// keeps them; each further one is name-namespace, plus -kind when two of
+// those still collide. pick is reordered into that priority.
+func syntheticIDs(name string, pick []*unstructured.Unstructured) []string {
+	rank := func(o *unstructured.Unstructured) int {
+		switch {
+		case isWorkload(o):
+			return 1
+		case o.GetKind() == "HelmRelease":
+			return 2
+		}
+		return 0
+	}
+	sort.SliceStable(pick, func(i, j int) bool {
+		if ri, rj := rank(pick[i]), rank(pick[j]); ri != rj {
+			return ri < rj
+		}
+		if pick[i].GetNamespace() != pick[j].GetNamespace() {
+			return pick[i].GetNamespace() < pick[j].GetNamespace()
+		}
+		return pick[i].GetKind() < pick[j].GetKind()
+	})
+	ids := make([]string, len(pick))
+	taken := map[string]bool{}
+	for i, obj := range pick {
+		id := name
+		if i > 0 {
+			id = name + "-" + obj.GetNamespace()
+			if taken[id] {
+				id += "-" + strings.ToLower(obj.GetKind())
+			}
+		}
+		taken[id] = true
+		ids[i] = id
+	}
+	return ids
 }
 
 func notFoundErr(name string) error {
@@ -329,17 +487,34 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 	releaseName := diff.ReleaseName(hr, opts.App.Object)
 	renderedDocs, err := diff.HelmTemplate(ctx, opts.Runner, chartDir, releaseName, hr.GetNamespace(), values)
 	if err != nil {
+		// A chart that won't template (a checkout at another version, a
+		// values shape it rejects) must not cost the capture of workloads
+		// that are right there live.
+		if files, ok, ferr := captureClassifiedWorkloads(ctx, opts, dir); ok {
+			opts.Log.Warningf("HelmRelease %q: templating its chart at %s failed (%v); captured the classified live workloads directly instead", hr.GetName(), chartDir, err)
+			return files, ferr
+		}
 		return nil, err
 	}
 
-	aopts := appdiff.Options{App: opts.App, Client: opts.Client}
-	liveWorkloads := appdiff.FetchLiveWorkloads(ctx, aopts, hr.GetNamespace(), renderedDocs)
+	aopts := appdiff.Options{App: opts.App, Client: opts.Client, Log: opts.Log}
+	liveWorkloads, err := appdiff.FetchLiveWorkloads(ctx, aopts, hr.GetNamespace(), renderedDocs)
+	if err != nil {
+		return nil, err
+	}
 	if len(liveWorkloads) == 0 {
-		warnNoLiveWorkloads(opts, hr, chartDir, appdiff.RenderedWorkloadNames(aopts, hr.GetNamespace(), renderedDocs))
+		rendered := appdiff.RenderedWorkloadNames(aopts, hr.GetNamespace(), renderedDocs)
+		if files, ok, ferr := captureClassifiedWorkloads(ctx, opts, dir); ok {
+			opts.Log.Warningf("HelmRelease %q: none of the workloads the chart at %s renders (%s) exist live; captured the classified live workloads directly instead",
+				hr.GetName(), chartDir, strings.Join(rendered, ", "))
+			return files, ferr
+		}
+		warnNoLiveWorkloads(opts, hr, chartDir, rendered)
 		return writeHelmReleaseFiles(dir, hr, values, opts.Log)
 	}
 
-	if err := writeYAMLFile(dir, "deployment.yaml", liveWorkloads[0].Object); err != nil {
+	manifests, err := writeWorkloadManifests(dir, liveWorkloads)
+	if err != nil {
 		return nil, err
 	}
 	envs, err := appdiff.LiveWorkloadEnvs(ctx, aopts, liveWorkloads)
@@ -350,7 +525,60 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 	if err != nil {
 		return nil, err
 	}
-	return append([]string{"deployment.yaml"}, envFiles...), nil
+	return append(manifests, envFiles...), nil
+}
+
+// workloadManifestPrefix/-Suffix frame WorkloadManifestFile's names.
+const (
+	workloadManifestPrefix = "workload."
+	workloadManifestSuffix = ".yaml"
+)
+
+// WorkloadManifestFile is the backup file name holding a sibling workload's
+// manifest: <prefix><kind>.<name>.yaml. The first workload (the app's
+// anchor) is deployment.yaml instead, so a backup of a single workload is
+// unchanged; the others — genai-ui next to genai-api, virtualizer-ui and
+// -monitor next to the virtualizer server — used to keep an env file only,
+// losing their image, replicas, resources, probes and volumes. Workload
+// names are DNS-1123 labels, safe as file name parts.
+func WorkloadManifestFile(kind, name string) string {
+	return workloadManifestPrefix + strings.ToLower(kind) + "." + name + workloadManifestSuffix
+}
+
+// IsWorkloadManifestFile reports whether name is a WorkloadManifestFile name.
+func IsWorkloadManifestFile(name string) bool {
+	return strings.HasPrefix(name, workloadManifestPrefix) && strings.HasSuffix(name, workloadManifestSuffix) &&
+		strings.Count(strings.TrimSuffix(strings.TrimPrefix(name, workloadManifestPrefix), workloadManifestSuffix), ".") >= 1
+}
+
+// writeWorkloadManifests writes the first workload as deployment.yaml and
+// every other one as its WorkloadManifestFile, returning the names written.
+func writeWorkloadManifests(dir string, wls []*unstructured.Unstructured) ([]string, error) {
+	if err := writeYAMLFile(dir, "deployment.yaml", wls[0].Object); err != nil {
+		return nil, err
+	}
+	files := []string{"deployment.yaml"}
+	for _, w := range wls[1:] {
+		name := WorkloadManifestFile(w.GetKind(), w.GetName())
+		if err := writeYAMLFile(dir, name, w.Object); err != nil {
+			return nil, err
+		}
+		files = append(files, name)
+	}
+	return files, nil
+}
+
+// captureClassifiedWorkloads captures the live workloads opts.App was
+// classified from (the primary one and its siblings) as plain workloads —
+// no chart templating — when it has a workload as its primary live object.
+// ok is false, and nothing is written, when it doesn't.
+func captureClassifiedWorkloads(ctx context.Context, opts Options, dir string) (files []string, ok bool, err error) {
+	live, found := classifiedLive(opts)
+	if !found || !isWorkload(live) {
+		return nil, false, nil
+	}
+	files, err = writeWorkloads(ctx, opts, dir, append([]*unstructured.Unstructured{live}, classifiedSiblings(opts)...))
+	return files, true, err
 }
 
 // writeEnvFiles writes each live workload's env vars to its own
@@ -436,16 +664,17 @@ func writeWorkload(ctx context.Context, opts Options, dir string, wl *unstructur
 }
 
 // writeWorkloads captures live workloads directly (no chart templating):
-// the first one's manifest as deployment.yaml, and every one's env vars
-// (see writeEnvFiles).
+// the first one's manifest as deployment.yaml, the others' as their
+// WorkloadManifestFile, and every one's env vars (see writeEnvFiles).
 func writeWorkloads(ctx context.Context, opts Options, dir string, wls []*unstructured.Unstructured) ([]string, error) {
-	if err := writeYAMLFile(dir, "deployment.yaml", wls[0].Object); err != nil {
+	manifests, err := writeWorkloadManifests(dir, wls)
+	if err != nil {
 		return nil, err
 	}
 	getter := envvars.ClientGetter{Client: opts.Client}
 	envs := make([]map[string]string, 0, len(wls))
 	for _, wl := range wls {
-		env, err := envvars.Extract(ctx, getter, wl, opts.Log.Debugf)
+		env, err := envvars.Extract(ctx, getter, wl, opts.Log.Warningf)
 		if err != nil {
 			return nil, err
 		}
@@ -455,5 +684,5 @@ func writeWorkloads(ctx context.Context, opts Options, dir string, wls []*unstru
 	if err != nil {
 		return nil, err
 	}
-	return append([]string{"deployment.yaml"}, envFiles...), nil
+	return append(manifests, envFiles...), nil
 }

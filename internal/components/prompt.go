@@ -1,17 +1,22 @@
 package components
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+
+	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
 // ErrNoAnswer is returned by a Prompter that can't ask (NonInteractive), or
 // whose input ran out before a valid answer was given.
 var ErrNoAnswer = errors.New("no answer given")
+
+// ErrSkipped is returned for an instance the operator chose to leave out
+// of an `apps ... --all` run. It isn't a failure: the run moves on.
+var ErrSkipped = errors.New("skipped at the prompt")
 
 // Prompter asks the operator to choose one of several options, returning
 // the chosen index.
@@ -32,13 +37,15 @@ func (NonInteractive) Choose(string, []string) (int, error) { return 0, ErrNoAns
 // answer. EOF, or a blank line, is ErrNoAnswer rather than a default pick,
 // matching internal/appmigrate.Confirm's "silence never means yes" rule.
 type Terminal struct {
-	in  *bufio.Reader
+	in  io.Reader
 	out io.Writer
 }
 
-// NewTerminal builds a Terminal prompter reading in and writing out.
+// NewTerminal builds a Terminal prompter reading in and writing out. It
+// reads in unbuffered (ui.ReadLine), so it never takes answers meant for
+// a later appmigrate.Confirm on the same stdin.
 func NewTerminal(in io.Reader, out io.Writer) *Terminal {
-	return &Terminal{in: bufio.NewReader(in), out: out}
+	return &Terminal{in: in, out: out}
 }
 
 // maxAttempts bounds how many invalid answers Terminal tolerates before
@@ -53,7 +60,7 @@ func (t *Terminal) Choose(question string, options []string) (int, error) {
 	}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		_, _ = fmt.Fprintf(t.out, "Choose [1-%d]: ", len(options))
-		line, err := t.in.ReadString('\n')
+		line, err := ui.ReadLine(t.in)
 		answer := strings.TrimSpace(line)
 		if answer == "" {
 			if err != nil && !errors.Is(err, io.EOF) {

@@ -129,8 +129,17 @@ func LoadEnvironment(flagValue string, overrides Environment) (Environment, erro
 		if err := decodeStrict(data, &env); err != nil {
 			return Environment{}, fmt.Errorf("parsing %s: %w", path, err)
 		}
+		// A relative path in the file is relative to the file itself, not
+		// to wherever a later command happens to run from.
+		if env, err = env.AbsPaths(filepath.Dir(path)); err != nil {
+			return Environment{}, fmt.Errorf("%s: %w", path, err)
+		}
 	}
 
+	overrides, err = overrides.AbsPaths("")
+	if err != nil {
+		return Environment{}, err
+	}
 	env = env.Override(overrides)
 	if err := env.Validate(); err != nil {
 		if path == "" {
@@ -139,6 +148,73 @@ func LoadEnvironment(flagValue string, overrides Environment) (Environment, erro
 		return Environment{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return env, nil
+}
+
+// ParseEnvironmentRepos reads just the repos entries of an environment
+// file's content, made absolute against dir (the file's directory).
+func ParseEnvironmentRepos(data []byte, dir string) (map[string]string, error) {
+	var env struct {
+		Repos map[string]string `yaml:"repos"`
+	}
+	if err := yaml.Unmarshal(data, &env); err != nil {
+		return nil, err
+	}
+	abs, err := Environment{Repos: env.Repos}.AbsPaths(dir)
+	if err != nil {
+		return nil, err
+	}
+	return abs.Repos, nil
+}
+
+// AbsPaths returns e with Base and every Repos path made absolute: a
+// leading ~ expands to the home directory, and a relative path is taken
+// relative to dir — or to the working directory when dir is "", for paths
+// given as flags.
+func (e Environment) AbsPaths(dir string) (Environment, error) {
+	var err error
+	if e.Base, err = absPath(e.Base, dir); err != nil {
+		return Environment{}, err
+	}
+	if len(e.Repos) > 0 {
+		repos := make(map[string]string, len(e.Repos))
+		for name, p := range e.Repos {
+			if repos[name], err = absPath(p, dir); err != nil {
+				return Environment{}, err
+			}
+		}
+		e.Repos = repos
+	}
+	return e, nil
+}
+
+func absPath(p, dir string) (string, error) {
+	switch {
+	case p == "":
+		return "", nil
+	case p == "~" || strings.HasPrefix(p, "~/"):
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expanding %s: %w", p, err)
+		}
+		return filepath.Join(home, strings.TrimPrefix(p, "~")), nil
+	case filepath.IsAbs(p):
+		return filepath.Clean(p), nil
+	case dir != "":
+		// dir may itself be relative (a --dir ./cfg): resolve the result
+		// against the working directory too, or what is written down would
+		// be read back relative to a different directory.
+		abs, err := filepath.Abs(filepath.Join(dir, p))
+		if err != nil {
+			return "", fmt.Errorf("resolving %s: %w", p, err)
+		}
+		return abs, nil
+	default:
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return "", fmt.Errorf("resolving %s: %w", p, err)
+		}
+		return abs, nil
+	}
 }
 
 // Override returns e with every non-empty field of o applied on top; o's

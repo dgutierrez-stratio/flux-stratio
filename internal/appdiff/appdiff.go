@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -70,6 +71,13 @@ type Result struct {
 	// kind, whatever Patch is: Before is rendered without them, so when it's
 	// non-zero Before is the unpatched base, not what Flux would apply.
 	ExistingPatches int
+	// DroppedFromExisting lists the paths the tenant file's existing patches
+	// for this object's kind set that Patch does not: migrating replaces
+	// them whole, so these are lost — a hand edit, a value the diff can't
+	// see (chart mode compares env vars only), an UnmappedDiff once carried
+	// by hand. Empty when there is no new Patch to replace them with (see
+	// ObsoletePatches), or when it is UpToDate.
+	DroppedFromExisting []string
 	// FluxManagedBy is set (to "Kustomization <name>" or "HelmRelease
 	// <name>") when the live object compared against is already managed by
 	// Flux: its state then reflects the GitOps render, not the legacy
@@ -87,8 +95,11 @@ type Result struct {
 	// The remaining fields are set only in chart mode (App.ChartPath !=
 	// ""); they stay at their zero value in manifest mode. See
 	// diff.ChartDiffResult for the first three.
-	UnmappedDiffs     []diff.UnmappedDiff
-	LiveOnly          []diff.LiveOnlyVar
+	UnmappedDiffs []diff.UnmappedDiff
+	LiveOnly      []diff.LiveOnlyVar
+	// Excluded are the differences the app's exclude list kept out of the
+	// patch — informational, not something left to review.
+	Excluded          []diff.ExcludedDiff
 	RenderedOnlyCount int
 	// MissingWorkloads names ("Kind namespace/name") the workloads the
 	// chart renders that have no live counterpart to compare — not found
@@ -123,7 +134,84 @@ func Diff(ctx context.Context, opts Options) (*Result, error) {
 			return nil, err
 		}
 	}
+	if result.Patch != nil && !result.UpToDate {
+		if result.DroppedFromExisting, err = droppedFromExisting(*result.Patch, rendered.ReplacedPatches); err != nil {
+			return nil, err
+		}
+	}
 	return result, nil
+}
+
+// droppedFromExisting returns, sorted, the leaf paths set by any of existing
+// (tenant-file patch bodies) that doc does not set. Only the path is
+// compared, never the value: a changed value is the update migrating exists
+// to make, a path that vanishes is a loss. A body that doesn't parse is
+// skipped — it is replaced either way, and there is nothing to name.
+func droppedFromExisting(doc diff.PatchDoc, existing []string) ([]string, error) {
+	computed, err := yaml.Marshal(doc.Patch)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling computed patch: %w", err)
+	}
+	var computedTree any
+	if err := yaml.Unmarshal(computed, &computedTree); err != nil {
+		return nil, fmt.Errorf("decoding computed patch: %w", err)
+	}
+	kept := map[string]bool{}
+	for _, p := range patchPaths("", computedTree) {
+		kept[p] = true
+	}
+	seen := map[string]bool{}
+	var dropped []string
+	for _, body := range existing {
+		var tree any
+		if err := yaml.Unmarshal([]byte(body), &tree); err != nil {
+			continue
+		}
+		for _, p := range patchPaths("", tree) {
+			if !kept[p] && !seen[p] {
+				seen[p] = true
+				dropped = append(dropped, p)
+			}
+		}
+	}
+	sort.Strings(dropped)
+	return dropped, nil
+}
+
+// patchPaths flattens a decoded patch into the dotted paths of its leaves.
+// A JSON6902 ops list contributes one entry per operation: its path, whatever
+// the op, so an index-wise `add /spec/x/0` replaced by a whole-list
+// `replace /spec/x` is reported as dropped although the new patch covers it.
+// Any other list is a leaf, since a merge patch replaces it whole.
+func patchPaths(prefix string, node any) []string {
+	switch n := node.(type) {
+	case map[string]any:
+		if len(n) == 0 {
+			return nil
+		}
+		var out []string
+		for k, v := range n {
+			key := k
+			if prefix != "" {
+				key = prefix + "." + k
+			}
+			out = append(out, patchPaths(key, v)...)
+		}
+		return out
+	case []any:
+		var out []string
+		for _, item := range n {
+			if op, ok := item.(map[string]any); ok {
+				if path, ok := op["path"].(string); ok {
+					out = append(out, path)
+					continue
+				}
+			}
+			return []string{prefix}
+		}
+		return out
+	}
+	return []string{prefix}
 }
 
 // Labels Flux's controllers stamp on every object they apply.
@@ -168,7 +256,12 @@ func samePatch(doc diff.PatchDoc, existing string) (bool, error) {
 // package goes through, so opts.App's Rset/Kustomization/Object are always
 // interpreted the same way.
 func renderApp(ctx context.Context, opts Options) (*render.Result, error) {
+	kind := ""
+	if opts.App.ChartPath != "" {
+		kind = "HelmRelease"
+	}
 	return render.Render(ctx, render.Options{
+		Kind:          kind,
 		Repos:         opts.Repos,
 		Cluster:       opts.Cluster,
 		Tenant:        opts.Tenant,

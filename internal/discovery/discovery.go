@@ -101,7 +101,14 @@ func scanInto(ctx context.Context, c client.Client, l *log.Logger, gvk schema.Gr
 	list, err := kubeclient.ListUnstructured(ctx, c, gvk, "")
 	if err != nil {
 		if tolerable(err) {
-			l.Debugf("%s isn't installed or accessible on this cluster, skipping: %v", gvk.Kind, err)
+			// Forbidden is still skipped, so one unlistable kind doesn't
+			// stop a scan, but never quietly: whatever that kind holds is
+			// missing from every backup and lookup that follows.
+			if apierrors.IsForbidden(err) {
+				l.Warningf("not allowed to list %s on this cluster, skipping it — none of its objects will be found: %v", gvk.Kind, err)
+			} else {
+				l.Debugf("%s isn't installed on this cluster, skipping: %v", gvk.Kind, err)
+			}
 			return nil
 		}
 		return err

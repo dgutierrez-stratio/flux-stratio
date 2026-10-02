@@ -448,3 +448,114 @@ func TestPlan_BaselineUsedInsteadOfLive(t *testing.T) {
 		t.Errorf("Migrated=%v, want a patch carrying the backup's instances: 3; after:\n%s", result.Migrated, result.After)
 	}
 }
+
+const rsetOutputGosecAgent = `
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps-psql-gosec-agent
+  namespace: stratio-datastores
+spec:
+  path: components/gosec-agent/app/overlays/postgres/S
+`
+
+const kustomizationBuildOutputGosecAgent = `
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: psql-gosec-agent
+  namespace: stratio-datastores
+spec:
+  replicas: 1
+`
+
+// TestPlan_ReportsALegacyAgentPatchAndWritesNothing: a tenant file the
+// legacy client left a gosec agent's patch in the parent entry's top-level
+// patches is flagged by Plan whether or not the agent has a difference, and
+// Plan never touches the file.
+func TestPlan_ReportsALegacyAgentPatchAndWritesNothing(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	cat := loadCatalog(t, base)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "gosec-agent", "app", "overlays", "postgres", "S"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tenantPath := tenantfile.Path(filepath.Join(base, "keos-fleet"), "eosdev", "stratio")
+	data, err := os.ReadFile(tenantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := "      - name: psql\n        patches:\n        - patch: |\n" +
+		"            apiVersion: helm.toolkit.fluxcd.io/v2\n            kind: HelmRelease\n" +
+		"            metadata:\n              name: psql-gosec-agent\n" +
+		"          target:\n            kind: HelmRelease\n"
+	before := strings.Replace(string(data), "      - name: psql\n", legacy, 1)
+	if err := os.WriteFile(tenantPath, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, replicas := range map[string]int64{"agent matches live": 1, "agent differs from live": 3} {
+		t.Run(name, func(t *testing.T) {
+			liveObj := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "apps/v1", "kind": "Deployment",
+				"metadata": map[string]any{"name": "psql-gosec-agent", "namespace": "stratio-datastores"},
+				"spec":     map[string]any{"replicas": replicas},
+			}}
+			opts := Options{
+				Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: cat,
+				App: config.App{ID: "psql-gosec-agent", Rset: "apps/components/resourceset-apps-fixture.yaml",
+					Kustomization: "apps-psql-gosec-agent", Object: "psql-gosec-agent"},
+				Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+					"flux-operator": {Stdout: []byte(rsetOutputGosecAgent)},
+					"flux":          {Stdout: []byte(kustomizationBuildOutputGosecAgent)},
+				}},
+				Client: fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(liveObj).Build(),
+				Log:    log.New(io.Discard, false),
+			}
+			result, err := Plan(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Plan returned error: %v", err)
+			}
+			if result.LegacyAgentPatches != 1 {
+				t.Errorf("LegacyAgentPatches = %d, want 1", result.LegacyAgentPatches)
+			}
+			if result.Migrated != (replicas != 1) {
+				t.Errorf("Migrated = %v, want %v", result.Migrated, replicas != 1)
+			}
+			after, err := os.ReadFile(tenantPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != before {
+				t.Error("Plan modified the tenant file on disk")
+			}
+		})
+	}
+}
+
+// A plain app (anchored at its own entry) never reports a legacy agent patch.
+func TestPlan_NoLegacyAgentPatchForAPlainApp(t *testing.T) {
+	base := fixtureBase(t, "eosdev", "stratio")
+	liveObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "postgres.stratio.com/v1", "kind": "PgCluster",
+		"metadata": map[string]any{"name": "psql", "namespace": "stratio-datastores"},
+		"spec":     map[string]any{"instances": int64(1)},
+	}}
+	result, err := Plan(context.Background(), Options{
+		Repos: config.ReposUnder(base), Cluster: "eosdev", Tenant: "stratio", Catalog: loadCatalog(t, base),
+		App: config.App{ID: "psql", Rset: "apps/components/resourceset-apps-fixture.yaml", Kustomization: "apps-psql", Object: "psql"},
+		Runner: &runner.Fake{Responses: map[string]runner.FakeResponse{
+			"flux-operator": {Stdout: []byte(rsetOutputPgCluster)},
+			"flux":          {Stdout: []byte(kustomizationBuildOutputPgCluster)},
+		}},
+		Client: fake.NewClientBuilder().WithScheme(apiruntime.NewScheme()).WithObjects(liveObj).Build(),
+		Log:    log.New(io.Discard, false),
+	})
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if result.LegacyAgentPatches != 0 {
+		t.Errorf("LegacyAgentPatches = %d, want 0", result.LegacyAgentPatches)
+	}
+}

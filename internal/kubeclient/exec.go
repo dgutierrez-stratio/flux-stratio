@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -12,7 +13,13 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/Stratio/flux-stratio/internal/runner"
 )
+
+// ExecTimeout bounds a command run inside a pod (a prepare step's SQL),
+// so one waiting on a lock can't block a migration forever.
+const ExecTimeout = 10 * time.Minute
 
 // Execer runs a command inside a live pod and captures its output — the Go
 // equivalent of `kubectl exec`, for the rare prepare step (a data rewrite)
@@ -46,6 +53,8 @@ func NewExecer(kubeconfigArgs *genericclioptions.ConfigFlags) (Execer, error) {
 // (bad SQL, connection refused) is caught immediately rather than only
 // visible in the captured stderr.
 func (e *execer) Exec(ctx context.Context, namespace, pod, container string, command []string, stdin io.Reader) (string, string, error) {
+	ctx, cancel := runner.WithDefaultTimeout(ctx, ExecTimeout)
+	defer cancel()
 	req := e.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod).

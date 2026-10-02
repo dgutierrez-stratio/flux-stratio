@@ -79,6 +79,88 @@ func TestSave_AtomicWriteLeavesNoTempFile(t *testing.T) {
 	}
 }
 
+// copyFixture copies the fixture tenant file into a temp dir, mode 0644,
+// and loads it from there.
+func copyFixture(t *testing.T) (*Doc, string) {
+	t.Helper()
+	data, err := os.ReadFile("testdata/tenant.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "tenant.yaml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d, path
+}
+
+// TestSave_KeepsTheFilesMode: the temp file's 0600 never replaces the
+// tenant file's own mode.
+func TestSave_KeepsTheFilesMode(t *testing.T) {
+	d, path := copyFixture(t)
+	if err := d.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("mode = %o, want 0644", got)
+	}
+}
+
+// TestSave_WritesThroughASymlink: a symlinked tenant file stays a
+// symlink, and its target gets the content.
+func TestSave_WritesThroughASymlink(t *testing.T) {
+	d, target := copyFixture(t)
+	link := filepath.Join(t.TempDir(), "link.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Save(link); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a regular file")
+	}
+}
+
+// TestSave_RefusesAFileChangedSinceLoad: an edit made between Load and
+// Save is never overwritten.
+func TestSave_RefusesAFileChangedSinceLoad(t *testing.T) {
+	d, path := copyFixture(t)
+	edited := []byte("# edited by someone else\n")
+	if err := os.WriteFile(path, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Save(path); err == nil || !strings.Contains(err.Error(), "changed on disk") {
+		t.Fatalf("Save err = %v, want it refused", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(edited) {
+		t.Errorf("the edit was overwritten: %q", got)
+	}
+}
+
+// TestSave_TwiceFromTheSameDoc: a Doc's own earlier save isn't mistaken
+// for someone else's edit.
+func TestSave_TwiceFromTheSameDoc(t *testing.T) {
+	d, path := copyFixture(t)
+	for i := 0; i < 2; i++ {
+		if err := d.Save(path); err != nil {
+			t.Fatalf("save %d: %v", i+1, err)
+		}
+	}
+}
+
 func TestFindComponentEntry_ScansEveryComponentKey(t *testing.T) {
 	d := loadFixture(t)
 
@@ -390,5 +472,33 @@ func TestCommentedOut(t *testing.T) {
 		if got := CommentedOut(d, c.key); got != c.want {
 			t.Errorf("CommentedOut(%q) = %v, want %v", c.key, got, c.want)
 		}
+	}
+}
+
+// TestSplice_EntryNotDerivedFromTheKustomizationName: a template can pin a
+// Kustomization to a fixed name ("apps-litellm") while the tenant entry keeps
+// its own ("genai-litellm"); the patch goes to the entry the app was
+// resolved to, not to one named after the Kustomization.
+func TestSplice_EntryNotDerivedFromTheKustomizationName(t *testing.T) {
+	d := loadFixture(t)
+	cat := loadFixtureCatalog(t)
+	app := config.App{ID: "pinned", Entry: "psql", Kustomization: "apps-pinned", Object: "pinned"}
+
+	if err := Splice(d, cat, app, samplePatch("HelmRelease")); err != nil {
+		t.Fatalf("Splice returned error: %v", err)
+	}
+	entry, err := FindComponentEntry(d, "psql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patches := mapGet(entry, "patches"); patches == nil || len(patches.Content) != 1 {
+		t.Fatalf("psql.patches = %v, want exactly 1 entry", patches)
+	}
+
+	// With no Entry (an App built by hand) the Kustomization name is all
+	// there is to go on, as before.
+	byName := config.App{ID: "pinned", Kustomization: "apps-pinned", Object: "pinned"}
+	if err := Splice(d, cat, byName, samplePatch("HelmRelease")); err == nil {
+		t.Error("Splice with no Entry and no entry named after the Kustomization: got nil error")
 	}
 }

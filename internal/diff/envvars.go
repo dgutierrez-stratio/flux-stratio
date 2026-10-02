@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"fmt"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -177,13 +178,28 @@ func referencedConfigMaps(workload *unstructured.Unstructured) []string {
 	return names
 }
 
+// isPlaceholder reports whether v is a stand-in for a value that can't be
+// compared — "<secret:NAME/KEY>", "<fieldRef:path>", "<unresolved:...>" —
+// rather than a real value that merely starts with "<". A placeholder is
+// one "<...>" token with no whitespace and no angle bracket inside, so an
+// XML or HTML fragment (a real value) is never mistaken for one and
+// silently skipped from the patch.
 func isPlaceholder(v string) bool {
-	return strings.HasPrefix(v, "<")
+	if len(v) < 2 || v[0] != '<' || v[len(v)-1] != '>' {
+		return false
+	}
+	return !strings.ContainsAny(v[1:len(v)-1], "<> \t\r\n")
 }
 
 func renderedEnvValue(entry map[string]any) string {
-	if v, ok := entry["value"].(string); ok {
+	switch v := entry["value"].(type) {
+	case string:
 		return v
+	case int64, float64, bool:
+		// An unquoted `value: 8080` in a chart: not valid for the API
+		// server, but it is what the chart says and what a patch is meant
+		// to compare against, not "".
+		return fmt.Sprint(v)
 	}
 	valueFrom, _ := entry["valueFrom"].(map[string]any)
 	if valueFrom == nil {

@@ -123,3 +123,38 @@ func TestIndexRendered_IgnoresOtherKinds(t *testing.T) {
 		t.Errorf("indexRendered = %+v, want empty", r)
 	}
 }
+
+func TestIsPlaceholder(t *testing.T) {
+	for v, want := range map[string]bool{
+		"<secret:db-creds/password>":     true,
+		"<fieldRef:status.podIP>":        true,
+		"<unresolved:ConfigMap-ns/cm/k>": true,
+		"<status.podIP>":                 true,
+		"<root><child>1</child></root>":  false,
+		"<?xml version=\"1.0\"?><a/>":    false,
+		"<not closed":                    false,
+		"":                               false,
+		"<>":                             true,
+		"plain":                          false,
+		"x<secret:a/b>":                  false,
+	} {
+		if got := isPlaceholder(v); got != want {
+			t.Errorf("isPlaceholder(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
+func TestRenderedEnvValue_NonStringScalars(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  string
+	}{{"x", "x"}, {int64(8080), "8080"}, {float64(1.5), "1.5"}, {true, "true"}, {nil, ""}} {
+		entry := map[string]any{"name": "N"}
+		if tc.value != nil {
+			entry["value"] = tc.value
+		}
+		if got := renderedEnvValue(entry); got != tc.want {
+			t.Errorf("renderedEnvValue(value=%#v) = %q, want %q", tc.value, got, tc.want)
+		}
+	}
+}

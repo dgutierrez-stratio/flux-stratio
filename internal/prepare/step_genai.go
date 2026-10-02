@@ -7,11 +7,16 @@ package prepare
 // deprecated component superseded by litellm: a migration whose genai
 // instance has already moved to litellm (or never had genai-gateway) has
 // no "genai-gateway.<tenant>-genai" schema at all, so its DELETE is
-// guarded rather than assumed to still apply.
+// guarded rather than assumed to still apply. The UPDATE keeps the Python
+// script's WHERE, so it only rewrites rows that hold the old name — a
+// re-run touches nothing, and no row is rewritten into itself.
 const genaiSQL = `UPDATE "genai-api.<tenant>-genai".chain
 SET chain_params = replace(chain_params::text, 'dg-businessglossary-api', 'governance-businessglossary-api')::jsonb,
     worker_config = replace(worker_config::text, 'dg-businessglossary-api', 'governance-businessglossary-api')::jsonb,
-    invoke_schema = replace(invoke_schema::text, 'dg-businessglossary-api', 'governance-businessglossary-api')::jsonb;
+    invoke_schema = replace(invoke_schema::text, 'dg-businessglossary-api', 'governance-businessglossary-api')::jsonb
+WHERE chain_params::text LIKE '%dg-businessglossary-api%'
+   OR worker_config::text LIKE '%dg-businessglossary-api%'
+   OR invoke_schema::text LIKE '%dg-businessglossary-api%';
 DO $$
 BEGIN
   IF to_regclass('"genai-gateway.<tenant>-genai".endpoint') IS NOT NULL THEN
@@ -25,8 +30,9 @@ END $$;
 
 // stepGenAI is a change to live application data (a Postgres UPDATE/DELETE),
 // which no Kubernetes API call can verify: apps migrate runs it via pod
-// exec against the tenant's PgCluster primary and shows the operator the
-// real captured output, but this plugin never claims on its own to have
+// exec against the tenant's PgCluster primary, only after the operator
+// has seen the SQL and the target pod and said yes, then shows the real
+// captured output; this plugin never claims on its own to have
 // confirmed it worked — the Python client's own version exited 0
 // unconditionally, marking the step migrated on faith whether or not the
 // SQL was ever run. apps migrate gates on an explicit confirmation of the
@@ -41,7 +47,11 @@ var stepGenAI = Step{
 			"pgcluster.stratio.com/pgcluster-role": "master",
 		},
 		Container: "postgresql",
-		Command:   []string{"env", "PGPASSFILE=/etc/stratio/config/pgpass", "psql", "genai"},
-		SQL:       genaiSQL,
+		// ON_ERROR_STOP makes psql exit non-zero on a failed statement
+		// (otherwise it carries on and exits 0), and --single-transaction
+		// rolls the UPDATE back if the DELETE after it fails, so a run
+		// either rewrites everything or nothing.
+		Command: []string{"env", "PGPASSFILE=/etc/stratio/config/pgpass", "psql", "-v", "ON_ERROR_STOP=1", "--single-transaction", "genai"},
+		SQL:     genaiSQL,
 	},
 }

@@ -53,6 +53,31 @@ func TestPlanDatamarketAgent_NeverTheGitOpsSide(t *testing.T) {
 	assertPlan(t, ops, err)
 }
 
+// TestPlanDatamarketAgent_ScalesWhatTheLegacyHelmReleaseRendered: the
+// Deployment the legacy HelmRelease rendered carries helm-controller's
+// labels and no CCT one; it's legacy all the same, and scaled down.
+func TestPlanDatamarketAgent_ScalesWhatTheLegacyHelmReleaseRendered(t *testing.T) {
+	rendered := object(gvkDeployment, "stratio-datastores", "datamarket-agent",
+		"helm.toolkit.fluxcd.io/name", "datamarket-agent", "helm.toolkit.fluxcd.io/namespace", "stratio-datastores")
+	_ = unstructured.SetNestedField(rendered.Object, int64(1), "spec", "replicas")
+	_ = unstructured.SetNestedStringMap(rendered.Object, map[string]string{"app": "datamarket-agent"}, "spec", "selector", "matchLabels")
+	// Another HelmRelease's Deployment is never touched.
+	other := object(gvkDeployment, "stratio-datastores", "other",
+		"helm.toolkit.fluxcd.io/name", "other", "helm.toolkit.fluxcd.io/namespace", "stratio-datastores")
+	_ = unstructured.SetNestedField(other.Object, int64(1), "spec", "replicas")
+
+	for _, suspended := range []bool{false, true} {
+		opts := datamarketOpts
+		opts.Client = fakeClient(t, legacyHelmRelease(suspended), rendered.DeepCopy(), other.DeepCopy())
+		ops, err := planDatamarketAgent(context.Background(), opts)
+		want := []string{"scale to 0 replicas Deployment stratio-datastores/datamarket-agent"}
+		if !suspended {
+			want = append([]string{"suspend HelmRelease stratio-datastores/datamarket-agent"}, want...)
+		}
+		assertPlan(t, ops, err, want...)
+	}
+}
+
 func TestPlanDatamarketAgent_OtherNamespaceIgnored(t *testing.T) {
 	opts := datamarketOpts
 	opts.Client = fakeClient(t, legacyDeployment("other-datastores", "datamarket-agent", "datamarket-agent.other-datastores", 3))

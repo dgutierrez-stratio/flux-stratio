@@ -32,7 +32,10 @@ func Run(ctx context.Context, opts Options) ([]byte, error) {
 		}
 	}
 
-	components := scanCRDs(ctx, opts.Client, opts.Catalog, opts.TenantName)
+	components, err := scanCRDs(ctx, opts.Client, opts.Catalog, opts.TenantName)
+	if err != nil {
+		return nil, fmt.Errorf("scanning custom resources: %w", err)
+	}
 	if err := scanDeployments(ctx, opts.Client, opts.Catalog, opts.TenantName, components); err != nil {
 		return nil, fmt.Errorf("scanning deployments: %w", err)
 	}

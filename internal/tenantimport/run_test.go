@@ -2,12 +2,18 @@ package tenantimport
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/Stratio/flux-stratio/internal/log"
 )
@@ -99,4 +105,36 @@ func keysOf(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestRun_UnlistableKindFails: only an uninstalled CRD means "none here".
+// One the client can't list (Forbidden, a timeout) fails the import —
+// treated as absent, the real postgres would be replaced by a placeholder
+// entry its dependents get wired to, in a file that looks valid.
+func TestRun_UnlistableKindFails(t *testing.T) {
+	for _, kind := range []string{"PgCluster", "HelmRelease"} {
+		t.Run(kind, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
+				pgCluster("psql", "stratio-datastores"),
+				deployment("connectors", "stratio-apps"),
+			).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == kind {
+						return apierrors.NewForbidden(schema.GroupResource{Resource: kind}, "", errors.New("rbac"))
+					}
+					return c.List(ctx, list, opts...)
+				},
+			}).Build()
+
+			out, err := Run(context.Background(), Options{
+				TenantName: "stratio", Catalog: loadFixtureCatalog(t), Client: c, Log: log.New(io.Discard, false),
+			})
+			if err == nil || !apierrors.IsForbidden(err) {
+				t.Errorf("err = %v, want the Forbidden list", err)
+			}
+			if out != nil {
+				t.Errorf("Run produced a tenant file anyway:\n%s", out)
+			}
+		})
+	}
 }

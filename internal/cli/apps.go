@@ -307,9 +307,10 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	warnFluxManaged(logger, app, result.FluxManagedBy)
 	review := chartReview{
 		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly,
-		Source: liveSource(resolvedBaseline),
+		Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
 	}
 	reportChartReview(logger, review)
+	reportDroppedFromExisting(logger, app, result.DroppedFromExisting)
 	if result.Patch == nil || result.UpToDate {
 		reportNoChange(logger, result.UpToDate, result.ObsoletePatches, review)
 		if view == viewMeld {
@@ -427,11 +428,15 @@ type chartReview struct {
 	Missing []string
 	// LiveOnly are the live variables the chart doesn't render.
 	LiveOnly []diff.LiveOnlyVar
+	// Excluded are the differences the catalog's exclude list kept out of
+	// the patch: reported, but not a warning (see hasWarnings).
+	Excluded []diff.ExcludedDiff
 	// Source names the live side: "live cluster" or "backup".
 	Source string
 }
 
-// hasWarnings reports whether reportChartReview prints anything for r.
+// hasWarnings reports whether reportChartReview warns about anything for r:
+// Excluded is only informational, so it never counts.
 func (r chartReview) hasWarnings() bool {
 	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || len(r.LiveOnly) > 0
 }
@@ -440,7 +445,9 @@ func (r chartReview) hasWarnings() bool {
 // leaves out of its patch, so none of it is lost silently: rendered
 // workloads it had nothing to compare against, differences it couldn't
 // attribute to one .Values path (listed one per line, with the candidate
-// paths), and live variables the chart has no place for.
+// paths), and live variables the chart has no place for. Differences the
+// catalog's exclude list kept out on purpose are listed last, as plain
+// information.
 func reportChartReview(logger *log.Logger, r chartReview) {
 	for _, w := range r.Missing {
 		logger.Warningf("%s: rendered by the chart but not in the %s — nothing of it is carried into the patch", w, r.Source)
@@ -461,6 +468,13 @@ func reportChartReview(logger *log.Logger, r chartReview) {
 			logger.Warningf("  %s: live %q", name, v.Live)
 		}
 	}
+	for _, e := range r.Excluded {
+		name := e.Name
+		if e.Workload != "" {
+			name = e.Workload + "/" + e.Name
+		}
+		logger.Actionf("excluded by the catalog: %s live %q, GitOps default %q (%s)", name, e.Live, e.Rendered, e.Path)
+	}
 }
 
 func describeUnmapped(u diff.UnmappedDiff) string {
@@ -472,6 +486,8 @@ func describeUnmapped(u diff.UnmappedDiff) string {
 	switch u.Reason {
 	case diff.UnmappedAmbiguous:
 		line += " between " + strings.Join(u.Candidates, ", ")
+	case diff.UnmappedNotReproduced:
+		line += " (" + strings.Join(u.Candidates, ", ") + ")"
 	case diff.UnmappedConflict:
 		line += " for " + strings.Join(u.Candidates, ", ")
 		if len(u.Shared) > 0 {

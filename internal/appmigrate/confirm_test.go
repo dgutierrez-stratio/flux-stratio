@@ -36,3 +36,20 @@ func TestConfirm(t *testing.T) {
 		}
 	}
 }
+
+// TestConfirm_SharedStdinAnswersEachPromptInTurn: one command asks several
+// questions on the same stdin; answers piped in for later prompts must not
+// be swallowed by an earlier one.
+func TestConfirm_SharedStdinAnswersEachPromptInTurn(t *testing.T) {
+	in := strings.NewReader("y\nn\nyes\n")
+	var out strings.Builder
+	for i, want := range []bool{true, false, true, false} {
+		got, err := Confirm(in, &out, "Proceed? ")
+		if err != nil {
+			t.Fatalf("prompt %d: %v", i+1, err)
+		}
+		if got != want {
+			t.Errorf("prompt %d = %v, want %v", i+1, got, want)
+		}
+	}
+}
