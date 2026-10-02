@@ -1,8 +1,7 @@
 # Task: compare workload specs (resources, replicas, image) in chart-mode, and warn
 
-**Status: open.** Repo: `flux-stratio` (this one). Independent of
-`docs/TASK-legacy-parity-findings.md`, but both touch `chartReview`/`reportChartReview` in
-`internal/cli/apps.go`: land that one first or rebase carefully.
+**Status: open.** Repo: `flux-stratio` (this one). Builds on the excluded-differences report
+(`chartReview.Excluded`, `reportChartReview` in `internal/cli/apps.go`), already landed.
 Related tasks: `docs/TASK-keos-apps-env-list-overlays.md`, `docs/TASK-charts-universe-alignment.md`.
 
 ## Problem
