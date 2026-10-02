@@ -94,3 +94,40 @@ func readBaselineEnvFile(dir, name string) (map[string]string, error) {
 	}
 	return out, nil
 }
+
+// Affixes of a backup's sibling workload manifest names; internal/backup
+// writes them (WorkloadManifestFile) but imports this package, so they are
+// repeated here. The first workload is always deployment.yaml.
+const (
+	workloadManifestPrefix = "workload."
+	workloadManifestSuffix = ".yaml"
+)
+
+// readBaselineManifests reads every workload manifest of a backup directory
+// (deployment.yaml and the sibling workload.<kind>.<name>.yaml files), keyed
+// "Kind/name" by what each one declares: deployment.yaml is the app's first
+// workload whatever its kind or name, so the file name can't be matched
+// against a target. A backup taken before manifests were kept has none.
+func readBaselineManifests(dir string) (map[string]*unstructured.Unstructured, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading baseline %s: %w", dir, err)
+	}
+	out := map[string]*unstructured.Unstructured{}
+	for _, e := range entries {
+		name := e.Name()
+		sibling := strings.HasPrefix(name, workloadManifestPrefix) && strings.HasSuffix(name, workloadManifestSuffix)
+		if e.IsDir() || (name != "deployment.yaml" && !sibling) {
+			continue
+		}
+		obj, err := readBaselineYAML(dir, name)
+		if err != nil {
+			return nil, err
+		}
+		if obj.GetName() == "" {
+			continue
+		}
+		out[obj.GetKind()+"/"+obj.GetName()] = obj
+	}
+	return out, nil
+}

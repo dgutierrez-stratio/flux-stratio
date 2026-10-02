@@ -77,6 +77,11 @@ type ComponentType struct {
 	// fields the GitOps side is authoritative for and must never be
 	// back-ported from the live cluster (identity/vault/governance values).
 	Exclude []string `yaml:"exclude,omitempty"`
+	// MemoryEnv names the env vars that hold a memory size in MB (a
+	// legacy pod's own memory setting, e.g. VR_POD_MEMORY_LIMIT): `apps
+	// diff` warns when the migrated container's memory limit is below one.
+	// A -Xmx<N>[kmg] in any env value is checked whatever its name.
+	MemoryEnv []string `yaml:"memoryEnv,omitempty"`
 	// Notes is a free-text hint shown to the operator, e.g. alongside a
 	// Prepare step that blocks migration.
 	Notes string `yaml:"notes,omitempty"`
@@ -295,6 +300,12 @@ func (c Catalog) validate() error {
 			add("chart.path %q: chart paths are relative to the charts repository root now (repos.charts), so write %q; "+
 				"re-run `flux stratio config init --force` to re-seed the catalog",
 				t.Chart.Path, strings.TrimPrefix(t.Chart.Path, RepoCharts+"/"))
+		}
+
+		for j, name := range t.MemoryEnv {
+			if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " =") {
+				add("memoryEnv[%d]: %q is not an env var name", j, name)
+			}
 		}
 
 		for _, p := range t.Match.validate("match") {

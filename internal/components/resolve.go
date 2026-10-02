@@ -514,6 +514,7 @@ func toApp(inst Instance, tenant string) (config.App, error) {
 		ValuesRoot:    t.ValuesRoot(),
 		Prepare:       t.Prepare,
 		Exclude:       t.Exclude,
+		MemoryEnv:     t.MemoryEnv,
 		Notes:         t.Notes,
 		Live:          live,
 	}, nil

@@ -97,6 +97,18 @@ type Result struct {
 	// diff.ChartDiffResult for the first three.
 	UnmappedDiffs []diff.UnmappedDiff
 	LiveOnly      []diff.LiveOnlyVar
+	// SpecDiffs are the resources, image and replicas that differ between
+	// each rendered workload and its live counterpart — what env-only
+	// diffing never sees, as the patched chart renders them: what Patch
+	// carries (CarriedResources) is no longer a difference.
+	SpecDiffs []diff.SpecDiff
+	// LiveSize is the size the legacy application reports about itself
+	// (its CUSTOMER_SIZE env var), when it has one.
+	LiveSize string
+	// CarriedResources are the containers whose live resources Patch carries
+	// (diff.ResourceEdit), so SpecDiffs no longer lists them: reported so
+	// the patch doesn't change them silently.
+	CarriedResources []diff.ResourceEdit
 	// Excluded are the differences the app's exclude list kept out of the
 	// patch — informational, not something left to review.
 	Excluded          []diff.ExcludedDiff

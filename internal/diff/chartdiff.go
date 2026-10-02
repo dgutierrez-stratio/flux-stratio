@@ -51,6 +51,10 @@ type LiveOnlyVar struct {
 	// against, or "" for a flat live side (see UnmappedDiff.Workload).
 	Workload   string
 	Name, Live string
+	// ShadowedBy is the container env values path (a list the HelmRelease
+	// replaces whole) hiding a chart default env var of this name, when
+	// that is why the chart doesn't render it.
+	ShadowedBy string
 }
 
 // ExcludedDiff is a live variable that differs from the chart's rendered
@@ -96,6 +100,9 @@ type LiveWorkloadEnv struct {
 	// set is then reported as ambiguous rather than guessed.
 	Rendered *unstructured.Unstructured
 	Env      map[string]string
+	// Live is the live workload itself (a backup's manifest with
+	// --baseline), for CompareLiveSpecs; nil when there is none to compare.
+	Live *unstructured.Unstructured
 }
 
 // ChartDiffInput is what ChartDiff compares.
@@ -121,6 +128,10 @@ type ChartDiffInput struct {
 	// under the HelmRelease's), where a container's inline env var is
 	// looked up to patch it (see inlineSource).
 	Values map[string]any
+	// DefaultValues are the chart's own values.yaml, before the
+	// HelmRelease's values were merged over them: a default env entry the
+	// merged list lacks was hidden by a list replacement (LiveOnlyVar.ShadowedBy).
+	DefaultValues map[string]any
 }
 
 // WorkloadComparison is one compared workload's two sides, for a
@@ -156,6 +167,9 @@ type ChartDiffResult struct {
 	// chart file's mapping, for VerifyMapped to check against a render of
 	// the patched chart.
 	Mapped []MappedVar
+	// ResourceEdits are the containers whose live resources Patch carries,
+	// for VerifyResources to check against a render of the patched chart.
+	ResourceEdits []ResourceEdit
 	// Workloads are the compared sides, one per Live entry in order —
 	// exposed so a caller can present a full before/after view (e.g.
 	// internal/appdiff builds a unified diff from it), not just the
@@ -251,7 +265,10 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 			case !hasLive:
 				result.RenderedOnlyCount++
 			case !hasRendered:
-				result.LiveOnly = append(result.LiveOnly, LiveOnlyVar{Workload: workload, Name: name, Live: liveVal})
+				result.LiveOnly = append(result.LiveOnly, LiveOnlyVar{
+					Workload: workload, Name: name, Live: liveVal,
+					ShadowedBy: shadowedDefault(in.DefaultValues, in.Values, lw.Rendered, name),
+				})
 			case isPlaceholder(liveVal) && !isPlaceholder(rv.value):
 				result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
 					Workload: workload, Name: name, Rendered: rv.value, Live: liveVal, Reason: UnmappedLiveUnknown,
@@ -346,6 +363,13 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 		}
 	}
 	result.UnmappedDiffs = append(result.UnmappedDiffs, applyInlineEdits(values, in.Values, keptEdits)...)
+	resourceValues, carried := resourceEdits(in.Values, in)
+	if len(carried) > 0 {
+		for k, v := range MergeValues(values, resourceValues) {
+			values[k] = v
+		}
+		result.ResourceEdits = carried
+	}
 	sortUnmapped(result.UnmappedDiffs)
 	sort.SliceStable(result.Excluded, func(i, j int) bool {
 		a, b := result.Excluded[i], result.Excluded[j]

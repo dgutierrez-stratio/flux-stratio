@@ -10,10 +10,10 @@ import (
 
 // inlineSource is the values entry a container's own env var is rendered
 // from: the bjw-s controllers.<controller>.containers.<container>.env a
-// HelmRelease sets, as a keos-apps size overlay does with rocket's
-// SPARTA_BOOTSTRAP_* resources. No chart env file sets such a variable,
-// and it overrides any ConfigMap setting the same name, so it's patched
-// there or not at all.
+// HelmRelease sets, as a keos-apps size overlay once did with rocket's
+// SPARTA_BOOTSTRAP_* resources (the chart's own env files set those too, in
+// rocket_server_env_vars.yaml). It overrides any ConfigMap setting the same
+// name, so it's patched there or not at all.
 type inlineSource struct {
 	// path is the env's dot-path under spec.values.
 	path string
@@ -211,4 +211,51 @@ func applyInlineEdits(patch, values map[string]any, edits []inlineEdit) []Unmapp
 	}
 	sort.SliceStable(conflicts, func(i, j int) bool { return conflicts[i].Name < conflicts[j].Name })
 	return conflicts
+}
+
+// shadowedDefault is the values path of the env of one of workload's
+// containers that hides a chart default env entry called name: the chart's
+// values.yaml lists it, the merged values (a HelmRelease's list replaces
+// the default whole) don't. "" when it isn't hidden, or the workload (nil
+// for a flat live side) doesn't say which container to look at.
+func shadowedDefault(defaults, merged map[string]any, workload *unstructured.Unstructured, name string) string {
+	if workload == nil || defaults == nil {
+		return ""
+	}
+	for _, c := range containersOf(workload) {
+		container, _ := c["name"].(string)
+		ctrl := controllerKeyFor(merged, workload, container)
+		if ctrl == "" {
+			continue
+		}
+		if envHas(valuesEnv(defaults, ctrl, container), name) && !envHas(valuesEnv(merged, ctrl, container), name) {
+			return fmt.Sprintf("controllers.%s.containers.%s.env", ctrl, container)
+		}
+	}
+	return ""
+}
+
+// valuesEnv is controllers.<ctrl>.containers.<container>.env of values.
+func valuesEnv(values map[string]any, ctrl, container string) any {
+	controllers, _ := values["controllers"].(map[string]any)
+	spec, _ := controllers[ctrl].(map[string]any)
+	containers, _ := spec["containers"].(map[string]any)
+	declared, _ := containers[container].(map[string]any)
+	return declared["env"]
+}
+
+// envHas reports whether a values env (list or map form) sets name.
+func envHas(env any, name string) bool {
+	switch env := env.(type) {
+	case []any:
+		for _, e := range env {
+			if entry, _ := e.(map[string]any); entry["name"] == name {
+				return true
+			}
+		}
+	case map[string]any:
+		_, ok := env[name]
+		return ok
+	}
+	return false
 }

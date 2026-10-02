@@ -40,6 +40,8 @@ type App struct {
 	Prepare string
 	// Exclude — see ComponentType.Exclude.
 	Exclude []string
+	// MemoryEnv — see ComponentType.MemoryEnv.
+	MemoryEnv []string
 	// Notes — see ComponentType.Notes.
 	Notes string
 	// Live are the live legacy objects classified as this instance, the

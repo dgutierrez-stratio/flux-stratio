@@ -71,6 +71,10 @@ type Step struct {
 	// false for a step that only has Instructions for the operator to
 	// follow by hand — the gating decision belongs to the caller.
 	Automated bool
+	// ReplacesWorkloads is true when the step deletes the legacy workloads
+	// the chart then recreates under the same names, so the chart changing
+	// their (immutable) selector is no obstacle.
+	ReplacesWorkloads bool
 	// Plan lists, without changing anything, every operation needed for
 	// the precondition to hold; empty when it already does. Nil for a
 	// step that isn't Automated.

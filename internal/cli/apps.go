@@ -17,6 +17,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/drift"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/tenantfile"
 	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
@@ -307,9 +308,10 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	warnFluxManaged(logger, app, result.FluxManagedBy)
 	review := chartReview{
 		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly,
-		Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
+		SpecDiffs: result.SpecDiffs, Carried: result.CarriedResources, Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
 	}
 	reportChartReview(logger, review)
+	reportSizeMismatch(logger, env.RepoPaths(), env.Cluster, env.Tenant, app.Object, result.LiveSize)
 	reportDroppedFromExisting(logger, app, result.DroppedFromExisting)
 	if result.Patch == nil || result.UpToDate {
 		reportNoChange(logger, result.UpToDate, result.ObsoletePatches, review)
@@ -415,6 +417,8 @@ func reportNoChange(logger *log.Logger, upToDate bool, obsoletePatches int, revi
 	case obsoletePatches > 0:
 		logger.Warningf("no differences against the unpatched base, but the tenant file carries %d patch(es) for this object "+
 			"that Flux would apply on top — review or remove them", obsoletePatches)
+	case len(review.SpecDiffs) > 0:
+		logger.Successf("no environment variable differences; the workload settings listed above differ")
 	default:
 		logger.Successf("no differences")
 	}
@@ -428,6 +432,13 @@ type chartReview struct {
 	Missing []string
 	// LiveOnly are the live variables the chart doesn't render.
 	LiveOnly []diff.LiveOnlyVar
+	// SpecDiffs are the resources, image and replicas that still differ
+	// between the patched rendered workloads and the live ones: only the
+	// risky ones are warnings (see hasWarnings).
+	SpecDiffs []diff.SpecDiff
+	// Carried are the containers whose live resources the patch carries:
+	// information, so the patch doesn't change them silently.
+	Carried []diff.ResourceEdit
 	// Excluded are the differences the catalog's exclude list kept out of
 	// the patch: reported, but not a warning (see hasWarnings).
 	Excluded []diff.ExcludedDiff
@@ -436,9 +447,97 @@ type chartReview struct {
 }
 
 // hasWarnings reports whether reportChartReview warns about anything for r:
-// Excluded is only informational, so it never counts.
+// Excluded and the informational SpecDiffs never count.
 func (r chartReview) hasWarnings() bool {
-	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || len(r.LiveOnly) > 0
+	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || len(r.LiveOnly) > 0 || len(specDiffsOf(r.SpecDiffs, diff.SpecRisk)) > 0
+}
+
+// specDiffsOf are the diffs of one severity, in order.
+func specDiffsOf(diffs []diff.SpecDiff, severity diff.SpecSeverity) []diff.SpecDiff {
+	var out []diff.SpecDiff
+	for _, d := range diffs {
+		if d.Severity == severity {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// reportSizeMismatch warns when the tenant file's size isn't the one the
+// legacy application reports: the GitOps size overlay it is rendered with
+// then differs from what ran. Nothing is inferred or rewritten.
+func reportSizeMismatch(logger *log.Logger, repos config.RepoPaths, cluster, tenant, app, liveSize string) {
+	if liveSize == "" {
+		return
+	}
+	doc, err := tenantfile.Load(tenantfile.Path(repos.Fleet, cluster, tenant))
+	if err != nil {
+		return // the diff already read the tenant file; nothing useful to add
+	}
+	if size := doc.DefaultSize(); size != "" && size != liveSize {
+		logger.Warningf("tenant size %s but live %s reports CUSTOMER_SIZE=%s: overlay sizing will differ from live", size, app, liveSize)
+	}
+}
+
+// reportCarried says which containers' live resources the patch carries.
+func reportCarried(logger *log.Logger, r chartReview) {
+	for _, e := range r.Carried {
+		var fields []string
+		for _, d := range e.Diffs {
+			live := d.Live
+			if live == "" {
+				live = "unset"
+			}
+			fields = append(fields, strings.TrimPrefix(d.Field, "resources.")+" "+live+" (GitOps "+orUnset(d.Rendered)+")")
+		}
+		logger.Actionf("carrying the legacy resources of %s/%s into the patch (%s): %s",
+			e.Workload, e.Container, e.Path, strings.Join(fields, ", "))
+	}
+}
+
+func orUnset(v string) string {
+	if v == "" {
+		return "unset"
+	}
+	return v
+}
+
+// reportSpecDiffs prints the risky differences as warnings and the others as
+// plain information, grouped under their workload.
+func reportSpecDiffs(logger *log.Logger, r chartReview) {
+	if risks := specDiffsOf(r.SpecDiffs, diff.SpecRisk); len(risks) > 0 {
+		logger.Warningf("%d workload setting(s) differ from the %s and can break the migrated workload — not written to the patch:", len(risks), r.Source)
+		for _, d := range risks {
+			logger.Warningf("  %s", describeSpecDiff(d))
+		}
+	}
+	if infos := specDiffsOf(r.SpecDiffs, diff.SpecInfo); len(infos) > 0 {
+		logger.Actionf("%d other workload setting(s) differ from the %s:", len(infos), r.Source)
+		for _, d := range infos {
+			logger.Actionf("  %s", describeSpecDiff(d))
+		}
+	}
+}
+
+func describeSpecDiff(d diff.SpecDiff) string {
+	name := d.Workload
+	if d.Container != "" {
+		name += "/" + d.Container
+	}
+	quote := func(v string) string {
+		if v == "" {
+			return "unset"
+		}
+		return fmt.Sprintf("%q", v)
+	}
+	if env, ok := strings.CutPrefix(d.Field, diff.EnvVsLimitField); ok {
+		return fmt.Sprintf("%s %s=%s asks for more memory than the container's limit %s", name, env, d.Live, d.Rendered)
+	}
+	if d.Field == diff.SelectorField {
+		return fmt.Sprintf("%s selector: rendered %s, live %s — a selector is immutable, so the legacy workload can't be updated in place: "+
+			"it has to be deleted before Flux installs the release", name, quote(d.Rendered), quote(d.Live))
+	}
+	return fmt.Sprintf("%s %s: rendered %s, live %s", name, d.Field, quote(d.Rendered), quote(d.Live))
 }
 
 // reportChartReview warns about everything a chart-mode diff/migrate
@@ -465,9 +564,15 @@ func reportChartReview(logger *log.Logger, r chartReview) {
 			if v.Workload != "" {
 				name = v.Workload + "/" + v.Name
 			}
+			if v.ShadowedBy != "" {
+				logger.Warningf("  %s: live %q — chart default env %s is shadowed by the list at %s", name, v.Live, v.Name, v.ShadowedBy)
+				continue
+			}
 			logger.Warningf("  %s: live %q", name, v.Live)
 		}
 	}
+	reportCarried(logger, r)
+	reportSpecDiffs(logger, r)
 	for _, e := range r.Excluded {
 		name := e.Name
 		if e.Workload != "" {

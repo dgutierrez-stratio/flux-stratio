@@ -194,3 +194,21 @@ func ResolveAnchorNode(entry *yaml.Node, anchor catalog.ResolvedAnchor) (*yaml.N
 		return nil, fmt.Errorf("anchor kind %s is not patchable", anchor.Kind)
 	}
 }
+
+// DefaultSize is the tenant file's spec.defaultValues.size ("S", "M", "L"),
+// or "" when it sets none: the GitOps size overlay every component without
+// its own override is rendered with.
+func (d *Doc) DefaultSize() string {
+	spec := mapGet(documentRoot(d.root), "spec")
+	if spec == nil {
+		return ""
+	}
+	defaults := mapGet(spec, "defaultValues")
+	if defaults == nil {
+		return ""
+	}
+	if size := mapGet(defaults, "size"); size != nil {
+		return size.Value
+	}
+	return ""
+}

@@ -2,6 +2,28 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **Chart-mode `apps diff` / `apps migrate` compare more than env vars.** Each live workload's container
+  resources (requests/limits, compared as quantities), image and replicas are compared with the rendered
+  workload, so a migration that changes them is no longer reported as "nothing to migrate". Risky
+  differences (less memory than live had, a limit where live had none, a different image tag, replicas
+  0 to N) are warnings that stop `migrate --yes` unless `--accept-warnings`; the rest are printed as
+  information. `--baseline` reads the live side from the backup's workload manifests.
+* **The patch carries the legacy container resources.** When the live resources differ from the GitOps size
+  overlay's, they are written to `controllers.<controller>.containers.<container>.resources` (requests and
+  limits together; a limit live never had is removed with `null`), and the chart is rendered again with
+  the patch to check it reproduces them. A value the render doesn't reproduce is taken back out of the
+  patch and stays a warning. Image tags, replicas, probes and selectors are never patched.
+* **`apps diff` / `apps migrate` warn when an env var outgrows its container's memory limit.** `-Xmx` in
+  any env value, and the type's `memoryEnv` variables (new catalog field, seeded for the virtualizer,
+  bdl-datarest, eureka-agent and discovery types; see `docs/config-reference.md`), are checked against
+  the limit of the chart as patched.
+* **A selector that differs from the live workload's is a warning.** Deployment and StatefulSet selectors are
+  immutable, so a chart selecting on `app.kubernetes.io/*` can't be applied over a legacy workload selecting on
+  `cct.stratio.com/application_id`: the legacy workload has to be deleted first. Information only for an app whose
+  prepare step does that (`prepare-dlc`).
+* **They warn when the tenant `size` isn't the size the live app reports** (`CUSTOMER_SIZE`), and name the
+  chart default env var an overlay's list hides (`chart default env X is shadowed by the list at
+  controllers.<c>.containers.<c>.env`).
 * **`apps diff` / `apps migrate` list what `exclude` keeps out.** A chart-mode difference hidden by an
   app's `exclude` (genai's Vault roles) is no longer dropped without a word: it is printed as
   `excluded by the catalog: <workload>/<name> live "…", GitOps default "…" (<path>)`. Informational

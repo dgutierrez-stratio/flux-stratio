@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSeedCatalog_Valid(t *testing.T) {
 	cat := SeedCatalog()
@@ -67,5 +70,25 @@ func TestSeedEnvironment(t *testing.T) {
 	}
 	if env.Repos != nil || env.Repo(RepoCharts) != "/stratio/gitops/charts" {
 		t.Errorf("unexpected repos: %+v", env)
+	}
+}
+
+func TestSeedCatalog_MemoryEnvNamesTheLegacySizeVariables(t *testing.T) {
+	want := map[string]string{
+		"bdl-datarest": "VR_POD_MEMORY_LIMIT", "eureka-agent": "VR_POD_MEMORY_LIMIT",
+		"virtualizer": "VR_POD_MEMORY_LIMIT", "discovery": "MEMORY",
+	}
+	for _, ty := range SeedCatalog().Types {
+		if name, ok := want[ty.Type]; ok && (len(ty.MemoryEnv) != 1 || ty.MemoryEnv[0] != name) {
+			t.Errorf("%s memoryEnv = %v, want [%s]", ty.Type, ty.MemoryEnv, name)
+		}
+	}
+}
+
+func TestCatalogValidate_RejectsABadMemoryEnvName(t *testing.T) {
+	cat := SeedCatalog()
+	cat.Types[0].MemoryEnv = []string{"OK_NAME", "has space"}
+	if err := cat.validate(); err == nil || !strings.Contains(err.Error(), `memoryEnv[1]: "has space" is not an env var name`) {
+		t.Errorf("validate = %v, want it to reject the second name", err)
 	}
 }

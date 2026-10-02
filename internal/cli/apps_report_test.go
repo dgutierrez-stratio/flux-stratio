@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -172,5 +174,103 @@ func TestConfirmWarnings(t *testing.T) {
 				t.Errorf("prompted = %v, want %v:\n%s", asked, tt.prompts, stderr.String())
 			}
 		})
+	}
+}
+
+func TestReportChartReview_SpecDiffs(t *testing.T) {
+	review := chartReview{
+		SpecDiffs: []diff.SpecDiff{
+			{Workload: "dg-hdfs-agent", Container: "agent", Field: "resources.limits.memory", Rendered: "2048Mi", Live: "4096M", Severity: diff.SpecRisk},
+			{Workload: "intelligence", Container: "intelligence", Field: "resources.limits.memory", Rendered: "512M", Severity: diff.SpecRisk},
+			{Workload: "rocket", Container: "rocket", Field: "resources.limits.cpu", Rendered: "1", Live: "4", Severity: diff.SpecInfo},
+		},
+		Source: "live cluster",
+	}
+	var buf bytes.Buffer
+	reportChartReview(log.New(&buf, false), review)
+	out := buf.String()
+	for _, want := range []string{
+		"2 workload setting(s) differ from the live cluster and can break the migrated workload",
+		`dg-hdfs-agent/agent resources.limits.memory: rendered "2048Mi", live "4096M"`,
+		`intelligence/intelligence resources.limits.memory: rendered "512M", live unset`,
+		"1 other workload setting(s) differ from the live cluster",
+		`rocket/rocket resources.limits.cpu: rendered "1", live "4"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if !review.hasWarnings() {
+		t.Error("hasWarnings() = false with risky spec diffs, want true: --yes must stop")
+	}
+}
+
+func TestReportChartReview_InformationalSpecDiffsAreNoWarning(t *testing.T) {
+	review := chartReview{
+		SpecDiffs: []diff.SpecDiff{{Workload: "rocket", Field: "resources.limits.cpu", Rendered: "1", Live: "4", Severity: diff.SpecInfo}},
+		Source:    "backup",
+	}
+	if review.hasWarnings() {
+		t.Error("hasWarnings() = true for informational spec diffs only, want false")
+	}
+}
+
+func TestReportNoChange_SpecDiffsAreNotNoDifferences(t *testing.T) {
+	var buf bytes.Buffer
+	reportNoChange(log.New(&buf, false), false, 0, chartReview{
+		SpecDiffs: []diff.SpecDiff{{Workload: "a", Field: "image", Rendered: "r:1", Live: "r:2", Severity: diff.SpecRisk}},
+	})
+	if out := buf.String(); strings.Contains(out, "no differences\n") || !strings.Contains(out, "workload settings listed above differ") {
+		t.Errorf("output = %q, want it to point at the workload settings, not claim no differences", out)
+	}
+}
+
+func TestReportChartReview_NamesTheListShadowingAChartDefault(t *testing.T) {
+	var buf bytes.Buffer
+	reportChartReview(log.New(&buf, false), chartReview{
+		LiveOnly: []diff.LiveOnlyVar{{Workload: "rocket", Name: "ROCKET_POD_NAME", Live: "rocket", ShadowedBy: "controllers.rocket.containers.rocket.env"}},
+		Source:   "live cluster",
+	})
+	want := `rocket/ROCKET_POD_NAME: live "rocket" — chart default env ROCKET_POD_NAME is shadowed by the list at controllers.rocket.containers.rocket.env`
+	if out := buf.String(); !strings.Contains(out, want) {
+		t.Errorf("output missing %q:\n%s", want, out)
+	}
+}
+
+func TestReportSizeMismatch(t *testing.T) {
+	fleet := t.TempDir()
+	path := tenantfile.Path(fleet, "eosdev", "stratio")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tenant := "apiVersion: fluxcd.controlplane.io/v1\nkind: ResourceSetInputProvider\nmetadata:\n  name: stratio\nspec:\n  type: Static\n  defaultValues:\n    size: S\n    components: {}\n"
+	if err := os.WriteFile(path, []byte(tenant), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repos := config.RepoPaths{Fleet: fleet}
+
+	for name, tt := range map[string]struct{ live, want string }{
+		"live runs another size": {"M", "tenant size S but live rocket reports CUSTOMER_SIZE=M: overlay sizing will differ from live"},
+		"the same size":          {"S", ""},
+		"live reports no size":   {"", ""},
+	} {
+		var buf bytes.Buffer
+		reportSizeMismatch(log.New(&buf, false), repos, "eosdev", "stratio", "rocket", tt.live)
+		if tt.want == "" && buf.Len() != 0 || !strings.Contains(buf.String(), tt.want) {
+			t.Errorf("%s: output = %q, want %q", name, buf.String(), tt.want)
+		}
+	}
+}
+
+func TestReportChartReview_EnvVsLimit(t *testing.T) {
+	var buf bytes.Buffer
+	review := chartReview{
+		SpecDiffs: []diff.SpecDiff{{Workload: "dg-hdfs-agent", Container: "agent", Field: diff.EnvVsLimitField + "JAVA_OPTS", Rendered: "2048Mi", Live: "-Xmx3072m", Severity: diff.SpecRisk}},
+		Source:    "live cluster",
+	}
+	reportChartReview(log.New(&buf, false), review)
+	want := "dg-hdfs-agent/agent JAVA_OPTS=-Xmx3072m asks for more memory than the container's limit 2048Mi"
+	if !strings.Contains(buf.String(), want) || !review.hasWarnings() {
+		t.Errorf("output = %q (hasWarnings %v), want %q as a warning", buf.String(), review.hasWarnings(), want)
 	}
 }

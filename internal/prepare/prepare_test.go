@@ -266,3 +266,11 @@ func TestWaitForNoPods_ListErrorFails(t *testing.T) {
 		t.Error("waitForNoPods with a failing List: got nil error")
 	}
 }
+
+func TestOnlyDLCReplacesTheLegacyWorkloads(t *testing.T) {
+	for _, s := range Steps {
+		if want := s.Name == "prepare-dlc"; s.ReplacesWorkloads != want {
+			t.Errorf("%s: ReplacesWorkloads = %v, want %v", s.Name, s.ReplacesWorkloads, want)
+		}
+	}
+}

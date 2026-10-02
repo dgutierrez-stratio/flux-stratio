@@ -10,7 +10,9 @@ var stepDLC = Step{
 	Name:        "prepare-dlc",
 	Description: "remove the legacy DLC ingress and deployment (the chart changed an immutable selector label)",
 	Automated:   true,
-	Plan:        planDLC,
+	// The legacy Deployment is deleted, so the GitOps one is created anew.
+	ReplacesWorkloads: true,
+	Plan:              planDLC,
 }
 
 // planDLC deletes the legacy DLC Ingresses, then its Deployments — the

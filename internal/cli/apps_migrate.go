@@ -207,9 +207,10 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	warnFluxManaged(logger, app, planned.FluxManagedBy)
 	review := chartReview{
 		Unmapped: planned.UnmappedDiffs, Missing: planned.MissingWorkloads, LiveOnly: planned.LiveOnly,
-		Excluded: planned.Excluded, Source: liveSource(resolvedBaseline),
+		SpecDiffs: planned.SpecDiffs, Carried: planned.CarriedResources, Excluded: planned.Excluded, Source: liveSource(resolvedBaseline),
 	}
 	reportChartReview(logger, review)
+	reportSizeMismatch(logger, repos, cluster, tenant, app.Object, planned.LiveSize)
 	reportUnresolvedDeps(logger, app, planned.UnresolvedDeps)
 	reportLegacyAgentPatches(logger, app, planned.LegacyAgentPatches)
 	// The patch is planned, and saved, before app's prepare step runs: a

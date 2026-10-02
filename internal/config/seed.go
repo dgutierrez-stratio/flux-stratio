@@ -165,6 +165,7 @@ func SeedCatalog() Catalog {
 			Rset:      rsetDatastores,
 			Match:     cctMatch(kindDeployment, "bdl", "agent-bdl-default"),
 			Chart:     &Chart{Path: "eureka-agent"},
+			MemoryEnv: []string{"VR_POD_MEMORY_LIMIT"},
 			Exclude: []string{
 				"spec.values.eureka.general.externalConfiguration.governanceSettings",
 				"spec.values.eureka.general.identity",
@@ -177,11 +178,12 @@ func SeedCatalog() Catalog {
 			Rset:      rsetDatastores,
 			// The model pins the pginternal flavor, matching ValuesRoot; the
 			// chart's pgmd5/pgtls flavors would be their own types.
-			Match:   cctMatch(kindDeployment, "bdl", "datarest-pginternal"),
-			Chart:   &Chart{Path: "bdl-datarest", ValuesRoot: "datarestPgInternal"},
-			Prepare: "prepare-datarest",
-			Notes:   "prepare-datarest runs automatically before migrating: removes the legacy ingress that would collide with the GitOps-managed one.",
-			Exclude: []string{"spec.values.datarestPgInternal.general.identity.approlename"},
+			Match:     cctMatch(kindDeployment, "bdl", "datarest-pginternal"),
+			Chart:     &Chart{Path: "bdl-datarest", ValuesRoot: "datarestPgInternal"},
+			MemoryEnv: []string{"VR_POD_MEMORY_LIMIT"},
+			Prepare:   "prepare-datarest",
+			Notes:     "prepare-datarest runs automatically before migrating: removes the legacy ingress that would collide with the GitOps-managed one.",
+			Exclude:   []string{"spec.values.datarestPgInternal.general.identity.approlename"},
 		},
 		{
 			Type:      "virtualizer",
@@ -195,6 +197,7 @@ func SeedCatalog() Catalog {
 				cctMatch(kindDeployment, "virtualizer", "virtualizer-monitor"),
 				cctMatch(kindDeployment, "virtualizer", "virtualizer-ui"),
 			}},
+			MemoryEnv: []string{"VR_POD_MEMORY_LIMIT"},
 			Exclude: []string{
 				"spec.values.virtualizerMonitor.general.approlename",
 				"spec.values.virtualizerServer.general.governanceRegistration.governanceDeployment",
@@ -208,6 +211,7 @@ func SeedCatalog() Catalog {
 			Rset:      rsetApps,
 			Match:     cctMatch(kindDeployment, "discovery", ""),
 			Chart:     &Chart{Path: "discovery"},
+			MemoryEnv: []string{"MEMORY"},
 			Exclude:   []string{"spec.values.discovery.environment.approlename"},
 		},
 		{

@@ -89,6 +89,7 @@ types:
 | `anchor` | no | Overrides where, relative to the instance's tenant entry, its patches are read from — see [Anchor](#anchor). Almost never needed |
 | `prepare` | no | A one-time precondition `apps migrate` satisfies first — see [Prepare](#prepare) |
 | `exclude` | no | Dot-paths dropped from the computed diff/patch — see [Exclude](#exclude) |
+| `memoryEnv` | no | Chart mode only. Names of env vars holding a memory size in MB (e.g. `VR_POD_MEMORY_LIMIT`, discovery's `MEMORY`) — see [Memory env](#memory-env) |
 | `notes` | no | Free-text hint shown to the operator |
 
 ### Match
@@ -220,6 +221,20 @@ silently: `apps diff` and `apps migrate` list it as `excluded by the catalog: <w
 Paths are rooted at the patch document itself, so a manifest-mode exclude starts with `spec.`
 (`spec.bootstrap.pgBackup`) and a chart-mode exclude with `spec.values.<root>.`
 (`spec.values.datarestPgInternal.general.identity.approlename`).
+
+## Memory env
+
+`memoryEnv` lists the env vars of a chart-mode type that carry a memory size in MB, which legacy CCT sets
+next to the container's own limit (`VR_POD_MEMORY_LIMIT` on the virtualizer, `bdl-datarest` and eureka-agent
+types, `MEMORY` on discovery). After the patch is computed, `apps diff` and `apps migrate` render the chart
+with it applied and warn when one of these values (read as decimal MB) is larger than the container's memory
+limit. Any `-Xmx<N>[kmg]` in **any** env value is checked the same way (in the JVM's binary units), whatever
+the variable is called, so `JAVA_OPTS=-Xmx3072m` in a 2048Mi container is caught without listing it. The
+warning counts like any other review item: `apps migrate --yes` stops on it unless `--accept-warnings`.
+The check stays quiet when the container has no memory limit.
+
+The names are an exact match on the variable, not a pattern. The seeded catalog already names them; an
+existing `catalog.yaml` keeps what it has until you add `memoryEnv` by hand or re-seed it.
 
 ## Seeded types
 

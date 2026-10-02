@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/runner"
@@ -59,6 +60,7 @@ func (h helmSim) Run(ctx context.Context, name string, args ...string) ([]byte, 
 				}
 			}
 		}
+		applyResourceValues(d, values)
 		b, err := yaml.Marshal(d.Object)
 		if err != nil {
 			return nil, nil, err
@@ -67,6 +69,36 @@ func (h helmSim) Run(ctx context.Context, name string, args ...string) ([]byte, 
 		out.Write(b)
 	}
 	return []byte(out.String()), stderr, nil
+}
+
+// applyResourceValues renders a workload's container resources from the
+// bjw-s controllers.<controller>.containers.<container>.resources values,
+// a null deleting the key as Helm does.
+func applyResourceValues(w *unstructured.Unstructured, values map[string]any) {
+	controllers, _ := values["controllers"].(map[string]any)
+	containers, _, _ := unstructured.NestedSlice(w.Object, "spec", "template", "spec", "containers")
+	for _, ctrl := range controllers {
+		spec, _ := ctrl.(map[string]any)
+		declared, _ := spec["containers"].(map[string]any)
+		for i, c := range containers {
+			container, _ := c.(map[string]any)
+			name, _ := container["name"].(string)
+			decl, _ := declared[name].(map[string]any)
+			res, _ := decl["resources"].(map[string]any)
+			for list, raw := range res {
+				entries, _ := raw.(map[string]any)
+				for k, v := range entries {
+					if v == nil {
+						unstructured.RemoveNestedField(container, "resources", list, k)
+						continue
+					}
+					_ = unstructured.SetNestedField(container, v, "resources", list, k)
+				}
+			}
+			containers[i] = container
+		}
+	}
+	_ = unstructured.SetNestedSlice(w.Object, containers, "spec", "template", "spec", "containers")
 }
 
 func lookupDotPath(m map[string]any, path string) (any, bool) {

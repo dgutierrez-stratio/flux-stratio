@@ -238,7 +238,16 @@ convention, that repo is the reference:
   the chart file its rendered ConfigMap was built from (`ScanChartFiles` + `AttributeConfigMaps`,
   matching a ConfigMap to the file with exactly its keys). Sibling workloads' same-named variables
   (genai's `VAULT_ROLE`) never cross over; anything it can't attribute to one path goes to
-  `UnmappedDiffs` with a reason, never guessed. `CoerceValue` handles the
+  `UnmappedDiffs` with a reason, never guessed. Chart-mode also compares what env vars never show
+  (`workloadspec.go`, `resourcepatch.go`): `CompareWorkloadSpecs` lists each paired container's
+  resource requests/limits (as quantities), image and the workload's replicas (`SpecDiff`, severity
+  `risk`/`info`), `resourceEdits` carries the live resources into the patch through
+  `controllers.<controller>.containers.<container>.resources` (a limit live never had is a `null`,
+  which kustomize's merge patch deletes — `MergePatch`, not `MergeValues`, applies a patch to
+  render it), and `VerifyResources` takes back out any edit the patched render doesn't reproduce, as
+  `VerifyMapped` does for env. `CheckEnvAgainstLimits` flags an `-Xmx`/`memoryEnv` value above the
+  patched container's memory limit. Image tags, replicas, probes and selectors are never patched.
+  `CoerceValue` handles the
   octal-looking-string/float/`yes`-`null` typed-value edge cases the Python client got wrong.
 - **`internal/appdiff`** — orchestrates `internal/render` + `internal/diff` for `apps diff`'s
   default/`--baseline` comparison and for `apps migrate`'s patch computation — **the one place both

@@ -35,6 +35,38 @@ func MergeValues(dst, src map[string]any) map[string]any {
 	return out
 }
 
+// MergePatch applies patch to values the way kustomize applies a tenant
+// patch to a HelmRelease's spec.values (a JSON merge patch): nested maps
+// merge, anything else in patch replaces values', and a null deletes the
+// key — it never reaches Helm as a null that would unset a chart default,
+// and a null inside a map the target doesn't have yet is dropped, not
+// copied (so a chart default can't be unset by a patch at all). Neither
+// input is modified.
+func MergePatch(values, patch map[string]any) map[string]any {
+	out := make(map[string]any, len(values)+len(patch))
+	for k, v := range values {
+		out[k] = v
+	}
+	for k, v := range patch {
+		if v == nil {
+			delete(out, k)
+			continue
+		}
+		patchMap, patchIsMap := v.(map[string]any)
+		valuesMap, valuesIsMap := out[k].(map[string]any)
+		if patchIsMap && valuesIsMap {
+			out[k] = MergePatch(valuesMap, patchMap)
+			continue
+		}
+		if patchIsMap {
+			out[k] = MergePatch(nil, patchMap)
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // SettledByPatch drops the unmapped diffs the patch settles anyway: with
 // the patch applied, the chart (rendered again as patched) already
 // renders the live value. That's a variable built from several templates

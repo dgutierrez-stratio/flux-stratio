@@ -502,3 +502,9 @@ func TestSplice_EntryNotDerivedFromTheKustomizationName(t *testing.T) {
 		t.Error("Splice with no Entry and no entry named after the Kustomization: got nil error")
 	}
 }
+
+func TestDoc_DefaultSize(t *testing.T) {
+	if got := loadFixture(t).DefaultSize(); got != "S" {
+		t.Errorf("DefaultSize = %q, want S", got)
+	}
+}
