@@ -1,0 +1,204 @@
+// Package appmigrate migrates one application: it diffs the app (via
+// internal/appdiff, the same computation `apps diff` uses, so the two
+// commands can never disagree about what a migration would do) and, if
+// there is a difference, splices the resulting patch into the tenant's
+// ResourceSetInputProvider (via internal/tenantfile).
+//
+// The pipeline described in the project plan is prepare -> render -> diff
+// -> patch -> splice; this package implements everything but the prepare
+// stage, which internal/prepare adds from Phase 8 onward.
+package appmigrate
+
+import (
+	"context"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/Stratio/flux-stratio/internal/appdiff"
+	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/diff"
+	"github.com/Stratio/flux-stratio/internal/log"
+	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/tenantfile"
+)
+
+// Options configures migrating one app.
+type Options struct {
+	// Repos is where the GitOps repositories and the charts repository
+	// are checked out.
+	Repos           config.RepoPaths
+	Cluster, Tenant string
+	App             config.App
+	Catalog         *catalog.Catalog
+	Runner          runner.Runner
+	Client          client.Client
+	// Baseline, if set, is a backup directory to compute the patch against
+	// instead of the live cluster (see appdiff.Options.Baseline) — for when
+	// live state no longer reflects the legacy installation, e.g. after
+	// Flux already reconciled the component unpatched.
+	Baseline string
+	Log      *log.Logger
+}
+
+// Result reports what a migrate run found and (for Apply) did.
+type Result struct {
+	// Migrated is true if the tenant file needs (Plan) or got (Apply) a
+	// new or changed patch — false both when there's no difference at all
+	// and when the tenant file already carries exactly the needed patch.
+	Migrated bool
+	// UpToDate, ObsoletePatches and FluxManagedBy — see appdiff.Result.
+	UpToDate        bool
+	ObsoletePatches int
+	FluxManagedBy   string
+	// DroppedFromExisting — see appdiff.Result: what migrating loses of the
+	// patch the tenant file already carries for this object's kind.
+	DroppedFromExisting []string
+	// Before and After are the tenant file's content before and after the
+	// edit, for a diff preview (apps migrate --dry-run) via
+	// internal/ui.FileDiff. Equal when Migrated is false.
+	Before, After string
+	// UnmappedDiffs, LiveOnly and MissingWorkloads are what a
+	// chart-mode diff couldn't carry into the patch — see appdiff.Result.
+	UnmappedDiffs    []diff.UnmappedDiff
+	LiveOnly         []diff.LiveOnlyVar
+	MissingWorkloads []string
+	// Excluded are the differences the app's exclude list kept out of the
+	// patch — see appdiff.Result.
+	Excluded []diff.ExcludedDiff
+	// UnresolvedDeps are the app's tenant-file dependencies naming an
+	// entry the tenant file doesn't declare: migrating writes nothing
+	// wrong itself, but Flux won't reconcile the app until they're fixed.
+	UnresolvedDeps []tenantfile.UnresolvedDependency
+	// LegacyAgentPatches counts the patches for a gosec agent's HelmRelease
+	// the legacy client left in its parent entry's top-level patches: inert
+	// (the agent reads config.agent.patches), so worth removing by hand.
+	// Never edited here.
+	LegacyAgentPatches int
+
+	// doc and tenantPath are the edited tenant file and where it's
+	// saved, for Save.
+	doc        *tenantfile.Doc
+	tenantPath string
+}
+
+// Plan computes what migrating opts.App would do, without writing
+// anything — the basis for apps migrate --dry-run and for previewing a
+// change before an interactive confirmation.
+func Plan(ctx context.Context, opts Options) (*Result, error) {
+	result, doc, tenantPath, err := plan(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	result.doc, result.tenantPath = doc, tenantPath
+	return result, nil
+}
+
+// Apply computes the same plan as Plan and, if there is a difference,
+// writes it to the tenant file.
+func Apply(ctx context.Context, opts Options) (*Result, error) {
+	result, err := Plan(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.Save(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// Save writes a planned result's edit to the tenant file, without
+// reading live state again: apps migrate plans the patch before an app's
+// prepare step runs, since a prepare step may delete the very live
+// workload the patch is computed from (prepare-dlc). Nothing to write
+// when the plan found no change.
+func (r *Result) Save() error {
+	if !r.Migrated {
+		return nil
+	}
+	return r.doc.Save(r.tenantPath)
+}
+
+func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, error) {
+	tenantPath := tenantfile.Path(opts.Repos.Fleet, opts.Cluster, opts.Tenant)
+	doc, err := tenantfile.Load(tenantPath)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	before, err := doc.Bytes()
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	diffResult, err := appdiff.Diff(ctx, appdiff.Options{
+		Repos: opts.Repos, Cluster: opts.Cluster, Tenant: opts.Tenant,
+		App: opts.App, Runner: opts.Runner, Client: opts.Client, Baseline: opts.Baseline, Log: opts.Log,
+	})
+	if err != nil {
+		return nil, nil, "", err
+	}
+	result := &Result{
+		UpToDate: diffResult.UpToDate, ObsoletePatches: diffResult.ObsoletePatches, FluxManagedBy: diffResult.FluxManagedBy,
+		DroppedFromExisting: diffResult.DroppedFromExisting,
+		Before:              string(before), After: string(before),
+		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnly: diffResult.LiveOnly, MissingWorkloads: diffResult.MissingWorkloads,
+		Excluded: diffResult.Excluded,
+	}
+	if result.UnresolvedDeps, err = unresolvedDeps(doc, opts.Catalog, opts.App); err != nil {
+		return nil, nil, "", err
+	}
+	result.LegacyAgentPatches = legacyAgentPatches(doc, opts.Catalog, opts.App)
+	if diffResult.Patch == nil || diffResult.UpToDate {
+		return result, doc, tenantPath, nil
+	}
+
+	if err := tenantfile.Splice(doc, opts.Catalog, opts.App, *diffResult.Patch); err != nil {
+		return nil, nil, "", err
+	}
+	after, err := doc.Bytes()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	result.Migrated, result.After = true, string(after)
+	return result, doc, tenantPath, nil
+}
+
+// unresolvedDeps checks app's tenant-file entry, found the way OrderApps
+// finds it, for dependencies the tenant file can't satisfy. An app whose
+// entry isn't in the tenant file yet has nothing to check.
+func unresolvedDeps(doc *tenantfile.Doc, cat *catalog.Catalog, app config.App) ([]tenantfile.UnresolvedDependency, error) {
+	if cat == nil {
+		return nil, nil
+	}
+	anchor, err := cat.ResolveAnchor(app.Kustomization)
+	if err != nil {
+		return nil, nil
+	}
+	entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerOf(app, anchor))
+	if err != nil {
+		return nil, nil
+	}
+	return tenantfile.UnresolvedDependencies(doc, entry, func(key string) bool {
+		_, ok := cat.Schemas[key]
+		return ok
+	})
+}
+
+// legacyAgentPatches counts the patches app's parent entry carries in its
+// top-level patches for app's own HelmRelease — only meaningful for an app
+// anchored below its entry (a gosec agent), whose patch Go writes to
+// config.agent.patches instead. Anything that can't be resolved counts none.
+func legacyAgentPatches(doc *tenantfile.Doc, cat *catalog.Catalog, app config.App) int {
+	if cat == nil {
+		return 0
+	}
+	anchor, err := cat.ResolveAnchor(app.Kustomization)
+	if err != nil || anchor.Kind != catalog.AnchorNested {
+		return 0
+	}
+	entry, err := tenantfile.FindComponentEntry(doc, tenantfile.OwnerOf(app, anchor))
+	if err != nil {
+		return 0
+	}
+	return tenantfile.LegacyAgentPatches(entry, app.Object)
+}

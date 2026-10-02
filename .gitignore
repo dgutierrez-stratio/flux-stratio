@@ -1,0 +1,9 @@
+/dist/
+/bin/flux-stratio
+/bin/flux-stratio-*.tar.gz
+*.exe
+*.test
+*.out
+go.work
+go.work.sum
+.idea/

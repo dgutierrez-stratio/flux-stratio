@@ -1,0 +1,358 @@
+// Package drift answers a different question than internal/appdiff does:
+// not "what would migrating this app change" (rendered GitOps desired
+// state vs. live, internal/appdiff's job), but "has this app's live state
+// changed since I backed it up" — the live cluster right now, compared
+// directly against a stored internal/backup capture, with no GitOps
+// rendering involved at all. It exists for post-migration operational
+// drift checks, where the GitOps side is no longer the interesting
+// question — Flux is already reconciling it — and what matters is whether
+// something has changed on the live side since a known-good snapshot.
+//
+// Run captures live state the exact same way `apps backup` does (via
+// internal/backup.Run, to a throwaway temporary directory) and compares
+// it against an existing backup directory file for file, so the two sides
+// are always read through the identical capture logic — never two
+// different ways of looking at "what's live."
+package drift
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/Stratio/flux-stratio/internal/appdiff"
+	"github.com/Stratio/flux-stratio/internal/backup"
+	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/discovery"
+	"github.com/Stratio/flux-stratio/internal/log"
+	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/yamldocs"
+)
+
+// Options configures a drift check for one app.
+type Options struct {
+	App config.App
+	// Repos is forwarded to backup.Options — see its doc comment.
+	Repos  config.RepoPaths
+	Runner runner.Runner
+	Client client.Client
+	Index  *discovery.Index
+	// Against is the backup directory to compare live state against —
+	// resolve it first with backup.ResolveBaseline.
+	Against string
+	Log     *log.Logger
+}
+
+// Result is a drift check's outcome: Before is the stored backup's
+// content, After is what's live right now — the same before/after
+// direction internal/ui.FileDiff expects, reading as "this is what's
+// changed since the backup was taken."
+type Result struct {
+	Before, After string
+}
+
+// Run captures opts.App's live state and compares it against the backup
+// at opts.Against.
+func Run(ctx context.Context, opts Options) (*Result, error) {
+	tempDir, err := os.MkdirTemp("", "flux-stratio-drift-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating a temporary directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	live, err := backup.Run(ctx, backup.Options{
+		Repos: opts.Repos, App: opts.App, Runner: opts.Runner, Client: opts.Client,
+		Index: opts.Index, Dir: tempDir, Log: opts.Log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("capturing live state: %w", err)
+	}
+	if live.Dir == "" {
+		return nil, fmt.Errorf("nothing live to compare %q against", opts.App.ID)
+	}
+
+	return compare(opts.Against, live.Dir, live.Files)
+}
+
+// compare picks the one file both the stored backup and the fresh live
+// capture actually have — the signal internal/backup's own shape cascade
+// chose for the live side — and diffs that. A shape mismatch (the live
+// object now resolves to a different kind than the stored backup did) is
+// reported clearly rather than comparing unrelated files.
+func compare(backupDir, liveDir string, liveFiles []string) (*Result, error) {
+	signal := primarySignal(liveFiles)
+	if signal == "" || !fileExists(backupDir, signal) {
+		backupFiles := listFiles(backupDir)
+		if (signal == "values.yaml" || signal == "helmrelease.yaml") && has(backupFiles, "env-vars.env") {
+			return nil, fmt.Errorf(
+				"live state was captured as %v because none of the live HelmRelease's workloads were found (see the "+
+					"warning above), but the backup at %s was captured as %v — make sure the charts repository "+
+					"checkout (repos.charts) holds the chart version the release runs, so its workloads are found "+
+					"and captured as env vars too",
+				liveFiles, backupDir, backupFiles,
+			)
+		}
+		return nil, fmt.Errorf(
+			"live state was captured as %v, but the backup at %s was captured as %v — "+
+				"the app may have changed shape (e.g. a CR became a HelmRelease) since that backup was taken",
+			liveFiles, backupDir, backupFiles,
+		)
+	}
+	if signal == "cr.yaml" || signal == "helmrelease.yaml" {
+		return compareSpec(backupDir, liveDir, signal)
+	}
+	if signal == "env-vars.env" {
+		return compareWorkloads(backupDir, liveDir, liveFiles)
+	}
+	return compareText(backupDir, liveDir, signal)
+}
+
+// compareWorkloads diffs two chart-mode/workload captures: their env vars
+// (workload by workload when both sides have per-workload files, else the
+// merged env-vars.env), then the .spec of every workload manifest both
+// sides hold — so a changed image, replica count, resource, probe or
+// volume shows up too, not just an env var.
+func compareWorkloads(backupDir, liveDir string, liveFiles []string) (*Result, error) {
+	var res *Result
+	var err error
+	backupEnvs, liveEnvs := workloadEnvFiles(listFiles(backupDir)), workloadEnvFiles(liveFiles)
+	if len(backupEnvs) > 0 && len(liveEnvs) > 0 {
+		res, err = compareWorkloadEnvs(backupDir, backupEnvs, liveDir, liveEnvs)
+	} else {
+		res, err = compareText(backupDir, liveDir, "env-vars.env")
+	}
+	if err != nil {
+		return nil, err
+	}
+	before, after, err := workloadSpecs(backupDir, listFiles(backupDir), liveDir, liveFiles)
+	if err != nil {
+		return nil, err
+	}
+	res.Before += before
+	res.After += after
+	return res, nil
+}
+
+// workloadSpecs renders, for each workload (kind/name) whose manifest both
+// captures hold, its .spec on each side under a "# <kind>/<name> (spec)"
+// header. Workloads are matched by what the manifest says they are, not by
+// file name: the anchor is deployment.yaml in every capture, but which
+// workload that is depends on how the capture found them. A workload only
+// one side has — a backup taken before siblings' manifests were captured,
+// a hand-trimmed manifest with no name — is skipped rather than reported as
+// drift.
+func workloadSpecs(backupDir string, backupFiles []string, liveDir string, liveFiles []string) (before, after string, err error) {
+	backupSpecs, err := manifestSpecs(backupDir, backupFiles)
+	if err != nil {
+		return "", "", err
+	}
+	liveSpecs, err := manifestSpecs(liveDir, liveFiles)
+	if err != nil {
+		return "", "", err
+	}
+	var ids []string
+	for id := range liveSpecs {
+		if _, ok := backupSpecs[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var b, a strings.Builder
+	for _, id := range ids {
+		fmt.Fprintf(&b, "# %s (spec)\n%s", id, backupSpecs[id])
+		fmt.Fprintf(&a, "# %s (spec)\n%s", id, liveSpecs[id])
+	}
+	return b.String(), a.String(), nil
+}
+
+// manifestSpecs maps "<kind>/<name>" to the marshaled .spec of every
+// workload manifest in files (deployment.yaml and
+// backup.WorkloadManifestFile names) that names its object.
+func manifestSpecs(dir string, files []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, f := range files {
+		if f != "deployment.yaml" && !backup.IsWorkloadManifestFile(f) {
+			continue
+		}
+		path := filepath.Join(dir, f)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		docs, err := yamldocs.Decode(data)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		if len(docs) == 0 || docs[0].GetName() == "" {
+			continue
+		}
+		spec, err := yaml.Marshal(specOf(docs[0]))
+		if err != nil {
+			return nil, fmt.Errorf("marshaling %s's spec: %w", path, err)
+		}
+		out[docs[0].GetKind()+"/"+docs[0].GetName()] = string(spec)
+	}
+	return out, nil
+}
+
+// workloadEnvFiles is files' per-workload env files
+// (appdiff.WorkloadEnvFile), sorted.
+func workloadEnvFiles(files []string) []string {
+	var out []string
+	for _, f := range files {
+		if appdiff.IsWorkloadEnvFile(f) {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// compareWorkloadEnvs diffs two chart-mode captures workload by workload:
+// each side is its per-workload env files concatenated, each under a
+// "# <file>" header, so a change in one sibling of a multi-workload chart
+// shows up even when another sibling sets the same variable — which the
+// merged env-vars.env keeps only one value of. A backup taken before
+// per-workload files existed has none, and compare falls back to the
+// merged file.
+func compareWorkloadEnvs(backupDir string, backupFiles []string, liveDir string, liveFiles []string) (*Result, error) {
+	before, err := concatWorkloadEnvs(backupDir, backupFiles)
+	if err != nil {
+		return nil, err
+	}
+	after, err := concatWorkloadEnvs(liveDir, liveFiles)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Before: before, After: after}, nil
+}
+
+func concatWorkloadEnvs(dir string, files []string) (string, error) {
+	var b strings.Builder
+	for _, f := range files {
+		text, err := readText(dir, f)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "# %s\n%s", f, text)
+	}
+	return b.String(), nil
+}
+
+// primarySignal returns the one file worth diffing for a given capture
+// shape — env-vars.env over deployment.yaml's noisy raw manifest, and
+// values.yaml over helmrelease.yaml's, the same way apps diff's own
+// chart-mode Before/After already prefers env vars over the raw workload.
+func primarySignal(files []string) string {
+	switch {
+	case has(files, "cr.yaml"):
+		return "cr.yaml"
+	case has(files, "env-vars.env"):
+		return "env-vars.env"
+	case has(files, "values.yaml"):
+		return "values.yaml"
+	case has(files, "helmrelease.yaml"):
+		return "helmrelease.yaml"
+	}
+	return ""
+}
+
+func has(files []string, name string) bool {
+	for _, f := range files {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
+// listFiles is dir's file names, or nil when it can't be read.
+func listFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+func fileExists(dir, name string) bool {
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err == nil
+}
+
+// compareSpec diffs two raw-manifest captures (cr.yaml/helmrelease.yaml)
+// by their .spec only — resourceVersion/managedFields/status churn
+// between any two live fetches would otherwise swamp the real diff,
+// exactly the reason internal/appdiff's own manifest-mode Before/After
+// only ever marshals .spec too.
+func compareSpec(backupDir, liveDir, filename string) (*Result, error) {
+	before, err := readSpec(backupDir, filename)
+	if err != nil {
+		return nil, err
+	}
+	after, err := readSpec(liveDir, filename)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Before: before, After: after}, nil
+}
+
+func readSpec(dir, filename string) (string, error) {
+	path := filepath.Join(dir, filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	docs, err := yamldocs.Decode(data)
+	if err != nil {
+		return "", fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if len(docs) == 0 {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	specYAML, err := yaml.Marshal(specOf(docs[0]))
+	if err != nil {
+		return "", fmt.Errorf("marshaling %s's spec: %w", path, err)
+	}
+	return string(specYAML), nil
+}
+
+func specOf(obj *unstructured.Unstructured) any {
+	return obj.Object["spec"]
+}
+
+// compareText diffs two already-clean text captures (env-vars.env,
+// values.yaml) verbatim — no noisy metadata to strip.
+func compareText(backupDir, liveDir, filename string) (*Result, error) {
+	before, err := readText(backupDir, filename)
+	if err != nil {
+		return nil, err
+	}
+	after, err := readText(liveDir, filename)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Before: before, After: after}, nil
+}
+
+func readText(dir, filename string) (string, error) {
+	path := filepath.Join(dir, filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	return string(data), nil
+}
