@@ -94,6 +94,7 @@ Examples:
   flux stratio apps diff psql --baseline latest           # desired state vs. your last backup
   flux stratio apps diff psql --drift latest              # live now vs. your last backup
   flux stratio apps diff psql --view patch                # print the raw patch YAML instead
+  flux stratio apps diff psql --patched --view meld       # desired state WITH the tenant patch vs. live
   flux stratio apps diff psql --drift latest --view meld  # open the drift check in meld
   flux stratio apps diff pool-psql --baseline latest --view patch
                                                          # Flux already reset live: patch from the backup
@@ -203,6 +204,7 @@ func newAppsDiffCommand() *cobra.Command {
 	var view string
 	var dir string
 	var as string
+	var patched bool
 
 	cmd := &cobra.Command{
 		Use:   "diff <name>",
@@ -210,7 +212,7 @@ func newAppsDiffCommand() *cobra.Command {
 		Long:  appsDiffLong,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAppsDiff(cmd, args[0], view, baseline, driftAgainst, dir, as)
+			return runAppsDiff(cmd, args[0], view, baseline, driftAgainst, dir, as, patched)
 		},
 	}
 	addAsFlag(cmd, &as)
@@ -224,13 +226,16 @@ func newAppsDiffCommand() *cobra.Command {
 	cmd.Flags().StringVar(&view, "view", viewUnified,
 		"how to display the comparison: unified (default, a terminal diff), patch (the raw patch YAML apps migrate "+
 			"would write; invalid with --drift), meld (open in meld instead, even when there are no differences — see flux stratio doctor)")
+	cmd.Flags().BoolVar(&patched, "patched", false,
+		"render the desired state with the tenant file's patch applied, as Flux would, instead of the pristine base: "+
+			"does the patch leave anything different from live? (no meaning with --drift or --view patch)")
 	cmd.Flags().StringVar(&dir, "dir", "",
 		"backups root directory to resolve --baseline/--drift latest against (default: a backups/ directory next to "+
 			"the config file) — must match whatever --dir apps backup used, if any, or latest can't find it")
 	return cmd
 }
 
-func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag, as string) error {
+func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag, as string, patched bool) error {
 	switch view {
 	case viewUnified, viewPatch, viewMeld:
 	default:
@@ -238,6 +243,12 @@ func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag
 	}
 	if baseline != "" && driftAgainst != "" {
 		return fmt.Errorf("provide at most one of --baseline or --drift")
+	}
+	if patched && driftAgainst != "" {
+		return fmt.Errorf("--patched has no meaning with --drift: there's no GitOps rendering to apply the patch to")
+	}
+	if patched && view == viewPatch {
+		return fmt.Errorf("--patched has no --view patch: the patch is already in the tenant file; what's left is a comparison")
 	}
 	if view == viewPatch && driftAgainst != "" {
 		return fmt.Errorf("--view patch has no meaning with --drift: there's no GitOps patch, only what changed live")
@@ -263,13 +274,13 @@ func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag
 	if driftAgainst != "" {
 		return runAppsDriftDiff(cmd, app, s, driftAgainst, view, dirFlag)
 	}
-	return runAppsDesiredDiff(cmd, app, s.env, s.client, baseline, view, dirFlag, s.log)
+	return runAppsDesiredDiff(cmd, app, s.env, s.client, baseline, view, dirFlag, patched, s.log)
 }
 
 // runAppsDesiredDiff is the default `apps diff` comparison: the rendered
 // GitOps desired state against the live cluster, or (--baseline) a
 // previously captured backup standing in for it.
-func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environment, c client.Client, baseline, view, dirFlag string, logger *log.Logger) error {
+func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environment, c client.Client, baseline, view, dirFlag string, patched bool, logger *log.Logger) error {
 	resolvedBaseline := ""
 	if baseline != "" {
 		var err error
@@ -280,14 +291,18 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	}
 
 	comparison := desiredComparison(baseline, resolvedBaseline)
+	if patched {
+		comparison = strings.Replace(comparison, "desired state", "desired state with the tenant patch applied", 1)
+	}
 	logger.Actionf("diffing %q: %s", app.Name, comparison)
 	result, err := appdiff.Diff(cmd.Context(), appdiff.Options{
 		Repos: env.RepoPaths(), Cluster: env.Cluster, Tenant: env.Tenant,
-		App:      app,
-		Runner:   runner.Exec{},
-		Client:   c,
-		Baseline: resolvedBaseline,
-		Log:      logger,
+		App:             app,
+		Runner:          runner.Exec{},
+		Client:          c,
+		Baseline:        resolvedBaseline,
+		WithTenantPatch: patched,
+		Log:             logger,
 	})
 	if err != nil {
 		return err
@@ -299,7 +314,10 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	// says so, or its differences read as contradicting "nothing to migrate".
 	openMeld := func() error {
 		desiredLabel := "desired state"
-		if result.ExistingPatches > 0 {
+		switch {
+		case patched:
+			desiredLabel = "desired state with tenant patch"
+		case result.ExistingPatches > 0:
 			desiredLabel = "desired state without tenant patch"
 		}
 		return ui.Meld(cmd.Context(), runner.Exec{}, desiredLabel, result.Before, liveSource(resolvedBaseline), result.After)

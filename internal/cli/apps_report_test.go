@@ -274,3 +274,15 @@ func TestReportChartReview_EnvVsLimit(t *testing.T) {
 		t.Errorf("output = %q (hasWarnings %v), want %q as a warning", buf.String(), review.hasWarnings(), want)
 	}
 }
+
+func TestAppsDiff_PatchedIsRefusedWhereItHasNoMeaning(t *testing.T) {
+	for name, tt := range map[string]struct{ view, drift, want string }{
+		"with --drift":      {viewUnified, "latest", "--patched has no meaning with --drift"},
+		"with --view patch": {viewPatch, "", "--patched has no --view patch"},
+	} {
+		err := runAppsDiff(&cobra.Command{}, "psql", tt.view, "", tt.drift, "", "", true)
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, tt.want)
+		}
+	}
+}

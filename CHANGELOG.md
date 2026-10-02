@@ -2,6 +2,12 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`apps diff --patched` compares the desired state *with* the tenant patch applied.** By default the
+  desired side is rendered without the tenant file's patch for the object's kind (so `migrate` always computes
+  the whole patch), which makes `--view meld` show the differences the patch is there to close. `--patched`
+  renders it as Flux would, so you can see what is still different from live after migrating (the meld also
+  shows the settings only the GitOps side has, which a patch can't override). Not valid with `--drift` or
+  `--view patch`.
 * **Chart-mode `apps diff` / `apps migrate` compare more than env vars.** Each live workload's container
   resources (requests/limits, compared as quantities), image and replicas are compared with the rendered
   workload, so a migration that changes them is no longer reported as "nothing to migrate". Risky

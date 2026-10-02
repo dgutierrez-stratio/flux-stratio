@@ -50,7 +50,12 @@ type Options struct {
 	// (WorkloadEnvFile), or env-vars.env for a backup that has none. The
 	// rendered/desired side is unaffected either way.
 	Baseline string
-	Log      *log.Logger
+	// WithTenantPatch renders the desired side with the tenant file's patch
+	// applied (render.Options.KeepPatches), to see what Flux would apply
+	// against live. Whatever Patch then holds is only what that patched
+	// state still differs by, not something to migrate.
+	WithTenantPatch bool
+	Log             *log.Logger
 }
 
 // Result is the outcome of diffing one app.
@@ -283,6 +288,7 @@ func renderApp(ctx context.Context, opts Options) (*render.Result, error) {
 		Runner:        opts.Runner,
 		Client:        opts.Client,
 		Log:           opts.Log,
+		KeepPatches:   opts.WithTenantPatch,
 	})
 }
 

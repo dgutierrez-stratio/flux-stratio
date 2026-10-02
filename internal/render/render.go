@@ -59,6 +59,11 @@ type Options struct {
 	// substituteFrom never needs it.
 	Client client.Client
 	Log    *log.Logger
+	// KeepPatches renders with the tenant file's patches for the object's
+	// kind applied, as Flux would — instead of the pristine base apps
+	// diff/migrate compute a patch against (see Render). Only for
+	// looking at the result: a patch computed from it would be a delta.
+	KeepPatches bool
 }
 
 // Result is what a successful Render produces.
@@ -114,6 +119,9 @@ func Render(ctx context.Context, opts Options) (*Result, error) {
 	// replacement, would silently drop everything the existing patch
 	// already carried. Every keos-use-cases template takes its patches only
 	// from the tenant entry, so nothing template-authored is dropped here.
+	if opts.KeepPatches {
+		return &Result{Object: obj, Kustomization: ks, AllDocs: docs}, nil
+	}
 	replaced, stripped, err := withoutPatchesFor(ks, obj.GetKind())
 	if err != nil {
 		return nil, err

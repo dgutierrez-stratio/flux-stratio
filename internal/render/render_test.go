@@ -331,6 +331,31 @@ func TestRender_StripsTheObjectKindsOwnPatches(t *testing.T) {
 	}
 }
 
+// TestRender_KeepPatchesRendersWithTheTenantPatch: for looking at what Flux
+// would apply, the object's kind's own patches stay in the Kustomization and
+// nothing is reported as replaced.
+func TestRender_KeepPatchesRendersWithTheTenantPatch(t *testing.T) {
+	opts := baseOptions(t)
+	fakeRunner := &runner.Fake{Responses: map[string]runner.FakeResponse{
+		"flux-operator": {Stdout: []byte(rsetOutputWithPatches)},
+		"flux":          {Stdout: []byte(kustomizationBuildOutput)},
+	}}
+	opts.Runner = fakeRunner
+	opts.KeepPatches = true
+
+	result, err := Render(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if len(result.ReplacedPatches) != 0 {
+		t.Errorf("ReplacedPatches = %q, want none when patches are kept", result.ReplacedPatches)
+	}
+	patches, _, _ := unstructured.NestedSlice(result.Kustomization.Object, "spec", "patches")
+	if len(patches) != 2 {
+		t.Errorf("rendered Kustomization has %d patches, want both (HelmRelease and ConfigMap)", len(patches))
+	}
+}
+
 func TestRender_NoOwnPatchesRendersOnce(t *testing.T) {
 	opts := baseOptions(t)
 	fakeRunner := opts.Runner.(*runner.Fake)
