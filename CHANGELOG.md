@@ -2,6 +2,11 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`--help` rewritten for every command.** Each command now says what it does and whether it writes anything,
+  lists every mode and modifier (`apps diff`'s `--baseline`/`--drift`/`--patched`/`--view`, `apps migrate`'s
+  `--dry-run`/`--yes`/`--accept-warnings`/`--skip-prepare`/`--all`/`--continue-on-error`, ...), and ends with
+  examples; the root help gives the order of work. Flag descriptions are one line, usage lines read
+  `flux stratio ...`, and a test keeps every command documented and every flag brief.
 * **`apps diff --patched` compares the desired state *with* the tenant patch applied.** By default the
   desired side is rendered without the tenant file's patch for the object's kind (so `migrate` always computes
   the whole patch), which makes `--view meld` show the differences the patch is there to close. `--patched`

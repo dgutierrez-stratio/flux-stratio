@@ -69,7 +69,9 @@ func rootLogger(cmd *cobra.Command) *log.Logger {
 func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:          "stratio",
-		Short:        "Migrate Stratio applications from Ansible-based clusters onto Flux/GitOps tenants",
+		Short:        "Migrate Stratio applications from CCT onto Flux/GitOps tenants",
+		Long:         rootLong,
+		Example:      rootExample,
 		SilenceUsage: true,
 		// SilenceErrors: cmd/flux-stratio/main.go already prints "Error:
 		// <err>" once itself after Execute returns — leaving cobra's own
@@ -79,15 +81,21 @@ func NewRootCommand() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.PersistentFlags().StringVar(&configFlag, "config", "", "path to the component catalog file (default: $FLUX_STRATIO_CONFIG, ~/.fluxcd/flux-stratio/catalog.yaml, or ./flux-stratio.yaml)")
-	root.PersistentFlags().StringVar(&envConfigFlag, "env-config", "", "path to the environment file (default: $FLUX_STRATIO_ENV, ~/.fluxcd/flux-stratio/environment.yaml, or ./flux-stratio-env.yaml)")
-	root.PersistentFlags().StringVar(&baseFlag, "base", "", "default parent directory of the repositories: keos-apps, keos-use-cases, keos-fleet, keos-system-services and charts, each expected at <base>/<name> unless --repo says otherwise (overrides the environment file's base)")
-	root.PersistentFlags().StringToStringVar(&repoFlag, "repo", nil, "point one repository straight at its checkout, e.g. --repo charts=/path/to/worktree (repeatable; names: "+strings.Join(config.RepoNames, ", ")+"; overrides the environment file's repos)")
-	root.PersistentFlags().StringVar(&clusterFlag, "cluster", "", "the cluster name to operate on (overrides the environment file's cluster)")
-	root.PersistentFlags().StringVar(&tenantFlag, "tenant", "", "the tenant name to operate on (overrides the environment file's tenant)")
-	root.PersistentFlags().StringVar(kubeconfigArgs.KubeConfig, "kubeconfig", "", "path to the kubeconfig file to use for cluster access")
-	root.PersistentFlags().StringVar(kubeconfigArgs.Context, "kube-context", "", "the name of the kubeconfig context to use")
-	root.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "print diagnostic detail (e.g. external command chatter)")
+	root.PersistentFlags().StringVar(&configFlag, "config", "", "component catalog file (default: $FLUX_STRATIO_CONFIG, else ~/.fluxcd/flux-stratio/catalog.yaml, else ./flux-stratio.yaml)")
+	root.PersistentFlags().StringVar(&envConfigFlag, "env-config", "", "environment file (default: $FLUX_STRATIO_ENV, else ~/.fluxcd/flux-stratio/environment.yaml, else ./flux-stratio-env.yaml)")
+	root.PersistentFlags().StringVar(&baseFlag, "base", "", "parent directory of the repositories; each is <base>/<name> unless --repo overrides it (default: the environment file's)")
+	root.PersistentFlags().StringToStringVar(&repoFlag, "repo", nil, "name=path of one repository's checkout, repeatable (names: "+strings.Join(config.RepoNames, ", ")+"); overrides the environment file")
+	root.PersistentFlags().StringVar(&clusterFlag, "cluster", "", "cluster to operate on (default: the environment file's)")
+	root.PersistentFlags().StringVar(&tenantFlag, "tenant", "", "tenant to operate on (default: the environment file's)")
+	root.PersistentFlags().Lookup("repo").DefValue = "" // pflag would print "(default [])"
+	root.PersistentFlags().StringVar(kubeconfigArgs.KubeConfig, "kubeconfig", "", "kubeconfig file for cluster access")
+	root.PersistentFlags().StringVar(kubeconfigArgs.Context, "kube-context", "", "kubeconfig context to use")
+	root.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "print diagnostics, including the external commands run")
+
+	// The binary is flux-stratio, run as `flux stratio ...`: show that in
+	// every Usage line instead of the bare command name.
+	usage := strings.NewReplacer("{{.UseLine}}", "flux {{.UseLine}}", "{{.CommandPath}}", "flux {{.CommandPath}}").Replace(root.UsageTemplate())
+	root.SetUsageTemplate(usage)
 
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newDoctorCommand())

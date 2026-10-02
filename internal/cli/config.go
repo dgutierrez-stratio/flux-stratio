@@ -26,7 +26,8 @@ const environmentHeader = "" +
 func newConfigCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Manage the flux-stratio catalog and environment files",
+		Short: "Create the catalog and environment files",
+		Long:  configLong,
 	}
 	cmd.AddCommand(newConfigInitCommand())
 	return cmd
@@ -37,22 +38,16 @@ func newConfigInitCommand() *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "init",
-		Short: "Write the component catalog (seeded with the known Stratio components) and an environment file",
-		Long: `Writes two files into --dir:
-
-  catalog.yaml      the component catalog: every supported component type, with the
-                    selectors that recognize its live legacy instances — static, the
-                    same for every environment
-  environment.yaml  --base (the parent directory of the keos-* GitOps repositories and
-                    the charts repository), any --repo pointing one of them elsewhere,
-                    --cluster and --tenant — this workstation's target`,
+		Use:     "init",
+		Short:   "Write catalog.yaml and environment.yaml",
+		Long:    configInitLong,
+		Example: configInitExample,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runConfigInit(cmd, dir, force)
 		},
 	}
-	cmd.Flags().StringVar(&dir, "dir", "", "directory to write catalog.yaml and environment.yaml into (default: ~/.fluxcd/flux-stratio)")
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite catalog.yaml/environment.yaml if they already exist, keeping a timestamped .bak copy of each and the existing environment file's repos entries no --repo replaces")
+	cmd.Flags().StringVar(&dir, "dir", "", "directory to write both files into (default: ~/.fluxcd/flux-stratio)")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files, keeping a <file>.bak-<timestamp> copy and the old --repo entries this run does not replace")
 	return cmd
 }
 

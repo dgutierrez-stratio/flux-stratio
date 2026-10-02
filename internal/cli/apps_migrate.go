@@ -45,27 +45,25 @@ func newAppsMigrateCommand() *cobra.Command {
 	var flags migrateFlags
 
 	cmd := &cobra.Command{
-		Use:   "migrate [name]",
-		Short: "Diff an app and splice the resulting patch into the tenant file",
-		Long:  appsMigrateLong,
-		Args:  cobra.MaximumNArgs(1),
+		Use:     "migrate [name]",
+		Short:   "Write an app's patch into the tenant file (and run its prepare step)",
+		Long:    appsMigrateLong,
+		Example: appsMigrateExample,
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsMigrate(cmd, args, all, continueOnError, as, flags)
 		},
 	}
 	addAsFlag(cmd, &as)
 	cmd.Flags().StringVar(&flags.baseline, "baseline", "",
-		"compute the patch against a backup (see apps backup) instead of the live cluster — for a component Flux "+
-			"already reconciled unpatched, whose live state no longer reflects the legacy installation; takes the same "+
-			"values as apps diff --baseline (e.g. latest)")
-	cmd.Flags().StringVar(&flags.dir, "dir", "", "backups root directory to resolve --baseline latest against (default: a backups/ directory next to the catalog file)")
-	cmd.Flags().BoolVar(&all, "all", false, "migrate every live object a catalog type selects and the tenant file declares")
-	cmd.Flags().BoolVar(&flags.dryRun, "dry-run", false, "show what would change without writing anything")
-	cmd.Flags().BoolVarP(&flags.yes, "yes", "y", false, "skip the confirmation prompt (and never ask which type/entry an ambiguous live object is — fail naming --as instead); an app with warnings still stops unless --accept-warnings is also given")
-	cmd.Flags().BoolVar(&flags.acceptWarnings, "accept-warnings", false, "with --yes, migrate an app even when its diff has warnings (values that will be lost, differences needing review, unresolved dependencies)")
-	cmd.Flags().BoolVar(&flags.skipPrepare, "skip-prepare", false, "patch the tenant file but leave out every app's prepare step (nothing is run, shown or asked, and no backup is taken for it); "+
-		"each skipped step is warned about and listed at the end — the app isn't ready for Flux to reconcile until apps migrate <app> runs it, which finds the patch up to date and goes straight to the step")
-	cmd.Flags().BoolVar(&continueOnError, "continue-on-error", false, "with --all, keep migrating remaining apps after one fails (default: stop on the first error)")
+		"take the legacy values from a backup instead of the live cluster, for an app Flux already reset: latest, a backup directory or the backups root")
+	cmd.Flags().StringVar(&flags.dir, "dir", "", "backups root, where --baseline latest looks (default: a backups/ directory next to the catalog file)")
+	cmd.Flags().BoolVar(&all, "all", false, "migrate every classified app whose component the tenant file declares, in dependency order")
+	cmd.Flags().BoolVar(&flags.dryRun, "dry-run", false, "show the tenant-file change and each prepare step's operations, but write and run nothing")
+	cmd.Flags().BoolVarP(&flags.yes, "yes", "y", false, "do not ask to confirm (and fail instead of asking which type/entry); an app with warnings still stops unless --accept-warnings")
+	cmd.Flags().BoolVar(&flags.acceptWarnings, "accept-warnings", false, "with --yes, migrate an app even when it has warnings (lost values, differences to review, risky resources/image/replicas/selector)")
+	cmd.Flags().BoolVar(&flags.skipPrepare, "skip-prepare", false, "write the patch but run no prepare step (they are listed at the end; run apps migrate <app> later for just the step)")
+	cmd.Flags().BoolVar(&continueOnError, "continue-on-error", false, "with --all, carry on after an app fails (default: stop at the first failure)")
 	return cmd
 }
 

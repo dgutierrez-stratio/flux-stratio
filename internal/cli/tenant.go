@@ -15,7 +15,8 @@ import (
 func newTenantCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tenant",
-		Short: "Scaffold tenant artifacts for a cluster",
+		Short: "Create tenant artifacts",
+		Long:  tenantLong,
 	}
 	cmd.AddCommand(newTenantImportCommand())
 	return cmd
@@ -27,15 +28,17 @@ func newTenantImportCommand() *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "import",
-		Short: "Scan a live, not-yet-migrated cluster and render a tenant ResourceSetInputProvider skeleton",
+		Use:     "import",
+		Short:   "Scan the live cluster and render the tenant file skeleton",
+		Long:    tenantImportLong,
+		Example: tenantImportExample,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTenantImport(cmd, size, output, force)
 		},
 	}
-	cmd.Flags().StringVar(&size, "size", "S", "default component size (S, M or L)")
-	cmd.Flags().StringVar(&output, "output", "", "file to write the generated RSIP to (default: print to stdout)")
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite --output if it already exists")
+	cmd.Flags().StringVar(&size, "size", "S", "default size of every component: S, M or L (the keos-apps size overlays)")
+	cmd.Flags().StringVar(&output, "output", "", "file to write the tenant file to (default: print to stdout)")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite --output if it exists (drops anything written by hand)")
 	return cmd
 }
 

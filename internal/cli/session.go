@@ -81,6 +81,5 @@ func (s *session) resolveOptions(cmd *cobra.Command, withTenant, interactive boo
 // addAsFlag registers --as on cmd.
 func addAsFlag(cmd *cobra.Command, as *string) {
 	cmd.Flags().StringVar(as, "as", "",
-		"answer the type/entry question up front: <type> picks which catalog type the live object is, "+
-			"<type>/<entry> also pins which components.<key> entry in the tenant file it migrates into")
+		"pick the type, and optionally the tenant entry, up front instead of being asked: <type> or <type>/<entry>")
 }

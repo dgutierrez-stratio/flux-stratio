@@ -39,158 +39,12 @@ const (
 	viewMeld    = "meld"
 )
 
-const appsDiffLong = `Compares one app's state two different ways, depending on the question:
-
-Pre-migration — "what would migrating this app change?": the rendered
-GitOps desired state against the live cluster (the default), or against
-a --baseline backup standing in for live — useful right before a
-disruptive step (e.g. a prepare step) changes live state and you want to
-diff against what it looked like a moment ago, not whatever it looks
-like when you happen to run the diff.
-
-Post-migration — "has this app drifted since I backed it up?": --drift
-compares the live cluster right now directly against a stored backup,
-with no GitOps rendering at all. Once Flux is reconciling an app, the
-pre-migration question above stops being the useful one to ask; --drift
-is the one to reach for instead. --baseline and --drift are mutually
-exclusive — pick one question at a time.
-
---baseline and --drift both take the same kind of value — a backup
-directory, as written by apps backup — and resolve it the same three ways:
-
-  --baseline latest                     the app's most recent apps backup capture
-  --baseline backups/psql               that app's own backup directory: picks the latest timestamp under it
-  --baseline backups                    the overall backups/ root: finds <root>/psql/ and picks the latest there
-  --baseline backups/psql/2026-01-02T15-04-05Z   an exact capture, used as-is
-
-("latest" is a reserved keyword, not a directory name — pass a real path
-for anything else. NoOptDefVal/"bare --baseline with nothing after it" is
-deliberately not supported: pflag would silently swallow the next token —
-even --help — as --baseline's value instead of parsing it as its own
-flag, which is far more confusing than requiring an explicit value.)
-
-The patch is always the whole one: the desired side is rendered without
-the tenant file's existing patch for the object's kind (the one apps
-migrate would replace), so --view patch shows exactly what apps migrate
-would write. When the tenant file already carries exactly that patch,
-there's nothing to migrate — though --view meld still shows the
-differences that patch covers, labelling the desired side "desired state
-without tenant patch".
-
-When the live object is already reconciled by Flux (it carries Flux's
-kustomize.toolkit.fluxcd.io/name or helm.toolkit.fluxcd.io/name label),
-a warning says so: Flux has reset it to the GitOps defaults, so legacy
-values it overwrote no longer show up live. Compare against the backup
-you took before cutover instead, with --baseline latest.
-
-<name> is a live object's name (psql, psql-agent, kafka1) or its derived
-GitOps object name (psql-gosec-agent); the component type is detected
-from the live object's labels/annotations against the catalog. Use
---as <type>[/<entry>] to answer any "which one?" question up front.
-
-Examples:
-
-  flux stratio apps diff psql                            # desired state vs. live cluster
-  flux stratio apps diff psql --baseline latest           # desired state vs. your last backup
-  flux stratio apps diff psql --drift latest              # live now vs. your last backup
-  flux stratio apps diff psql --view patch                # print the raw patch YAML instead
-  flux stratio apps diff psql --patched --view meld       # desired state WITH the tenant patch vs. live
-  flux stratio apps diff psql --drift latest --view meld  # open the drift check in meld
-  flux stratio apps diff pool-psql --baseline latest --view patch
-                                                         # Flux already reset live: patch from the backup
-  flux stratio apps diff kafka1 --as kafka/kafka         # live kafka1 migrates into tenant entry "kafka"`
-
-const appsBackupLong = `Captures live legacy state to disk, under <dir>/<app-id>/<UTC-timestamp>/:
-cr.yaml for a CR-backed component; deployment.yaml + env-vars.env for a
-chart-backed one, plus one env-vars.<kind>.<name>.env per live workload so
-sibling workloads' same-named variables stay apart (or helmrelease.yaml +
-values.yaml when only a HelmRelease is live). It reads only the live
-cluster — never the tenant file — so it works before a component is
-declared there at all.
-
-Take the backup BEFORE pushing a component to the tenant file. Once Flux
-reconciles a component unpatched, it resets the live object to the GitOps
-defaults, and the legacy values it overwrote survive only in a backup —
-which is what apps diff/migrate --baseline compute the patch from.
-
-  <name>     one component, by live name (psql, psql-agent) or GitOps
-             object name (psql-gosec-agent)
-  --catalog  every live object a catalog type selects
-  --all      that, plus every other live object the cluster scan finds
-
-Examples:
-
-  flux stratio apps backup --catalog      # before touching anything
-  flux stratio apps backup pool-psql      # a fresh reference point for one component`
-
-const appsMigrateLong = `Computes a component's patch — the legacy values the GitOps render
-doesn't already produce — and splices it into its entry in the tenant
-file (components.<key>[name=<entry>].patches, or config.agent.patches for
-a gosec agent), preserving every comment. Runs the component's prepare
-step first, if its catalog type declares one.
-
-How the patch is computed:
-
-  - The desired side is rendered from the tenant file WITHOUT the
-    existing patch for the object's kind (the one this command replaces,
-    by target.kind), so the result is always the whole patch — never a
-    leftover delta that would drop what the existing patch already set.
-  - The legacy side is the live cluster, or a backup with --baseline.
-  - If the tenant file already carries exactly that patch, there's
-    nothing to do: running migrate twice converges.
-
-Migrate before Flux reconciles the component. If you push a component to
-the tenant file unpatched first, Flux resets the live object to the
-GitOps defaults, and a patch computed from live can no longer see the
-legacy values it overwrote (apps diff/migrate warn when the live object
-is already Flux-managed). Recover by computing the patch from the backup
-you took before cutover:
-
-  flux stratio apps migrate pool-psql --baseline latest --dry-run
-  flux stratio apps migrate pool-psql --baseline latest
-
-then commit and push the tenant file: Flux restores the legacy values.
-
-Do you need --baseline? Usually not:
-
-  - Without it (the default), the legacy side is the live cluster. That is
-    right as long as the component's legacy workloads still run untouched —
-    i.e. before Flux has reconciled it. A chart's sibling workloads
-    (genai-api and genai-ui, say) are each fetched live and compared with
-    their own rendered workload.
-  - Use --baseline only when live no longer holds the legacy values: you get
-    the "already managed by Flux" warning, or you know Flux reset the
-    component before you migrated it.
-  - Either way, take an apps backup first: it costs nothing, it's the only
-    record of the legacy values once Flux reconciles the component, and it
-    captures every workload of a multi-workload chart (the catalog type's
-    chart.siblings), each in its own env file.
-
-Resolving which component to migrate:
-
-  <name> is a live object's name or its derived GitOps object name; the
-  type is detected against the catalog's selectors. If the derived
-  tenant entry isn't declared (say live kafka1, tenant entry kafka), or a
-  name matches more than one instance, you're asked — or answer up front
-  with --as <type>[/<entry>]. Nothing you answer is stored.
-  --all migrates every classified instance whose component the tenant
-  file declares, in dependency order; types it doesn't declare (absent or
-  commented out) are skipped with a warning. With --yes, a question that
-  needs an answer isn't asked: that instance fails, naming --as.
-
-Examples:
-
-  flux stratio apps migrate psql --dry-run               # preview the tenant-file edit
-  flux stratio apps migrate psql                         # apply it (asks to confirm)
-  flux stratio apps migrate kafka1 --as kafka/kafka      # pin the tenant entry
-  flux stratio apps migrate pool-psql --baseline latest  # Flux already reset live: use the backup
-  flux stratio apps migrate --all --dry-run              # survey everything first
-  flux stratio apps migrate --all --continue-on-error    # then migrate what resolves`
-
 func newAppsCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "apps",
-		Short: "Back up, diff and migrate applications",
+		Use:     "apps",
+		Short:   "Back up, compare and migrate apps",
+		Long:    appsLong,
+		Example: appsDiffExample + "\n" + appsMigrateExample,
 	}
 	cmd.AddCommand(newAppsDiffCommand())
 	cmd.AddCommand(newAppsBackupCommand())
@@ -207,31 +61,26 @@ func newAppsDiffCommand() *cobra.Command {
 	var patched bool
 
 	cmd := &cobra.Command{
-		Use:   "diff <name>",
-		Short: "Compare an app's desired/live state pre-migration, or check its post-migration drift",
-		Long:  appsDiffLong,
-		Args:  cobra.ExactArgs(1),
+		Use:     "diff <name>",
+		Short:   "Show what migrating an app would change, or whether it has drifted",
+		Long:    appsDiffLong,
+		Example: appsDiffExample,
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsDiff(cmd, args[0], view, baseline, driftAgainst, dir, as, patched)
 		},
 	}
 	addAsFlag(cmd, &as)
 	cmd.Flags().StringVar(&baseline, "baseline", "",
-		"pre-migration: diff the rendered desired state against a previously captured backup (see apps backup) "+
-			"instead of the live cluster — see the command's --help for the full baseline-vs-drift explanation")
+		"compare against a backup instead of the live cluster: latest, an app's backup directory, or the backups root")
 	cmd.Flags().StringVar(&driftAgainst, "drift", "",
-		"post-migration: compare the live cluster right now directly against a previously captured backup, with no "+
-			"GitOps rendering involved — has this app drifted since it was backed up? Mutually exclusive with --baseline "+
-			"and with --view patch (see the command's --help)")
+		"compare the live cluster now against a backup, with no GitOps rendering (same values as --baseline; not with --baseline, --patched or --view patch)")
 	cmd.Flags().StringVar(&view, "view", viewUnified,
-		"how to display the comparison: unified (default, a terminal diff), patch (the raw patch YAML apps migrate "+
-			"would write; invalid with --drift), meld (open in meld instead, even when there are no differences — see flux stratio doctor)")
+		"how to show the result: unified (a diff, default), patch (the patch migrate would write) or meld (open meld, even with no differences)")
 	cmd.Flags().BoolVar(&patched, "patched", false,
-		"render the desired state with the tenant file's patch applied, as Flux would, instead of the pristine base: "+
-			"does the patch leave anything different from live? (no meaning with --drift or --view patch)")
+		"render the desired state WITH the tenant patch applied: what does the migrated app still differ in? (not with --drift or --view patch)")
 	cmd.Flags().StringVar(&dir, "dir", "",
-		"backups root directory to resolve --baseline/--drift latest against (default: a backups/ directory next to "+
-			"the config file) — must match whatever --dir apps backup used, if any, or latest can't find it")
+		"backups root, where --baseline/--drift latest look (default: a backups/ directory next to the catalog file; must match the --dir of apps backup)")
 	return cmd
 }
 
@@ -657,18 +506,19 @@ func newAppsBackupCommand() *cobra.Command {
 	var as string
 
 	cmd := &cobra.Command{
-		Use:   "backup [name]",
-		Short: "Capture an app's live legacy state to disk",
-		Long:  appsBackupLong,
-		Args:  cobra.MaximumNArgs(1),
+		Use:     "backup [name]",
+		Short:   "Save apps' legacy state to disk (before Flux reconciles them)",
+		Long:    appsBackupLong,
+		Example: appsBackupExample,
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsBackup(cmd, args, catalog, all, dir, as)
 		},
 	}
 	addAsFlag(cmd, &as)
-	cmd.Flags().BoolVar(&catalog, "catalog", false, "back up every live object a catalog type selects")
-	cmd.Flags().BoolVar(&all, "all", false, "back up every live object the cluster scan finds, not just the config catalog")
-	cmd.Flags().StringVar(&dir, "dir", "", "backups root directory (default: a backups/ directory next to the config file)")
+	cmd.Flags().BoolVar(&catalog, "catalog", false, "back up every live object that a catalog type selects")
+	cmd.Flags().BoolVar(&all, "all", false, "back up --catalog plus every other live object found in the cluster")
+	cmd.Flags().StringVar(&dir, "dir", "", "backups root to write into (default: a backups/ directory next to the catalog file)")
 	return cmd
 }
 

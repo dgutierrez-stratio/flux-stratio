@@ -10,8 +10,10 @@ import (
 
 func newDoctorCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Check that flux-stratio is ready to run: binaries, catalog, environment, repo layout, cluster access, tenant file",
+		Use:     "doctor",
+		Short:   "Check that flux-stratio is ready to run",
+		Long:    doctorLong,
+		Example: doctorExample,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := doctor.Run(cmd.Context(), doctor.Options{
 				ConfigFlag:     configFlag,
