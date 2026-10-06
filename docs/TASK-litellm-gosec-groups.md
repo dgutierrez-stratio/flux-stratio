@@ -1,6 +1,6 @@
 # Task: LiteLLM post-requisites job targets a Gosec group nobody creates (HTTP 404); make it use the groups the app uses
 
-**Status: not started. Investigated read-only on 2026-10-06; nothing was changed.** The fix lives in the **keos-apps**
+**Status: implemented 2026-10-06 (keos-apps job + charts prerequisites + flux-stratio notes); pending verification on eosdev. Investigated read-only the same day.** The fix lives in the **keos-apps**
 repository (and, optionally, the **charts** repository), not in flux-stratio's Go code. flux-stratio only needs a note
 (see "flux-stratio side").
 
@@ -85,6 +85,16 @@ in an earlier run of the plugin. Investigated with three read-only sub-investiga
 
 **Decision (user to confirm, recommended): keep the legacy groups in the patch** and fix the job so it targets whichever
 groups the app is configured with.
+
+## Implemented design (supersedes "The fix" below where they differ)
+
+One source of truth, modern default, legacy by patch: `liteLlm.general.gosecIntegration.adminGroup/usersGroup`.
+
+- keos-apps (PR #152, `job.yaml`): `envFrom` the release ConfigMap, groups from `GENAI_LITELLM_GOSEC_*_GROUP` with the
+  chart-default convention (`<tenant>-<LITELLM_NAME>_…`) as fallback; `libs.gosec.createGroup` (409 = exists) before each PATCH.
+- charts (PR #258, `litellm/config/litellm_prerequisites.yaml`): the groups it creates come from the same two values, so a
+  legacy patch creates the legacy groups and no stray default ones. Default render is unchanged (only the configMaps checksum annotation).
+- flux-stratio: Notes + `docs/config-reference.md` only.
 
 ## Current state on eosdev (2026-10-06 ~10:25Z)
 

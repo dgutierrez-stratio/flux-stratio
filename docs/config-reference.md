@@ -267,3 +267,11 @@ existing `catalog.yaml` keeps what it has until you add `memoryEnv` by hand or r
 | `rocket` | `rocket` | Deployment, `rocket` / `default` |
 | `intelligence` | `intelligence` | Deployment, `intelligence` |
 | `dlc-entity` | `dlcEntity` | Deployment, `dlc-entity` |
+
+**LiteLLM Gosec groups.** `liteLlm.general.gosecIntegration.adminGroup` / `usersGroup` are the single source of the
+two groups LiteLLM syncs its admins and users from. The chart's prerequisites job creates them and keos-apps'
+post-requisites job (which adds the tenant owners/users to them) reads them from the release's `<release>-config`
+ConfigMap, so all three agree. A pure GitOps install keeps the chart default (`<tenant>-<release>_admin_users` /
+`_users`); a migrated release keeps the legacy names through the tenant patch (`genai-litellm.<tenant>-genai_*`).
+Dropping the two values from the patch moves the release to the default names, whose membership starts empty
+(`deleteStaleSyncedUsers` would remove the synced LiteLLM admins until they are added).
