@@ -253,3 +253,54 @@ func TestDeriveCRDPlural(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractSchema_ExtraConfigHasKeyElseLiteralIsADefault(t *testing.T) {
+	tests := []struct {
+		name        string
+		block       string
+		key         string
+		wantDefault string
+		wantBare    bool
+	}{
+		{
+			name:        "virtualizer uiEnabled, the real template line",
+			block:       `          STRATIO_VIRTUALIZER_UI_ENABLED: '<< if hasKey $componentConfig "uiEnabled" >><< get $componentConfig "uiEnabled" >><< else >>false<< end >>'`,
+			key:         "uiEnabled",
+			wantDefault: "false",
+			wantBare:    true,
+		},
+		{
+			name:        "quoted literal stays a string",
+			block:       `X: << if hasKey $componentConfig "mode" >><< get $componentConfig "mode" >><< else >>"fast"<< end >>`,
+			key:         "mode",
+			wantDefault: "fast",
+		},
+		{
+			name:        "number literal",
+			block:       `X: << if hasKey $componentConfig "replicas" >><< get $componentConfig "replicas" >><< else >>3<< end >>`,
+			key:         "replicas",
+			wantDefault: "3",
+			wantBare:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := extractSchema("foo", tt.block)
+			if len(s.ExtraConfig) != 1 {
+				t.Fatalf("ExtraConfig = %+v, want exactly one field", s.ExtraConfig)
+			}
+			f := s.ExtraConfig[0]
+			if f.Key != tt.key || !f.HasDefault || f.Default != tt.wantDefault || f.Bare != tt.wantBare {
+				t.Errorf("field = %+v, want key=%q default=%q bare=%v", f, tt.key, tt.wantDefault, tt.wantBare)
+			}
+		})
+	}
+}
+
+func TestExtractSchema_HasKeyWithoutElseKeepsNoDefault(t *testing.T) {
+	block := `A: << if hasKey $componentConfig "a" >><< get $componentConfig "a" >><< end >>`
+	s := extractSchema("foo", block)
+	if len(s.ExtraConfig) != 1 || s.ExtraConfig[0].HasDefault {
+		t.Errorf("ExtraConfig = %+v, want one field without a default", s.ExtraConfig)
+	}
+}

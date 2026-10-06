@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"cmp"
 	"sort"
 	"strings"
 
@@ -83,6 +84,12 @@ type UnmappedDiff struct {
 	// Reason is UnmappedAmbiguous, the shared one when it's
 	// UnmappedConflict.
 	Candidates []string
+	// Origin and Sources, for an UnmappedNoPath, say what the chart's line
+	// for the variable is made of: written out, derived from the release's
+	// name or namespace, or built from the Sources values. OriginUnknown
+	// when the chart file with the line wasn't found.
+	Origin  NoPathOrigin
+	Sources []string
 	// Shared, for an UnmappedConflict, are the variables that already
 	// match live through the same path ("NAME=live", workload-prefixed
 	// when there are several), which patching it would change.
@@ -132,6 +139,12 @@ type ChartDiffInput struct {
 	// HelmRelease's values were merged over them: a default env entry the
 	// merged list lacks was hidden by a list replacement (LiveOnlyVar.ShadowedBy).
 	DefaultValues map[string]any
+	// NoResourceCarry leaves the containers' live resources out of the
+	// patch: they stay in the comparison as differences (CompareLiveSpecs).
+	NoResourceCarry bool
+	// Defines are the chart's named templates (ScanChartDefines): what a
+	// helper an env line includes reads, to say why a variable has no path.
+	Defines map[string]string
 }
 
 // WorkloadComparison is one compared workload's two sides, for a
@@ -198,6 +211,8 @@ type resolvedVar struct {
 	// from, when found; isInline is set for any container env var.
 	inline   *inlineSource
 	isInline bool
+	// source is the ConfigMap the value was rendered into, when it was.
+	source string
 }
 
 // mappedValue is one workload's live value for a .Values path.
@@ -222,6 +237,7 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 		attributed: AttributeConfigMaps(in.Rendered, in.Files, in.ValuesRoot),
 		valuesRoot: in.ValuesRoot,
 		values:     in.Values,
+		defines:    in.Defines,
 	}
 	result := &ChartDiffResult{}
 	mapped := map[string][]mappedValue{}
@@ -288,8 +304,10 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 			case len(rv.paths) == 1 && !rv.ambiguous:
 				mapped[rv.paths[0]] = append(mapped[rv.paths[0]], mappedValue{workload, name, rv.value, liveVal})
 			case len(rv.paths) == 0:
+				origin := c.originOf(rv.source, name)
 				result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
 					Workload: workload, Name: name, Rendered: rv.value, Live: liveVal, Reason: UnmappedNoPath,
+					Origin: origin.Kind, Sources: origin.Values,
 				})
 			default:
 				ambiguous = append(ambiguous, UnmappedDiff{
@@ -363,7 +381,11 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 		}
 	}
 	result.UnmappedDiffs = append(result.UnmappedDiffs, applyInlineEdits(values, in.Values, keptEdits)...)
-	resourceValues, carried := resourceEdits(in.Values, in)
+	var resourceValues map[string]any
+	var carried []ResourceEdit
+	if !in.NoResourceCarry {
+		resourceValues, carried = resourceEdits(in.Values, in)
+	}
 	if len(carried) > 0 {
 		for k, v := range MergeValues(values, resourceValues) {
 			values[k] = v
@@ -405,6 +427,25 @@ type chartContext struct {
 	attributed map[string]*ChartFile
 	valuesRoot string
 	values     map[string]any
+	defines    map[string]string
+}
+
+// originOf says what the chart's env line for name is made of, looking in
+// the file behind the ConfigMap the value came from, or else in the first
+// chart file that has the key. OriginUnknown when no file has it.
+func (c chartContext) originOf(configMap, name string) ChartOrigin {
+	if file := c.attributed[configMap]; file != nil {
+		if raw, ok := file.Lines[name]; ok {
+			return classifyChartLine(raw, c.defines)
+		}
+		return ChartOrigin{}
+	}
+	for _, f := range c.files {
+		if raw, ok := f.Lines[name]; ok {
+			return classifyChartLine(raw, c.defines)
+		}
+	}
+	return ChartOrigin{}
 }
 
 // pathsFor is the .Values paths v could be patched through: its own
@@ -427,7 +468,7 @@ func (c chartContext) pathsFor(v renderedVar) []string {
 func (c chartContext) workloadVars(workload *unstructured.Unstructured) map[string]resolvedVar {
 	out := map[string]resolvedVar{}
 	for name, v := range c.rendered.workloadEnv(workload) {
-		rv := resolvedVar{value: v.Value, paths: c.pathsFor(v), isInline: v.inline()}
+		rv := resolvedVar{value: v.Value, paths: c.pathsFor(v), isInline: v.inline(), source: v.ConfigMap}
 		if rv.isInline {
 			rv.inline = inlineSourceFor(c.values, workload, v)
 		}
@@ -458,7 +499,7 @@ func (c chartContext) mergedVars() map[string]resolvedVar {
 				prev.isInline != v.isInline || !sameInline(prev.inline, v.inline)
 			out[name] = resolvedVar{
 				value: value, paths: unionSorted(prev.paths, v.paths), ambiguous: ambiguous,
-				inline: v.inline, isInline: v.isInline,
+				inline: v.inline, isInline: v.isInline, source: cmp.Or(prev.source, v.source),
 			}
 		}
 	}

@@ -5,9 +5,11 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/Stratio/flux-stratio/internal/config"
@@ -61,7 +63,16 @@ func loadEnvironment() (config.Environment, error) {
 // rootLogger returns a Logger for cmd, writing to its stderr (so tests can
 // capture it via cmd.SetErr, and production defaults to os.Stderr).
 func rootLogger(cmd *cobra.Command) *log.Logger {
-	return log.New(cmd.ErrOrStderr(), verboseFlag)
+	out := cmd.ErrOrStderr()
+	logger := log.New(out, verboseFlag)
+	// Tables want the terminal's width, and styling only on a real terminal
+	// that hasn't opted out (https://no-color.org).
+	if f, ok := out.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		width, _, _ := term.GetSize(int(f.Fd()))
+		_, noColor := os.LookupEnv("NO_COLOR")
+		return logger.WithTerminal(width, !noColor && os.Getenv("TERM") != "dumb")
+	}
+	return logger
 }
 
 // NewRootCommand builds the `flux stratio` command tree: tenant import,
@@ -90,7 +101,7 @@ func NewRootCommand() *cobra.Command {
 	root.PersistentFlags().Lookup("repo").DefValue = "" // pflag would print "(default [])"
 	root.PersistentFlags().StringVar(kubeconfigArgs.KubeConfig, "kubeconfig", "", "kubeconfig file for cluster access")
 	root.PersistentFlags().StringVar(kubeconfigArgs.Context, "kube-context", "", "kubeconfig context to use")
-	root.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "print diagnostics, including the external commands run")
+	root.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "print diagnostics, list the notes of a review and show its values whole")
 
 	// The binary is flux-stratio, run as `flux stratio ...`: show that in
 	// every Usage line instead of the bare command name.

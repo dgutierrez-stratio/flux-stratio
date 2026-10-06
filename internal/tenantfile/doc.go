@@ -23,6 +23,10 @@ type Doc struct {
 	// source is the file's content as Load read it (or Save last wrote
 	// it), which Save checks the file still holds before replacing it.
 	source []byte
+	// edits are the textual insertions recorded by AddToEntry, AddTopLevel
+	// and AppendEntry; Bytes returns source with them applied, instead of
+	// re-encoding the node tree.
+	edits []textEdit
 }
 
 // Load reads and parses the tenant file at path.
@@ -39,8 +43,14 @@ func Load(path string) (*Doc, error) {
 }
 
 // Bytes re-encodes the document at indent 2, matching every other YAML
-// file this plugin writes.
+// file this plugin writes. A document edited through the textual additions
+// (AddToEntry, AddTopLevel, AppendEntry) returns its original text plus
+// those lines instead: nothing is re-encoded, so every byte the operator
+// wrote survives.
 func (d *Doc) Bytes() ([]byte, error) {
+	if len(d.edits) > 0 {
+		return applyEdits(d.source, append([]textEdit(nil), d.edits...)), nil
+	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -51,6 +61,14 @@ func (d *Doc) Bytes() ([]byte, error) {
 		return nil, fmt.Errorf("closing tenant file encoder: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// Text is the file's text with the textual additions (AddToEntry,
+// AddTopLevel, AppendEntry) applied — the original bytes when there are
+// none. Unlike Bytes it never re-encodes, so it is what a command that
+// only adds (tenant import) shows and compares.
+func (d *Doc) Text() []byte {
+	return applyEdits(d.source, append([]textEdit(nil), d.edits...))
 }
 
 // Save writes the document to path via a temp file in the same directory
@@ -112,5 +130,14 @@ func (d *Doc) Save(path string) error {
 		return fmt.Errorf("renaming %s into place at %s: %w", tmpPath, path, err)
 	}
 	d.source = data
+	if len(d.edits) > 0 {
+		// The node tree describes the old text; read the new one back so
+		// further additions find their lines.
+		var root yaml.Node
+		if err := yaml.Unmarshal(data, &root); err != nil {
+			return fmt.Errorf("re-reading %s after writing it: %w", path, err)
+		}
+		d.root, d.edits = &root, nil
+	}
 	return nil
 }

@@ -1,7 +1,8 @@
-// Package prepare implements the four one-time preconditions some apps
+// Package prepare implements the one-time preconditions some apps
 // require before they can be migrated (config.App.Prepare): suspending the
 // legacy datamarket-agent, removing legacy objects that would collide with
-// their GitOps-managed replacements, and (the one step whose verification
+// their GitOps-managed replacements (a name, an ingress host, an immutable
+// selector), and (the one step whose verification
 // still needs a human, even though the tool runs it) a Postgres data
 // rewrite for genai.
 //
@@ -42,7 +43,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
@@ -55,7 +55,13 @@ type Options struct {
 	// object's (config.App.LiveName/LiveNamespace): they identify the
 	// legacy objects a step acts on.
 	LiveName, LiveNamespace string
-	Client                  client.Client
+	// IsLegacy reports whether a live object is one of the app's legacy
+	// workloads — the app's own and its chart siblings' (config.App.Family),
+	// by the same selectors classification uses. Only a step that replaces
+	// a whole family of workloads needs it (prepare-virtualizer); nil
+	// otherwise.
+	IsLegacy func(*unstructured.Unstructured) bool
+	Client   client.Client
 	// Execer runs a Query step's command in its target pod; nil unless a
 	// step with a Query is actually invoked.
 	Execer kubeclient.Execer
@@ -167,24 +173,17 @@ func (o Operation) Apply(ctx context.Context, c client.Client) error {
 	return nil
 }
 
-// Manifest renders Object as YAML, without the server-side bookkeeping
-// (managedFields, status, last-applied-configuration) that says nothing
-// about which object it is.
-func (o Operation) Manifest() ([]byte, error) {
-	obj := o.Object.DeepCopy()
-	unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "kubectl.kubernetes.io/last-applied-configuration")
-	unstructured.RemoveNestedField(obj.Object, "status")
-	return yaml.Marshal(obj.Object)
-}
-
-// Steps are the four ported prepare preconditions, in no particular
-// order — an app names the one it needs via config.App.Prepare.
+// Steps are the prepare preconditions, in no particular order — an app
+// names the one it needs via config.App.Prepare.
 var Steps = []Step{
 	stepDatamarketAgent,
 	stepDatarest,
 	stepDLC,
 	stepGenAI,
+	stepVirtualizer,
+	stepDgAgent,
+	stepDiscovery,
+	stepLitellm,
 }
 
 // Find returns the step named name, or nil if none matches.
@@ -243,6 +242,22 @@ func legacyObjects(ctx context.Context, opts Options, gvk schema.GroupVersionKin
 		out = append(out, obj)
 	}
 	return out, nil
+}
+
+// planDeleteLegacy plans the deletion of every legacy object of the given
+// kinds CCT deployed for the app (by its CCT app id), in the order given.
+func planDeleteLegacy(ctx context.Context, opts Options, gvks ...schema.GroupVersionKind) ([]Operation, error) {
+	var ops []Operation
+	for _, gvk := range gvks {
+		objs, err := legacyObjects(ctx, opts, gvk)
+		if err != nil {
+			return nil, err
+		}
+		for _, obj := range objs {
+			ops = append(ops, deleteOp(obj))
+		}
+	}
+	return ops, nil
 }
 
 // deleteOp deletes obj — only that very object (UID precondition), in

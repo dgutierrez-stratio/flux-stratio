@@ -26,6 +26,10 @@ func TestSeedCatalog_GatedTypesDeclarePrepare(t *testing.T) {
 		{"datamarket-agent", "prepare-datamarket-agent"},
 		{"dlc-entity", "prepare-dlc"},
 		{"bdl-datarest", "prepare-datarest"},
+		{"virtualizer", "prepare-virtualizer"},
+		{"dg-agent", "prepare-dg-agent"},
+		{"discovery", "prepare-discovery"},
+		{"litellm", "prepare-litellm"},
 	}
 	for _, c := range cases {
 		typ := cat.Find(c.typ)

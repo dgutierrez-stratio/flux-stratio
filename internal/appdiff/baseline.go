@@ -57,6 +57,16 @@ func WorkloadEnvFile(kind, name string) string {
 	return workloadEnvFilePrefix + strings.ToLower(kind) + "." + name + workloadEnvFileSuffix
 }
 
+// WorkloadOfEnvFile is the workload name a WorkloadEnvFile name was made for
+// ("env-vars.deployment.web.env" -> "web"), or name itself when it isn't one.
+func WorkloadOfEnvFile(name string) string {
+	if !IsWorkloadEnvFile(name) {
+		return name
+	}
+	_, workload, _ := strings.Cut(strings.TrimSuffix(strings.TrimPrefix(name, workloadEnvFilePrefix), workloadEnvFileSuffix), ".")
+	return workload
+}
+
 // IsWorkloadEnvFile reports whether name is a WorkloadEnvFile name.
 func IsWorkloadEnvFile(name string) bool {
 	return name != mergedEnvFile &&

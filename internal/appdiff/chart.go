@@ -19,6 +19,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/render"
+	"github.com/Stratio/flux-stratio/internal/ui"
 	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
 
@@ -56,7 +57,11 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 	result := diff.ChartDiff(diff.ChartDiffInput{
 		Rendered: renderedDocs, Live: live, Files: files,
 		ValuesRoot: opts.App.ValuesRoot, HRName: opts.App.Object, Exclude: opts.App.Exclude,
-		Values: values, DefaultValues: defaults,
+		Values: values, DefaultValues: defaults, Defines: diff.ScanChartDefines(chartPath(opts)),
+		// An app with a patch already applied would only get a delta carried,
+		// hiding what the patch leaves different: apps migrate (which strips
+		// the patch) is the one that carries.
+		NoResourceCarry: !opts.StripTenantPatch && len(rendered.TenantPatches) > 0,
 	})
 	patched, err := verifyPatch(ctx, opts, rendered, renderedDocs, live, result)
 	if err != nil {
@@ -67,6 +72,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		Patch:             result.Patch,
 		Before:            before,
 		After:             after,
+		Items:             envComparisons(result.Workloads),
 		UnmappedDiffs:     result.UnmappedDiffs,
 		LiveOnly:          result.LiveOnly,
 		SpecDiffs:         specDiffs(opts, live, patched),
@@ -158,6 +164,16 @@ func formatComparisons(workloads []diff.WorkloadComparison) (before, after strin
 		afterParts = appendNonEmpty(afterParts, formatEnvLines(w.Live, w.Workload+"/"))
 	}
 	return strings.Join(beforeParts, "\n"), strings.Join(afterParts, "\n")
+}
+
+// envComparisons is the env comparison one workload at a time, for the views
+// that show each resource on its own.
+func envComparisons(workloads []diff.WorkloadComparison) []ui.Comparison {
+	var items []ui.Comparison
+	for _, w := range sortedComparisons(workloads) {
+		items = append(items, ui.Comparison{Env: true, Name: "env " + w.Workload, Left: formatEnvLines(w.Rendered, ""), Right: formatEnvLines(w.Live, "")})
+	}
+	return items
 }
 
 func sortedComparisons(workloads []diff.WorkloadComparison) []diff.WorkloadComparison {

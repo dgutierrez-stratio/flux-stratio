@@ -264,6 +264,18 @@ func Matches(t *config.ComponentType, obj *unstructured.Unstructured) bool {
 		selectorMatches(t.Match.Annotations, obj.GetAnnotations())
 }
 
+// MatchesAny reports whether obj is selected by any of matches — how a
+// prepare step recognises every legacy workload of an app's family
+// (config.App.Family) with the same rules classification uses.
+func MatchesAny(matches []config.Match, obj *unstructured.Unstructured) bool {
+	for _, m := range matches {
+		if matchKinds(m.Kinds, obj) && selectorMatches(m.Labels, obj.GetLabels()) && selectorMatches(m.Annotations, obj.GetAnnotations()) {
+			return true
+		}
+	}
+	return false
+}
+
 func kindMatches(t *config.ComponentType, obj *unstructured.Unstructured) bool {
 	return matchKinds(t.Match.Kinds, obj)
 }

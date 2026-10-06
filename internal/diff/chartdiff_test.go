@@ -3,6 +3,7 @@ package diff
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -501,5 +502,42 @@ func TestSetDotPath_ReusesExistingIntermediateMaps(t *testing.T) {
 	want := map[string]any{"a": map[string]any{"existing": "keep", "b": "value"}}
 	if !reflect.DeepEqual(root, want) {
 		t.Errorf("root = %+v, want %+v", root, want)
+	}
+}
+
+// A variable with no .Values path says what its chart line is made of, so a
+// reader can tell a value nothing sets from one a few values build.
+func TestChartDiff_NoPathSaysWhatTheChartLineIs(t *testing.T) {
+	file := scanChartFile(strings.Join([]string{
+		"FIXED: https://governance.keos-core:61000/discovery",
+		"RELEASE: {{ .Release.Name }}",
+		`COMPOSED: jdbc:postgresql://{{ include "pg.host" . }}/db`,
+	}, "\n"))
+	file.Path = "env_vars.yaml"
+	vars := map[string]any{"FIXED": "r1", "RELEASE": "r2", "COMPOSED": "r3", "NOT_IN_A_FILE": "r4"}
+	docs := []*unstructured.Unstructured{
+		configMapDoc("cfg", vars),
+		deploymentDoc("app", []any{map[string]any{"name": "main", "envFrom": []any{
+			map[string]any{"configMapRef": map[string]any{"name": "cfg"}},
+		}}}),
+	}
+	result := ChartDiff(ChartDiffInput{
+		Rendered: docs, Files: []ChartFile{file}, HRName: "hr",
+		Defines: map[string]string{"pg.host": "{{ .Values.dependencies.postgres.name }}"},
+		Live: []LiveWorkloadEnv{liveFor(docs, "app", map[string]string{
+			"FIXED": "l1", "RELEASE": "l2", "COMPOSED": "l3", "NOT_IN_A_FILE": "l4",
+		})},
+	})
+	got := map[string]UnmappedDiff{}
+	for _, u := range result.UnmappedDiffs {
+		got[u.Name] = u
+	}
+	for name, want := range map[string]NoPathOrigin{"FIXED": OriginFixed, "RELEASE": OriginRelease, "COMPOSED": OriginComposed, "NOT_IN_A_FILE": OriginUnknown} {
+		if got[name].Origin != want {
+			t.Errorf("%s: origin = %q, want %q (%+v)", name, got[name].Origin, want, got[name])
+		}
+	}
+	if !reflect.DeepEqual(got["COMPOSED"].Sources, []string{"dependencies.postgres.name"}) {
+		t.Errorf("COMPOSED sources = %v", got["COMPOSED"].Sources)
 	}
 }

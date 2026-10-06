@@ -58,7 +58,8 @@ flux stratio config init --base /path/to/gitops --cluster eosdev --tenant strati
 # Confirm binaries, catalog, environment, repo layout, cluster access, that the repository checkouts are at the revisions the cluster runs (a warning), and the tenant file are all in order
 flux stratio doctor
 
-# No tenant file yet? Scan the live, not-yet-migrated cluster for one
+# No tenant file yet? Scan the live, not-yet-migrated cluster for one. If the file exists, it is
+# completed instead (only additions; --dry-run shows them first)
 flux stratio tenant import --output /path/to/keos-fleet/clusters/eosdev/tenants/config/stratio.yaml
 
 # Capture live state before touching anything, for the record and for --baseline diffing later
@@ -146,7 +147,7 @@ piping or redirecting a command's output never captures progress noise along wit
 | `flux stratio version` | | Print the flux-stratio version |
 | `flux stratio doctor` | | Check binaries, catalog, environment, repo layout, chart paths, that each excluded `spec.values` path exists in its chart (a warning), catalog types, the kustomization paths their templates render, cluster access and the tenant file are all in order |
 | `flux stratio config init` | `--dir`, `--force` | Write `catalog.yaml` (seeded with the known Stratio component types) and `environment.yaml` |
-| `flux stratio tenant import` | `--size`, `--output`, `--force` | Scan a live, not-yet-migrated cluster and render a tenant `ResourceSetInputProvider` skeleton |
+| `flux stratio tenant import` | `--size`, `--output`, `--force`, `--dry-run` | Scan a live, not-yet-migrated cluster and render a tenant `ResourceSetInputProvider` skeleton, or, when `--output` exists, add to it only what it lacks |
 | `flux stratio apps diff <name>` | `--baseline`, `--drift`, `--view`, `--as` | Pre-migration: compare desired state against live (or a backup, with `--baseline`). Post-migration: `--drift` compares live right now directly against a backup, no GitOps rendering. `--view unified\|patch\|meld` picks how it's shown |
 | `flux stratio apps backup <name> \| --catalog \| --all` | `--dir`, `--as` | Capture an app's live legacy state to disk (`--catalog`: every live object a catalog type selects; `--all`: that plus every other live object the cluster scan finds, unfiltered) |
 | `flux stratio apps migrate <name> \| --all` | `--dry-run`, `-y`/`--yes`, `--accept-warnings`, `--continue-on-error`, `--as`, `--baseline`, `--dir` | Diff an app, run its declared prepare step (if any), and splice the resulting patch into the tenant file. `--baseline` computes the patch from a backup instead of live — for a component Flux already reconciled unpatched |
@@ -163,9 +164,14 @@ environment, so one reviewed copy can be shared across a team.
 
 `tenant import` is named to avoid confusion with flux-keos's own `tenant create`, which scaffolds a
 brand-new tenant from a template; this command instead reads a live, not-yet-migrated cluster and
-imports what it finds there. It refuses to overwrite an existing `--output` file without `--force`
-— regenerating drops any hand-authored fields, comments or patches (with no `--output` at all, it
-prints to stdout instead, so it can never clobber anything by default).
+imports what it finds there. With no `--output` it prints the skeleton to stdout; with an `--output`
+that doesn't exist it writes it. With an `--output` that exists it *completes* the file: it adds what
+is missing (config fields the templates read, dependencies, the storage type, top-level fields) and
+nothing else — no removal, reordering, uncommenting or overwriting, so the added lines are the whole
+`git diff`, and a second run changes nothing. Components live on the cluster that the file doesn't
+declare are added as new entries (each makes Flux deploy that component, so read the result or use
+`--dry-run`, which shows the additions as a diff without writing). `--force` regenerates the file from scratch, dropping any hand-authored fields,
+comments or patches.
 
 `apps backup` finds live objects by scanning the cluster directly (never by rendering the app, and
 never through the tenant file). `--catalog` captures every instance a catalog type's selectors
@@ -175,23 +181,25 @@ CCT, or anything else still live on a not-yet-migrated cluster). A catalog insta
 identically either way — same directory, same shape `apps diff --baseline` expects.
 
 `apps diff` answers two different questions, each its own flag (`flux stratio apps diff --help`
-covers this in detail): the default (and `--baseline`) compares the *rendered GitOps desired
-state* against something live-ish — the live cluster, or a backup standing in for it — the
-pre-migration question `apps migrate` needs answered to compute a patch. `--drift` compares the
+covers this in detail): the default (and `--baseline`) compares what the *tenant file renders*
+— its patch included, if it has one — against something live-ish — the live cluster, or a backup
+standing in for it: before migrating, what `apps migrate` would write; after, what the patch
+still leaves different (comment the patch out to compare against plain GitOps). `--drift` compares the
 live cluster *right now* directly against a backup, with no GitOps rendering at all — the
 post-migration question, worth asking once Flux already reconciles the desired side and what you
 actually want to know is whether anything has changed since a known-good snapshot. `--baseline`/
 `--drift` don't require the full backup path: `--baseline latest` (or `--drift latest`)
 auto-locates the app's most recent capture, and a partial path — an app's own backup directory, or
 the overall `backups/` root — resolves the same way. `--view` picks how the result is shown —
-`unified` (default, a terminal diff), `patch` (the raw patch YAML `apps migrate` would write;
+`unified` (default, a terminal diff whose `---`/`+++` lines name the two sides; coloured on a terminal), `patch` (the raw patch YAML `apps migrate` would write;
 invalid with `--drift`), or `meld` (opens [meld](https://meldmerge.org/) instead, even when there are no differences, so
-you can inspect both sides) — independently of which comparison ran.
+you can inspect both sides; an app of several resources opens as one window with a tab for every workload env and spec: the environment variables first, then the specs, what differs before what is identical, which is marked) — independently of which comparison ran.
 
 ### How `apps migrate` computes a patch — and why order matters
 
 A patch is the set of legacy values the GitOps render doesn't already produce. `apps migrate`
-(and `apps diff --view patch`, which shows exactly what it would write) computes it like this:
+(`apps migrate --dry-run` shows exactly what it would write; `apps diff --view patch` does too
+while the app has no patch yet — with one, `diff` compares the tenant file as it is) computes it like this:
 
 1. **Desired side:** the component is rendered from the tenant file *without* its existing patch
    for the object's kind — the one `apps migrate` replaces (patches are replaced by
@@ -199,8 +207,8 @@ A patch is the set of legacy values the GitOps render doesn't already produce. `
    what the existing patch already set.
 2. **Legacy side:** the live cluster, or a backup with `--baseline`.
 3. **Result:** if the tenant file already carries exactly that patch, there is nothing to do — so
-   running `apps migrate` twice converges (`apps diff --view meld` still shows the differences that
-   patch covers, labelling the desired side `desired state without tenant patch`). Otherwise the patch is written in full, replacing the old
+   running `apps migrate` twice converges (`apps diff` compares with the patch applied, so it
+   reports no differences). Otherwise the patch is written in full, replacing the old
    one, with every comment in the tenant file preserved.
 
 **Back up, then migrate each component *before* pushing it to the tenant file unpatched.** Once a
@@ -247,7 +255,7 @@ and the patch is written to the tenant file: a step may delete the very live wor
 read from (`prepare-dlc` deletes the legacy DLC Deployment), so the patch is saved first. If the step
 then fails or is declined, the tenant file already carries the patch; don't commit it until running
 `apps migrate <name>` again finishes the step. An automated step first lists every operation it would
-perform (on stderr) and the live manifest of each object it acts on (on stdout), then asks before
+perform (on stderr; never the objects' manifests — use `kubectl get … -o yaml` to inspect one), then asks before
 running exactly those, backing the app up (as `apps backup` would) right before it changes anything;
 `--dry-run` stops after the list. A step that runs a database query (`prepare-genai`'s Postgres data
 rewrite) shows the SQL and the pod it will run against and asks before running it, then shows the
@@ -257,7 +265,11 @@ real output and asks again; `--yes` answers neither question.
 differences needing review, unresolved dependencies, a gosec-agent patch the legacy client left in the
 parent entry's `patches`) stops unless `--accept-warnings` is also given. Differences an app's `exclude`
 keeps out of the patch on purpose are listed as `excluded by the catalog: …` and are not warnings.
-A declined prompt leaves the app not migrated, which the command's exit status reports.
+A declined *patch* prompt leaves the app not migrated, which the command's exit status reports. A declined
+*prepare-step* prompt only skips that step: the migration goes on without it (the patch is written), a warning
+says what is left undone, and the step is listed again at the end of the run — do it by hand, or run
+`apps migrate <name>` again, which finds the patch up to date and goes straight to the step. `--skip-prepare`
+skips every step without asking.
 
 ## Build from source
 

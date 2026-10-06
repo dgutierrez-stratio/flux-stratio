@@ -2,17 +2,115 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`prepare-litellm`: the legacy LiteLLM Deployment is replaced by `apps migrate`.** Same problem and same helper as
+  `prepare-discovery` and `prepare-dg-agent` (`replaceLegacyDeployment`): the chart changes the Deployment's immutable
+  selector under the legacy name `genai-litellm`. It is found by CCT's app id, never a Flux-managed one, asks like every
+  prepare step (no skips only that step) and plans nothing once Flux owns the Deployment. The legacy ingress stays: its
+  host (`genai.<domain>`) is not the chart's. A `catalog.yaml` seeded before it needs `config init --force`.
+* **The console diff says what it compares and where.** `apps diff`'s default view (and the preview of `apps migrate`
+  and `tenant import --dry-run`) was a bare `diff -u`: nothing said which side was which, the `@@ -171,7 +171,7 @@`
+  headers were line numbers, three lines of unrelated neighbouring variables surrounded every change, and it was
+  plain text. Now: (1) a header names the sides — `--- desired state (tenant file as rendered)` / `+++ live cluster`
+  (or `backup`, `backup`/`live now` for `--drift`, `tenant file (current)`/`(with the change)` for a tenant-file
+  edit); (2) on a terminal that hasn't opted out (`NO_COLOR`), `-` is red, `+` green and headers cyan, and plain text
+  everywhere else, piped or redirected; (3) for a chart a header `@@ virtualizer-monitor @@` names the workload where
+  it changes and the context lines are dropped, and for a manifest each hunk is headed with the YAML keys around its
+  first change (`@@ -20,8 +20,7 @@ backup.pgbackrest`); (4) within a removed/added pair for the same key, the part of
+  the value that differs is highlighted (whole words, `false`/`true`; a lone `_` for `-` stays narrow). Plain text
+  carries the same lines as before. `--view patch` and `--view meld` are unchanged.
+* **`prepare-discovery`: the legacy Discovery Deployment is replaced by `apps migrate`.** Its chart changes the
+  Deployment's immutable selector under the same name, so Flux couldn't update it in place. The step deletes it
+  (found by CCT's app id, never a Flux-managed one, nothing planned on a re-run) and asks like every prepare step; no
+  skips only that step. Its legacy ingress stays: its host and path differ from the chart's, so nothing collides.
+  `prepare-dg-agent` and `prepare-discovery` now share one helper, `replaceLegacyDeployment`, the pattern for the
+  next app with only this problem. A `catalog.yaml` seeded before it needs `config init --force` (`doctor` says so).
+* **`apps diff --view meld` opens one tab per resource.** A chart-mode app (`dg-hdfs-agent`, `virtualizer`, genai, …)
+  used to open a single meld comparison with every workload's env vars and then every workload's spec one after the
+  other. It now opens one meld window with a tab for every resource — `env <workload>` and, with `--drift`, `spec
+  <Kind>/<name>` — the environment variables first and the specs after, and in each group what differs before the identical
+  ones, named `… (identical)`: a resource left out of the window can't be told from a comparison that was lost. Each side's file is named after its label and its resource (`backup-env web.yaml` against
+  `live now-env web.yaml`; the labels are `desired state`, `live cluster`, `backup`, `live now`), as the single
+  comparison's files always were, so the tab and the panes say which side is which and what they hold. An app of one resource (a
+  CR, a single workload) opens as before. The unified diff is unchanged.
+* **Prepare steps are laid out like the review.** What a step has to say now uses the same `[ACTION]` sections as an
+  app's review — badge, title, hint, aligned table, colour, summary line — instead of free-form `►`/`⚠️` lines: the
+  operations a step would perform (`OBJECT · ACTION · KIND · NAMESPACE`), a manual step's instructions and a query
+  step's SQL (shown verbatim, never cut to fit), a step that changed the cluster (commit and push), a step that was
+  not run (declined or `--skip-prepare`), and the end-of-run table of apps that still need theirs (`APP · STEP ·
+  RUN`). The hint says what answering n does, or that the step runs without asking under `--yes`, or that a dry
+  run asks nothing. Progress lines (`backed up`, `1/2 delete …`, `complete`) stay narrated like any command's.
+* **Prepare steps list their operations and no longer print whole manifests.** `apps migrate` showed, after the
+  list of what a step would do, the full YAML of every object it acts on. It now lists only the operations
+  (`delete Deployment <ns>/<name>`) and a one-line hint to inspect one with `kubectl get … -o yaml`. Nothing goes to
+  stdout from a prepare step any more except the real output of `prepare-genai`'s SQL.
+* **Declining a prepare step skips that step, not the migration; and `dg-hdfs-agent` gets one.** Every prepare
+  prompt now says first what answering no does, and no (or a blank line) leaves that one step out: the patch is
+  still written, a warning says what is left undone and how to finish it (by hand, or `apps migrate <app>` again),
+  and the step is listed again in the end-of-run summary — the same path as `--skip-prepare`, which skips every
+  step without asking. Before, a no aborted the app (`prepare step … not confirmed; … not migrated`). `--yes`
+  still answers the automated steps' question, never `prepare-genai`'s; only that step's second question, asked
+  after the SQL ran, remains a failure. The new `prepare-dg-agent` step deletes the legacy governance agent
+  Deployment (the chart changes its immutable selector), found by CCT's app id like `prepare-dlc`; with it, the
+  selector difference of `dg-hdfs-agent` is a note instead of an action to take by hand. A `catalog.yaml` seeded
+  before it needs `config init --force` (`doctor` says so).
+* **`apps diff` and `apps migrate` lay their warnings out by what to do about them.** A review used to be a run of
+  `⚠️` lines, one per finding, with long values wrapped and different kinds mixed. It is now a few sections of
+  one shape — a badge and title with a count, a hint, and one aligned table — ordered so what needs action sits
+  last, next to the question that follows, ending in a one-line count: `[NOTE]` (nothing to do: carried
+  resources, catalog exclusions, benign settings), `[REVIEW]` (a value the patch leaves as GitOps renders it, a
+  variable only live has, Flux already managing the object, a size or dependency mismatch) and `[ACTION]` (an
+  immutable selector, a variable asking for more memory than its container's limit). Variables are listed as
+  NAME / GITOPS / LIVE, with values cut down to what differs (`…keos-core:5432/postgreskeos…` against
+  `…keos-core/postgreskeos…`). Width follows the terminal, and colour is used only on one (never with
+  `NO_COLOR`). Notes are one line saying what there is. `-v` adds to the same layout, never changes it: it lists
+  the notes and adds a **WHY** column to the tables of variables, saying why each one is there (below). Reviews
+  and actions are always shown: they gate `--yes`.
+* **A variable "with no .Values path" now says why, with `-v`.** The chart's own line for it is read: **fixed in
+  the chart** (written out, nothing sets it), **follows the release's name or namespace** (changes only with the
+  HelmRelease's name or namespace), or **built from** the values listed (no single value sets it; the chart's
+  helpers are followed, even those of a library chart taken from a local directory). The old hint, "the chart
+  has no value that sets them", was wrong for the last kind.
+* **`prepare-virtualizer`: the virtualizer's legacy Deployments are replaced by `apps migrate`, not by hand.** The chart
+  renders the server, `virtualizer-monitor` and `virtualizer-ui` as one release, each under a new immutable
+  selector and the legacy Deployments' names: an upgrade meeting one fails, and Flux's rollback then fails too
+  (`original object Job … prerequisites-N not found`; the chart names that Job after the release revision), which
+  hides the real error. The new step deletes the family's legacy Deployments, found by the type's own `match` and
+  `chart.siblings` selectors (new `config.App.Family`, `prepare.Options.IsLegacy`) rather than by one CCT app id, so
+  it still finds the monitor and ui after the server was migrated; re-running it after the cutover plans nothing.
+  Ingresses and Services are left alone. It sets `ReplacesWorkloads`, so the selector warnings become notes.
+  `tenant import` warns, when it switches the siblings on (`uiEnabled: true`), to run `apps migrate` before
+  pushing. `doctor` warns when `catalog.yaml` lacks a prepare step the seed declares: re-run `config init --force`
+  to pick this one up.
+* **`tenant import` completes an existing tenant file instead of refusing it.** With `--output` naming a file that
+  exists, it adds only what the file lacks (config fields the component templates read, dependencies, the storage
+  type, the top-level fields) and never removes, reorders, uncomments or overwrites anything: your values win (a
+  disagreement with the cluster is a warning), commented-out component blocks stay commented out, and the lines
+  added are the only difference in `git diff`. Additions are inserted into the file's text, not re-encoded, so
+  indentation and comments survive byte for byte. Running it twice changes nothing. Components live on the cluster
+  that the file doesn't declare are added as new entries, except under a commented-out block, which stays as it
+  is (an entry makes Flux deploy the component, so read the result or use the new `--dry-run`, which prints the
+  additions as a diff and writes nothing). `--force` still regenerates the file. Without a file, or with a new
+  `--output`, it creates the skeleton as before.
+* **`tenant import` no longer drops config fields silently.** A field a template reads that has no default
+  (genai's `llmModels`, litellm's `models`, ...) is reported as a warning in both modes. The `hasKey ... else
+  <literal>` form is recognised as a default, so virtualizer's `uiEnabled` is scaffolded (a bool, not a string),
+  and it is `true` when the cluster runs the virtualizer's monitor or ui, legacy or already Helm-managed: left at
+  its default next to them, the next release removed them. The knowledge of which key switches a chart's siblings
+  on is the new catalog field `chart.enabledBy` (seeded on the virtualizer type; see `docs/config-reference.md`);
+  a `catalog.yaml` seeded before the field existed inherits the seed's value for the same type, so it needs no
+  re-seeding.
 * **`--help` rewritten for every command.** Each command now says what it does and whether it writes anything,
-  lists every mode and modifier (`apps diff`'s `--baseline`/`--drift`/`--patched`/`--view`, `apps migrate`'s
+  lists every mode and modifier (`apps diff`'s `--baseline`/`--drift`/`--view`, `apps migrate`'s
   `--dry-run`/`--yes`/`--accept-warnings`/`--skip-prepare`/`--all`/`--continue-on-error`, ...), and ends with
   examples; the root help gives the order of work. Flag descriptions are one line, usage lines read
   `flux stratio ...`, and a test keeps every command documented and every flag brief.
-* **`apps diff --patched` compares the desired state *with* the tenant patch applied.** By default the
-  desired side is rendered without the tenant file's patch for the object's kind (so `migrate` always computes
-  the whole patch), which makes `--view meld` show the differences the patch is there to close. `--patched`
-  renders it as Flux would, so you can see what is still different from live after migrating (the meld also
-  shows the settings only the GitOps side has, which a patch can't override). Not valid with `--drift` or
-  `--view patch`.
+* **`apps diff` compares the tenant file as it is.** The desired side includes the app's patch when the file has
+  one (as Flux applies it), so a migrated app reports "no differences" and a difference means something the patch
+  leaves different from live; with no patch the output is what it always was. To compare against plain GitOps,
+  comment the patch out; `apps migrate --dry-run` shows the whole patch it would write. `apps migrate` itself is
+  unchanged: it still renders the pristine base so the patch it writes is always the whole one. There is no flag
+  for any of this. An app that already has a patch no longer carries live resources into a diff's patch (that
+  would hide what the patch leaves different), so they are reported as differences.
 * **Chart-mode `apps diff` / `apps migrate` compare more than env vars.** Each live workload's container
   resources (requests/limits, compared as quantities), image and replicas are compared with the rendered
   workload, so a migration that changes them is no longer reported as "nothing to migrate". Risky

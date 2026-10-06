@@ -106,6 +106,12 @@ type Chart struct {
 	// can compare it with its own rendered workload. Each must select
 	// Deployment/StatefulSet/DaemonSet kinds only.
 	Siblings []Match `yaml:"siblings,omitempty"`
+	// EnabledBy names the tenant-file config key (e.g. "uiEnabled") that
+	// switches the siblings' workloads on in the chart. `tenant import`
+	// scaffolds it true when any sibling runs live — legacy or already
+	// Helm-managed — and false otherwise, so a missing key can't make the
+	// next release remove them. Needs Siblings.
+	EnabledBy string `yaml:"enabledBy,omitempty"`
 }
 
 // Match selects live objects: an object matches when its kind is one of
@@ -230,6 +236,32 @@ func (t ComponentType) SiblingMatches() []Match {
 	return t.Chart.Siblings
 }
 
+// EnabledBy is Chart.EnabledBy, or "" for a manifest-mode type.
+func (t ComponentType) EnabledBy() string {
+	if t.Chart == nil {
+		return ""
+	}
+	return t.Chart.EnabledBy
+}
+
+// SiblingNames returns the workload name of every sibling: the
+// application_model annotation value its selector requires, which for CCT
+// is also the Deployment's name, and stays the name once Helm manages the
+// workload (the legacy annotations are gone by then, so this is how a
+// migrated sibling is still recognized).
+func (t ComponentType) SiblingNames() []string {
+	var names []string
+	for _, m := range t.SiblingMatches() {
+		if m.Annotations == nil {
+			continue
+		}
+		if name := m.Annotations.MatchLabels[annModel]; name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 func orDefault(v, def string) string {
 	if v == "" {
 		return def
@@ -300,6 +332,10 @@ func (c Catalog) validate() error {
 			add("chart.path %q: chart paths are relative to the charts repository root now (repos.charts), so write %q; "+
 				"re-run `flux stratio config init --force` to re-seed the catalog",
 				t.Chart.Path, strings.TrimPrefix(t.Chart.Path, RepoCharts+"/"))
+		}
+
+		if t.EnabledBy() != "" && len(t.SiblingMatches()) == 0 {
+			add("chart.enabledBy: %q needs chart.siblings — it names the key that switches the siblings on", t.EnabledBy())
 		}
 
 		for j, name := range t.MemoryEnv {

@@ -1,6 +1,10 @@
 package tenantimport
 
-import "github.com/Stratio/flux-stratio/internal/catalog"
+import (
+	"strconv"
+
+	"github.com/Stratio/flux-stratio/internal/catalog"
+)
 
 // enrich applies each entry's schema: resolves its declared dependencies
 // against other discovered entries, fills extra config fields from
@@ -10,7 +14,8 @@ import "github.com/Stratio/flux-stratio/internal/catalog"
 // including a "governance*" dep, which this catalog never registers as a
 // component type — is still emitted with an empty name and a warning, so
 // the generated YAML's structure is always complete; the operator fills
-// it in by hand.
+// it in by hand. A config field with no default is never dropped silently:
+// it is warned about.
 func enrich(cat *catalog.Catalog, components Components, warn func(string, ...any)) {
 	for key, entries := range components {
 		schema, ok := cat.Schemas[key]
@@ -60,10 +65,31 @@ func enrichEntry(schema catalog.Schema, entry *Entry, components Components, war
 		if _, already := entry.ExtraConfig[field.Key]; already {
 			continue
 		}
-		if field.HasDefault {
-			entry.ExtraConfig[field.Key] = field.Default
+		if !field.HasDefault {
+			warn("%s: config %q has no default; set it by hand", entry.Name, field.Key)
+			continue
 		}
+		entry.ExtraConfig[field.Key] = defaultValue(field)
 	}
+}
+
+// defaultValue is the YAML value a field's template default stands for: a
+// quoted default (`default "false"`) is a string, as the template wrote it;
+// a bare literal (`<< else >>false<< end >>`) is a bool or a number.
+func defaultValue(f catalog.ExtraConfigField) any {
+	if !f.Bare {
+		return f.Default
+	}
+	if b, err := strconv.ParseBool(f.Default); err == nil && (f.Default == "true" || f.Default == "false") {
+		return b
+	}
+	if n, err := strconv.ParseInt(f.Default, 10, 64); err == nil {
+		return n
+	}
+	if n, err := strconv.ParseFloat(f.Default, 64); err == nil {
+		return n
+	}
+	return f.Default
 }
 
 func schemaHasStorageType(schema catalog.Schema, storageType string) bool {

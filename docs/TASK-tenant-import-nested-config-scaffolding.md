@@ -1,5 +1,8 @@
 # Investigation: `tenant import` can't scaffold nested/structured component config
 
+> **Update:** point 3 below (warn, always, when a field has no usable default) landed with
+> `docs/TASK-tenant-import-idempotent-merge.md`; the nested scaffolding shape (points 1, 2, 4) is still open.
+
 ## Summary
 
 `tenant import` (`internal/tenantimport`) scaffolds a tenant-file skeleton from a live cluster

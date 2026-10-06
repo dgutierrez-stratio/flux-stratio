@@ -275,3 +275,85 @@ func TestDiff_ChartMode_SelectorDifference(t *testing.T) {
 		})
 	}
 }
+
+const rsetOutputWithTenantPatch = `
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps-psql-gosec-agent
+  namespace: stratio-datastores
+spec:
+  path: components/gosec-agent/app/overlays/postgres/S
+  patches:
+    - patch: |
+        kind: HelmRelease
+        metadata:
+          name: psql-gosec-agent
+        spec:
+          values:
+            gosecAgent:
+              general:
+                log:
+                  level: INFO
+      target:
+        kind: HelmRelease
+`
+
+// withTenantPatch is specCarryOptions for a tenant file that already patches the app.
+func withTenantPatch(t *testing.T) (Options, *appsv1.Deployment) {
+	opts, dep := specCarryOptions(t)
+	opts.Runner = helmSim{&runner.Fake{Responses: map[string]runner.FakeResponse{
+		"flux-operator": {Stdout: []byte(rsetOutputWithTenantPatch)},
+		"flux":          {Stdout: []byte(kustomizationBuildOutputHelmRelease)},
+		"helm":          {Stdout: []byte(helmTemplateOutputWithSpec)},
+	}}}
+	opts.Client = fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(dep).Build()
+	return opts, dep
+}
+
+// apps diff compares the tenant file as it is: with a patch in place it is
+// applied (rendered once), what the diff computes is only a delta over it,
+// so there is no "whole patch" to compare the existing one with and the live
+// resources are reported as differences instead of carried into the delta.
+func TestDiff_TenantPatchIsAppliedByDefault(t *testing.T) {
+	opts, _ := withTenantPatch(t)
+
+	result, err := Diff(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Diff returned error: %v", err)
+	}
+	if result.ExistingPatches != 1 {
+		t.Errorf("ExistingPatches = %d, want the tenant's one patch", result.ExistingPatches)
+	}
+	if result.UpToDate || result.ObsoletePatches != 0 || len(result.DroppedFromExisting) != 0 {
+		t.Errorf("UpToDate/Obsolete/Dropped = %v/%d/%v, want none: they compare against the whole patch", result.UpToDate, result.ObsoletePatches, result.DroppedFromExisting)
+	}
+	if len(result.CarriedResources) != 0 {
+		t.Errorf("CarriedResources = %+v, want none: a delta must not hide what the patch leaves different", result.CarriedResources)
+	}
+	if d, ok := specsByField(result.SpecDiffs)["resources.limits.memory"]; !ok || d.Severity != diff.SpecRisk {
+		t.Errorf("SpecDiffs = %+v, want the memory limit still reported as a risk", result.SpecDiffs)
+	}
+}
+
+// apps migrate renders the pristine base instead (StripTenantPatch) and
+// carries the resources into the whole patch, whatever the file holds.
+func TestDiff_StripTenantPatchComputesTheWholePatch(t *testing.T) {
+	opts, _ := withTenantPatch(t)
+	opts.StripTenantPatch = true
+
+	result, err := Diff(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Diff returned error: %v", err)
+	}
+	if result.ExistingPatches != 1 {
+		t.Errorf("ExistingPatches = %d, want 1", result.ExistingPatches)
+	}
+	if len(result.CarriedResources) != 1 {
+		t.Errorf("CarriedResources = %+v, want the live resources carried into the whole patch", result.CarriedResources)
+	}
+	if result.Patch == nil {
+		t.Error("Patch = nil, want the whole patch")
+	}
+}

@@ -1,0 +1,53 @@
+# Tenant file — hand-authored, mid-migration; keep it tidy.
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+  namespace: flux-system
+  labels:
+    keos.stratio.com/resourceset-type: tenant-config
+spec:
+  type: Static
+  defaultValues:
+    # pinned by the release process, not by tenant import
+    universeVersion: 15.1.0
+    universePrereleaseSuffix: -rc1
+    tenantName: stratio
+    size: S
+    sopsSecretProvided: true
+    userEmail: me@stratio.com
+    userId: me
+    userName: me
+    internalS3BucketName: ""
+    components:
+      postgres:
+      - name: psql
+        config:
+          dependencies:
+            pgbackuprepository:
+              name: pgbackuprepository
+        patches:
+          # migrated by hand
+          - target:
+              kind: PgCluster
+            patch: |-
+              - op: replace
+                path: /spec/replicas
+                value: 2
+      pgbackuprepository:
+      - name: pgbackuprepository
+      virtualizer:
+      - name: virtualizer # the server, already migrated
+        config:
+          dependencies:
+            postgres:
+              name: psql
+          uiEnabled: true
+      # kafka is enabled once its topics are reviewed
+      # kafka:
+      # - name: kafka1
+      #   config:
+      #     kafkaClusterExposed: "true"
+      #     topics: []
+      # hdfs:
+      # - name: hdfs1

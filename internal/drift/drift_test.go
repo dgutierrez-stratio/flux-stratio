@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/discovery"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
 func mustScheme(t *testing.T) *apiruntime.Scheme {
@@ -405,6 +407,78 @@ func TestCompare_PerWorkloadEnvFiles_ShowSiblingDrift(t *testing.T) {
 	if result.Before != wantBefore || result.After != wantAfter {
 		t.Errorf("Before = %q, After = %q, want %q / %q", result.Before, result.After, wantBefore, wantAfter)
 	}
+	// The same comparison, one workload at a time: what meld opens as tabs.
+	wantItems := []ui.Comparison{
+		{Env: true, Name: "env genai-api", Left: "VAULT_ROLE=api-role\n", Right: "VAULT_ROLE=api-role\n"},
+		{Env: true, Name: "env genai-ui", Left: "VAULT_ROLE=ui-role\n", Right: "VAULT_ROLE=changed-ui-role\n"},
+	}
+	if !reflect.DeepEqual(result.Items, wantItems) {
+		t.Errorf("Items = %+v, want %+v", result.Items, wantItems)
+	}
+}
+
+// TestCompare_PerWorkloadItems_AWorkloadOnOneSideIsAnEmptySide: a sibling
+// the backup has and live lost (or the reverse) is still its own tab, the
+// missing side empty.
+func TestCompare_PerWorkloadItems_AWorkloadOnOneSideIsAnEmptySide(t *testing.T) {
+	backupDir, liveDir := t.TempDir(), t.TempDir()
+	writeBackupFile(t, backupDir, "env-vars.env", "A=1\n")
+	writeBackupFile(t, backupDir, "env-vars.deployment.web.env", "A=1\n")
+	writeBackupFile(t, backupDir, "env-vars.deployment.old.env", "B=1\n")
+	writeBackupFile(t, liveDir, "env-vars.env", "A=1\n")
+	writeBackupFile(t, liveDir, "env-vars.deployment.web.env", "A=1\n")
+	writeBackupFile(t, liveDir, "env-vars.deployment.new.env", "C=1\n")
+
+	result, err := compare(backupDir, liveDir, []string{"env-vars.env", "env-vars.deployment.web.env", "env-vars.deployment.new.env"})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	want := []ui.Comparison{
+		{Env: true, Name: "env new", Left: "", Right: "C=1\n"},
+		{Env: true, Name: "env old", Left: "B=1\n", Right: ""},
+		{Env: true, Name: "env web", Left: "A=1\n", Right: "A=1\n"},
+	}
+	if !reflect.DeepEqual(result.Items, want) {
+		t.Errorf("Items = %+v, want %+v", result.Items, want)
+	}
+}
+
+// TestCompare_MergedEnvIsOneItem: a backup with no per-workload env files
+// compares the merged env-vars.env, as one resource next to the specs.
+func TestCompare_MergedEnvIsOneItem(t *testing.T) {
+	manifest := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: %d\n"
+	backupDir, liveDir := t.TempDir(), t.TempDir()
+	writeBackupFile(t, backupDir, "env-vars.env", "A=1\n")
+	writeBackupFile(t, backupDir, "deployment.yaml", fmt.Sprintf(manifest, 1))
+	writeBackupFile(t, liveDir, "env-vars.env", "A=2\n")
+	writeBackupFile(t, liveDir, "deployment.yaml", fmt.Sprintf(manifest, 2))
+
+	result, err := compare(backupDir, liveDir, []string{"env-vars.env", "deployment.yaml"})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	want := []ui.Comparison{
+		{Env: true, Name: "env vars", Left: "A=1\n", Right: "A=2\n"},
+		{Name: "spec Deployment/web", Left: "replicas: 1\n", Right: "replicas: 2\n"},
+	}
+	if !reflect.DeepEqual(result.Items, want) {
+		t.Errorf("Items = %+v, want %+v", result.Items, want)
+	}
+}
+
+// TestCompare_ManifestModeHasNoItems: a CR is one resource; there is
+// nothing to split into tabs.
+func TestCompare_ManifestModeHasNoItems(t *testing.T) {
+	backupDir, liveDir := t.TempDir(), t.TempDir()
+	writeBackupFile(t, backupDir, "cr.yaml", "kind: Thing\nspec:\n  a: 1\n")
+	writeBackupFile(t, liveDir, "cr.yaml", "kind: Thing\nspec:\n  a: 2\n")
+	result, err := compare(backupDir, liveDir, []string{"cr.yaml"})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("Items = %+v, want none", result.Items)
+	}
 }
 
 // TestCompare_WorkloadManifests_ShowSpecDriftByIdentity: an image or
@@ -443,6 +517,16 @@ func TestCompare_WorkloadManifests_ShowSpecDriftByIdentity(t *testing.T) {
 			t.Errorf("genai-api should be matched across deployment.yaml and its workload file: %q", side)
 		}
 	}
+	// One spec tab per workload both sides hold, matched by identity.
+	var specs []string
+	for _, it := range result.Items {
+		if strings.HasPrefix(it.Name, "spec ") {
+			specs = append(specs, it.Name)
+		}
+	}
+	if !reflect.DeepEqual(specs, []string{"spec Deployment/genai-api", "spec Deployment/genai-ui"}) {
+		t.Errorf("spec items = %v, want genai-api and genai-ui only", specs)
+	}
 }
 
 // chartsRepoAt is the default layout under base, but with the charts
@@ -451,4 +535,107 @@ func chartsRepoAt(base, charts string) config.RepoPaths {
 	repos := config.ReposUnder(base)
 	repos.Charts = charts
 	return repos
+}
+
+// meldRecorder is the meld the drift view would open: it records which
+// resources got a tab (the file each --diff names) and with what.
+type meldRecorder struct {
+	tabs  map[string][2]string
+	order []string // the tabs, in the order meld gets them
+}
+
+func (m *meldRecorder) Run(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
+	m.tabs = map[string][2]string{}
+	for i := 0; i+2 < len(args); i += 3 {
+		l, err := os.ReadFile(args[i+1])
+		if err != nil {
+			return nil, nil, err
+		}
+		r, err := os.ReadFile(args[i+2])
+		if err != nil {
+			return nil, nil, err
+		}
+		// Each file is named after its side and its resource; the tab is the
+		// resource, and the side must be right on both.
+		lb, rb := filepath.Base(args[i+1]), filepath.Base(args[i+2])
+		name, okL := strings.CutPrefix(strings.TrimSuffix(lb, ".yaml"), ui.LabelBackup+"-")
+		rname, okR := strings.CutPrefix(strings.TrimSuffix(rb, ".yaml"), ui.LabelLiveNow+"-")
+		if !okL || !okR || name != rname {
+			return nil, nil, fmt.Errorf("files %q and %q aren't named after their sides and the same resource", lb, rb)
+		}
+		m.tabs[name] = [2]string{string(l), string(r)}
+		m.order = append(m.order, name)
+	}
+	return nil, nil, nil
+}
+
+// TestCompare_EveryWorkloadGetsATabInMeld is virtualizer after its
+// migration: a server, a monitor and a ui, a change in the monitor's env
+// only, and a spec change in all three. Drift must put the env and the spec
+// of every workload in the window — the server's and the ui's env,
+// identical, included and marked as such — not just what differs: a tab
+// missing from the window can't be told from a comparison that was lost.
+func TestCompare_EveryWorkloadGetsATabInMeld(t *testing.T) {
+	manifest := func(name string, replicas int) string {
+		return fmt.Sprintf("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\nspec:\n  replicas: %d\n", name, replicas)
+	}
+	backupDir, liveDir := t.TempDir(), t.TempDir()
+	workloads := []string{"virtualizer", "virtualizer-monitor", "virtualizer-ui"}
+	var liveFiles []string
+	for _, w := range workloads {
+		envFile := "env-vars.deployment." + w + ".env"
+		writeBackupFile(t, backupDir, envFile, "A=1\n")
+		liveEnv := "A=1\n"
+		if w == "virtualizer-monitor" {
+			liveEnv = "A=2\n"
+		}
+		writeBackupFile(t, liveDir, envFile, liveEnv)
+		manifestFile := "workload.deployment." + w + ".yaml"
+		writeBackupFile(t, backupDir, manifestFile, manifest(w, 1))
+		writeBackupFile(t, liveDir, manifestFile, manifest(w, 2))
+		liveFiles = append(liveFiles, envFile, manifestFile)
+	}
+	writeBackupFile(t, backupDir, "env-vars.env", "A=1\n")
+	writeBackupFile(t, liveDir, "env-vars.env", "A=1\n")
+	liveFiles = append(liveFiles, "env-vars.env")
+
+	result, err := compare(backupDir, liveDir, liveFiles)
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	rec := &meldRecorder{}
+	if err := ui.OpenMeld(context.Background(), rec, ui.LabelBackup, result.Before, ui.LabelLiveNow, result.After, result.Items); err != nil {
+		t.Fatalf("OpenMeld: %v", err)
+	}
+	want := []string{
+		"env virtualizer (identical)", "env virtualizer-monitor", "env virtualizer-ui (identical)",
+		"spec Deployment-virtualizer", "spec Deployment-virtualizer-monitor", "spec Deployment-virtualizer-ui",
+	}
+	if len(rec.tabs) != len(want) {
+		var got []string
+		for n := range rec.tabs {
+			got = append(got, n)
+		}
+		t.Fatalf("tabs = %v, want one for every env and spec of all three workloads: %v", got, want)
+	}
+	for _, name := range want {
+		if _, ok := rec.tabs[name]; !ok {
+			t.Errorf("no tab %q", name)
+		}
+	}
+	// Environment variables first, then the specs; in each group what
+	// differs before what is identical.
+	wantOrder := []string{
+		"env virtualizer-monitor", "env virtualizer (identical)", "env virtualizer-ui (identical)",
+		"spec Deployment-virtualizer", "spec Deployment-virtualizer-monitor", "spec Deployment-virtualizer-ui",
+	}
+	if !reflect.DeepEqual(rec.order, wantOrder) {
+		t.Errorf("tab order = %v, want %v", rec.order, wantOrder)
+	}
+	if got := rec.tabs["env virtualizer-monitor"]; got != [2]string{"A=1\n", "A=2\n"} {
+		t.Errorf("monitor env tab = %q", got)
+	}
+	if got := rec.tabs["env virtualizer-ui (identical)"]; got != [2]string{"A=1\n", "A=1\n"} {
+		t.Errorf("ui env tab = %q, want both sides, identical", got)
+	}
 }

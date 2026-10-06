@@ -178,6 +178,20 @@ func TestDiff_ChartMode_SiblingsPatchTheirOwnPaths(t *testing.T) {
 	wantAfter := "genai-api/VAULT_ROLE=stratio-genai-genai-api\ngenai-ui/VAULT_ROLE=stratio-genai-genai-ui"
 	if result.After != wantAfter {
 		t.Errorf("After = %q, want %q (each line under its own workload)", result.After, wantAfter)
+	} // The same comparison one workload at a time, with no prefix to read
+	// around: what meld opens as a tab each.
+	var names []string
+	for _, it := range result.Items {
+		names = append(names, it.Name)
+		if strings.Contains(it.Right, "/") && strings.Contains(it.Right, "genai-") {
+			t.Errorf("%s: Right = %q, want no workload prefix inside a tab of its own", it.Name, it.Right)
+		}
+	}
+	if !reflect.DeepEqual(names, []string{"env genai-api", "env genai-ui"}) {
+		t.Errorf("Items = %v, want one env tab per workload, sorted", names)
+	}
+	if got := result.Items[1].Right; got != "VAULT_ROLE=stratio-genai-genai-ui" {
+		t.Errorf("genai-ui tab, live side = %q", got)
 	}
 }
 
@@ -327,5 +341,30 @@ func TestDiff_ChartMode_UnreadableSiblingFails(t *testing.T) {
 	_, err := Diff(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "genai-ui") || !apierrors.IsForbidden(err) {
 		t.Errorf("err = %v, want the Forbidden read of genai-ui", err)
+	}
+}
+
+// TestEnvComparisons_EveryWorkloadIsAnItem: a workload whose rendered and
+// live env agree is still a comparison of its own — the views that show one
+// resource at a time (meld's tabs) must not lose it.
+func TestEnvComparisons_EveryWorkloadIsAnItem(t *testing.T) {
+	same := map[string]string{"A": "1"}
+	items := envComparisons([]diff.WorkloadComparison{
+		{Workload: "virtualizer-ui", Rendered: same, Live: same},
+		{Workload: "virtualizer", Rendered: same, Live: same},
+		{Workload: "virtualizer-monitor", Rendered: map[string]string{"A": "1"}, Live: map[string]string{"A": "2"}},
+	})
+	var names []string
+	for _, it := range items {
+		names = append(names, it.Name)
+	}
+	if !reflect.DeepEqual(names, []string{"env virtualizer", "env virtualizer-monitor", "env virtualizer-ui"}) {
+		t.Fatalf("items = %v, want all three workloads, sorted", names)
+	}
+	if items[0].Left != "A=1" || items[0].Right != "A=1" || items[2].Differs() {
+		t.Errorf("identical workloads must keep both sides: %+v", items)
+	}
+	if !items[1].Differs() {
+		t.Errorf("the monitor differs: %+v", items[1])
 	}
 }

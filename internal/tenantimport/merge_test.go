@@ -1,0 +1,368 @@
+package tenantimport
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/tenantfile"
+)
+
+func loadDoc(t *testing.T, name string) *tenantfile.Doc {
+	t.Helper()
+	doc, err := tenantfile.Load(filepath.Join("testdata", "complete", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// reload writes b to a scratch file and loads it, to feed a Complete's own
+// output back into Complete.
+func reload(t *testing.T, b []byte) *tenantfile.Doc {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tenant.yaml")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := tenantfile.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+func complete(t *testing.T, doc *tenantfile.Doc, scanned Components, live Live, opts CompleteOptions) (Report, string) {
+	t.Helper()
+	if opts.TenantName == "" {
+		opts.TenantName = "stratio"
+	}
+	r, err := Complete(doc, scanned, live, loadFixtureCatalog(t), opts)
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	out := string(doc.Text())
+	var parsed any
+	if err := yaml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("Complete produced invalid YAML: %v\n%s", err, out)
+	}
+	return r, out
+}
+
+func liveVirtualizer(enabled bool, siblings ...string) Live {
+	return Live{
+		Values:   Derived{"virtualizer": {"uiEnabled": enabled}},
+		Siblings: map[string][]string{"virtualizer": siblings},
+	}
+}
+
+func contains(list []string, sub string) bool {
+	for _, s := range list {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestComplete_PreservesEverythingAndOnlyAdds(t *testing.T) {
+	doc := loadDoc(t, "eosdev.yaml")
+	original, err := os.ReadFile(filepath.Join("testdata", "complete", "eosdev.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned := Components{
+		"virtualizer":        {{Name: "virtualizer"}},
+		"postgres":           {{Name: "psql"}},
+		"pgbackuprepository": {{Name: "pgbackuprepository"}},
+	}
+	r, got := complete(t, doc, scanned, liveVirtualizer(true, "virtualizer-monitor", "virtualizer-ui"), CompleteOptions{})
+
+	golden := filepath.Join("testdata", "complete", "eosdev.golden.yaml")
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(want) {
+		t.Errorf("completed file differs from golden:\n%s", got)
+	}
+
+	// Pure additions: every original line survives, in order.
+	if !isSubsequence(strings.Split(string(original), "\n"), strings.Split(got, "\n")) {
+		t.Errorf("the completed file is not the original plus added lines:\n%s", got)
+	}
+	for _, kept := range []string{"universeVersion: 15.1.0", "# kafka:", "#     topics: []", "# migrated by hand", "# the server, already migrated"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("lost %q", kept)
+		}
+	}
+	for _, want := range []string{"uiEnabled: true", "internalS3BucketName: \"\""} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if !contains(r.Added, "components.virtualizer[virtualizer]: config.uiEnabled: true") {
+		t.Errorf("Added = %v, want the uiEnabled addition", r.Added)
+	}
+	if !contains(r.Warnings, `dependency "pgbouncer" could not be resolved`) {
+		t.Errorf("Warnings = %v, want the unresolved pgbouncer dependency", r.Warnings)
+	}
+	if strings.Contains(got, `name: ""`) {
+		t.Error("an unresolved dependency was written as name: \"\"")
+	}
+	if !contains(r.LeftAlone, "left commented out: hdfs, kafka") {
+		t.Errorf("LeftAlone = %v, want the commented-out blocks reported", r.LeftAlone)
+	}
+}
+
+// isSubsequence reports whether every line of sub appears in full, in order.
+func isSubsequence(sub, full []string) bool {
+	i := 0
+	for _, line := range full {
+		if i < len(sub) && sub[i] == line {
+			i++
+		}
+	}
+	return i == len(sub)
+}
+
+func TestComplete_IsIdempotent(t *testing.T) {
+	scanned := Components{
+		"virtualizer": {{Name: "virtualizer"}},
+		"postgres":    {{Name: "psql"}},
+		"connectors":  {{Name: "connectors"}},
+	}
+	live := liveVirtualizer(true, "virtualizer-ui")
+	_, first := complete(t, loadDoc(t, "eosdev.yaml"), scanned, live, CompleteOptions{})
+
+	r, second := complete(t, reload(t, []byte(first)), scanned, live, CompleteOptions{})
+	if !r.Empty() {
+		t.Errorf("second run added %v, want nothing", r.Added)
+	}
+	if second != first {
+		t.Errorf("second run changed the file:\n--- first\n%s\n--- second\n%s", first, second)
+	}
+}
+
+func TestComplete_UIEnabled(t *testing.T) {
+	const base = `apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+spec:
+  defaultValues:
+    tenantName: stratio
+    size: S
+    sopsSecretProvided: false
+    internalS3BucketName: ""
+    userEmail: ""
+    userId: ""
+    userName: ""
+    components:
+      virtualizer:
+      - name: virtualizer%s
+`
+	tests := []struct {
+		name         string
+		existing     string
+		live         Live
+		wantLine     string // must be in the result
+		wantAdded    bool
+		wantWarnWith string
+	}{
+		{name: "live legacy or Helm-managed siblings", existing: "", live: liveVirtualizer(true, "virtualizer-monitor"), wantLine: "uiEnabled: true", wantAdded: true, wantWarnWith: "apps migrate virtualizer"},
+		{name: "no siblings", existing: "", live: liveVirtualizer(false), wantLine: "uiEnabled: false", wantAdded: true},
+		{name: "existing false next to live siblings is kept and warned about", existing: "\n        config:\n          uiEnabled: false", live: liveVirtualizer(true, "virtualizer-ui"), wantLine: "uiEnabled: false", wantWarnWith: "virtualizer-ui"},
+		{name: "existing true is kept", existing: "\n        config:\n          uiEnabled: true", live: liveVirtualizer(false), wantLine: "uiEnabled: true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := reload(t, []byte(strings.Replace(base, "%s", tt.existing, 1)))
+			r, got := complete(t, doc, Components{"virtualizer": {{Name: "virtualizer"}}}, tt.live, CompleteOptions{})
+			if !strings.Contains(got, tt.wantLine) {
+				t.Errorf("result lacks %q:\n%s", tt.wantLine, got)
+			}
+			if added := contains(r.Added, "config.uiEnabled"); added != tt.wantAdded {
+				t.Errorf("uiEnabled added = %v, want %v (Added %v)", added, tt.wantAdded, r.Added)
+			}
+			if tt.wantWarnWith != "" && !contains(r.Warnings, tt.wantWarnWith) {
+				t.Errorf("Warnings = %v, want one naming %q", r.Warnings, tt.wantWarnWith)
+			}
+			if tt.wantWarnWith == "" && contains(r.Warnings, "uiEnabled") {
+				t.Errorf("unexpected uiEnabled warning: %v", r.Warnings)
+			}
+		})
+	}
+}
+
+func TestComplete_CommentedOutComponentIsNeverUncommentedOrReAdded(t *testing.T) {
+	scanned := Components{"kafka": {{Name: "kafka1"}}}
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+	if strings.Contains(got, "\n      kafka:") || (strings.Contains(got, "name: kafka1\n") && !strings.Contains(got, "# - name: kafka1")) {
+		t.Errorf("kafka was re-added:\n%s", got)
+	}
+	if !strings.Contains(got, "# kafka:\n") {
+		t.Error("the commented-out kafka block did not survive")
+	}
+	if !contains(r.LeftAlone, "left commented out") || !contains(r.LeftAlone, "kafka") {
+		t.Errorf("LeftAlone = %v, want a note about kafka", r.LeftAlone)
+	}
+}
+
+func TestComplete_NoSkeletonForComponentsTheScanDidNotFind(t *testing.T) {
+	// Create would add skeleton entries for postgres' and virtualizer's
+	// dependencies; Complete must add no entry at all.
+	_, got := complete(t, loadDoc(t, "eosdev.yaml"), Components{}, Live{}, CompleteOptions{})
+	for _, key := range []string{"\n      pgbouncer:", "\n      connectors:", "\n      hdfs:"} {
+		if strings.Contains(got, key) {
+			t.Errorf("a skeleton %q was added:\n%s", strings.TrimSpace(key), got)
+		}
+	}
+}
+
+func TestComplete_UndeclaredLiveComponentIsAdded(t *testing.T) {
+	scanned := Components{"connectors": {{Name: "connectors", Deps: map[string]string{}}}}
+
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+	if !strings.Contains(got, "      connectors:\n      - name: connectors") {
+		t.Errorf("connectors not added:\n%s", got)
+	}
+	if !contains(r.Added, "components.connectors[connectors]") {
+		t.Errorf("Added = %v", r.Added)
+	}
+	if contains(r.Warnings, "already declares") {
+		t.Errorf("Warnings = %v, want none: no connectors entry existed", r.Warnings)
+	}
+}
+
+func TestComplete_UndeclaredLiveComponentUnderAKeyThatHasAnotherEntryWarns(t *testing.T) {
+	scanned := Components{"postgres": {{Name: "psql-live", Deps: map[string]string{}}}}
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+	if !strings.Contains(got, "name: psql-live") {
+		t.Errorf("psql-live not added:\n%s", got)
+	}
+	if !contains(r.Warnings, "components.postgres already declares psql") {
+		t.Errorf("Warnings = %v, want the possible-rename warning", r.Warnings)
+	}
+}
+
+func TestComplete_DependencyResolvedFromScanOrReported(t *testing.T) {
+	scanned := Components{"virtualizer": {{Name: "virtualizer"}}, "pgbouncer": {{Name: "pool-psql"}}}
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+	cfg := entryConfigOf(t, got, "virtualizer", "virtualizer")
+	deps, _ := cfg["dependencies"].(map[string]any)
+	if pg, _ := deps["pgbouncer"].(map[string]any); pg["name"] != "pool-psql" {
+		t.Errorf("resolvable dependency not added: dependencies = %v\n%s", deps, got)
+	}
+	if !contains(r.Added, "config.dependencies.pgbouncer.name: pool-psql") {
+		t.Errorf("Added = %v", r.Added)
+	}
+	// postgres was already named by the operator, differently from the scan.
+	scanned["postgres"] = []*Entry{{Name: "other-psql"}}
+	_, got = complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+	deps, _ = entryConfigOf(t, got, "virtualizer", "virtualizer")["dependencies"].(map[string]any)
+	if pg, _ := deps["postgres"].(map[string]any); pg["name"] != "psql" {
+		t.Errorf("an existing dependency name was changed: %v\n%s", deps, got)
+	}
+}
+
+func TestComplete_FieldWithoutDefaultIsReportedNotDropped(t *testing.T) {
+	// The fixture's kafka template reads "topics" with no usable default.
+	const file = `apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+spec:
+  defaultValues:
+    components:
+      kafka:
+      - name: kafka1
+`
+	r, got := complete(t, reload(t, []byte(file)), Components{}, Live{}, CompleteOptions{})
+	if !contains(r.Warnings, `config "topics" has no default`) {
+		t.Errorf("Warnings = %v, want the topics field reported", r.Warnings)
+	}
+	if !strings.Contains(got, `kafkaClusterExposed: "false"`) {
+		t.Errorf("the kafkaClusterExposed default was not added:\n%s", got)
+	}
+	if strings.Contains(got, "topics") {
+		t.Errorf("a placeholder was invented for topics:\n%s", got)
+	}
+}
+
+func TestComplete_TopLevelFieldsOnlyWhenAbsent(t *testing.T) {
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), Components{}, Live{}, CompleteOptions{Size: "M"})
+	if !contains(r.Added, "spec.defaultValues.internalS3BucketName") {
+		t.Errorf("Added = %v, want internalS3BucketName", r.Added)
+	}
+	for _, kept := range []string{"size: S\n", "sopsSecretProvided: true", "userEmail: me@stratio.com", "universePrereleaseSuffix: -rc1"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("lost or changed %q", kept)
+		}
+	}
+	if strings.Contains(got, "size: M") {
+		t.Error("an existing size was overwritten")
+	}
+}
+
+func TestCreate_DroppedFieldsWarn(t *testing.T) {
+	var warnings []string
+	components := Components{"kafka": {{Name: "kafka1", Deps: map[string]string{}}}}
+	enrich(loadFixtureCatalog(t), components, func(format string, a ...any) { warnings = append(warnings, strings.TrimSpace(format)) })
+	if !contains(warnings, "has no default") {
+		t.Errorf("warnings = %v, want one for the topics field without a default", warnings)
+	}
+}
+
+func TestDefaultValue(t *testing.T) {
+	tests := []struct {
+		field string
+		bare  bool
+		want  any
+	}{
+		{"false", true, false},
+		{"true", true, true},
+		{"3", true, int64(3)},
+		{"0.5", true, 0.5},
+		{"x", true, "x"},
+		{"false", false, "false"},
+	}
+	for _, tt := range tests {
+		got := defaultValue(catalogField(tt.field, tt.bare))
+		if got != tt.want {
+			t.Errorf("defaultValue(%q, bare=%v) = %#v, want %#v", tt.field, tt.bare, got, tt.want)
+		}
+	}
+}
+
+func catalogField(def string, bare bool) catalog.ExtraConfigField {
+	return catalog.ExtraConfigField{Key: "k", Default: def, HasDefault: true, Bare: bare}
+}
+
+// entryConfigOf parses a tenant file and returns the config of one entry.
+func entryConfigOf(t *testing.T, text, key, name string) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		t.Fatalf("result is not valid YAML: %v\n%s", err, text)
+	}
+	components := doc["spec"].(map[string]any)["defaultValues"].(map[string]any)["components"].(map[string]any)
+	entries, _ := components[key].([]any)
+	for _, e := range entries {
+		if m := e.(map[string]any); m["name"] == name {
+			cfg, _ := m["config"].(map[string]any)
+			return cfg
+		}
+	}
+	t.Fatalf("no components.%s[%s] in:\n%s", key, name, text)
+	return nil
+}

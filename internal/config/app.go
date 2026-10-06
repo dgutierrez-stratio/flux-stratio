@@ -44,6 +44,11 @@ type App struct {
 	MemoryEnv []string
 	// Notes — see ComponentType.Notes.
 	Notes string
+	// Family selects every legacy workload of this app — its type's Match
+	// and its chart siblings' — whether or not one is live now: a prepare
+	// step that replaces them needs the siblings of an app whose anchor
+	// was already migrated, which Live no longer lists.
+	Family []Match
 	// Live are the live legacy objects classified as this instance, the
 	// primary one first. Empty for an App that was never matched against
 	// a live cluster.

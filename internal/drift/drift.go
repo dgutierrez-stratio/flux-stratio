@@ -33,6 +33,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/discovery"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/ui"
 	"github.com/Stratio/flux-stratio/internal/yamldocs"
 )
 
@@ -56,6 +57,11 @@ type Options struct {
 // changed since the backup was taken."
 type Result struct {
 	Before, After string
+	// Items are the same comparison split by resource — each workload's env
+	// vars, each workload's spec — for a view that shows them one by one
+	// (apps diff --view meld opens a tab each). Empty when the app is one
+	// resource, or the capture can't be split.
+	Items []ui.Comparison
 }
 
 // Run captures opts.App's live state and compares it against the backup
@@ -127,16 +133,20 @@ func compareWorkloads(backupDir, liveDir string, liveFiles []string) (*Result, e
 		res, err = compareWorkloadEnvs(backupDir, backupEnvs, liveDir, liveEnvs)
 	} else {
 		res, err = compareText(backupDir, liveDir, "env-vars.env")
+		if err == nil {
+			res.Items = []ui.Comparison{{Env: true, Name: "env vars", Left: res.Before, Right: res.After}}
+		}
 	}
 	if err != nil {
 		return nil, err
 	}
-	before, after, err := workloadSpecs(backupDir, listFiles(backupDir), liveDir, liveFiles)
+	before, after, specs, err := workloadSpecs(backupDir, listFiles(backupDir), liveDir, liveFiles)
 	if err != nil {
 		return nil, err
 	}
 	res.Before += before
 	res.After += after
+	res.Items = append(res.Items, specs...)
 	return res, nil
 }
 
@@ -148,14 +158,14 @@ func compareWorkloads(backupDir, liveDir string, liveFiles []string) (*Result, e
 // one side has — a backup taken before siblings' manifests were captured,
 // a hand-trimmed manifest with no name — is skipped rather than reported as
 // drift.
-func workloadSpecs(backupDir string, backupFiles []string, liveDir string, liveFiles []string) (before, after string, err error) {
+func workloadSpecs(backupDir string, backupFiles []string, liveDir string, liveFiles []string) (before, after string, items []ui.Comparison, err error) {
 	backupSpecs, err := manifestSpecs(backupDir, backupFiles)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	liveSpecs, err := manifestSpecs(liveDir, liveFiles)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	var ids []string
 	for id := range liveSpecs {
@@ -168,8 +178,9 @@ func workloadSpecs(backupDir string, backupFiles []string, liveDir string, liveF
 	for _, id := range ids {
 		fmt.Fprintf(&b, "# %s (spec)\n%s", id, backupSpecs[id])
 		fmt.Fprintf(&a, "# %s (spec)\n%s", id, liveSpecs[id])
+		items = append(items, ui.Comparison{Name: "spec " + id, Left: backupSpecs[id], Right: liveSpecs[id]})
 	}
-	return b.String(), a.String(), nil
+	return b.String(), a.String(), items, nil
 }
 
 // manifestSpecs maps "<kind>/<name>" to the marshaled .spec of every
@@ -231,7 +242,45 @@ func compareWorkloadEnvs(backupDir string, backupFiles []string, liveDir string,
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Before: before, After: after}, nil
+	items, err := workloadEnvItems(backupDir, backupFiles, liveDir, liveFiles)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Before: before, After: after, Items: items}, nil
+}
+
+// workloadEnvItems is the env comparison one workload at a time: every
+// workload either side has an env file for, the side without one empty.
+func workloadEnvItems(backupDir string, backupFiles []string, liveDir string, liveFiles []string) ([]ui.Comparison, error) {
+	seen := map[string]bool{}
+	var files []string
+	for _, f := range append(append([]string(nil), backupFiles...), liveFiles...) {
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+	sort.Strings(files)
+	var items []ui.Comparison
+	for _, f := range files {
+		c := ui.Comparison{Env: true, Name: "env " + appdiff.WorkloadOfEnvFile(f)}
+		var err error
+		if has(backupFiles, f) {
+			if c.Left, err = readText(backupDir, f); err != nil {
+				return nil, err
+			}
+		}
+		if has(liveFiles, f) {
+			if c.Right, err = readText(liveDir, f); err != nil {
+				return nil, err
+			}
+		}
+		items = append(items, c)
+	}
+	// By workload, not by file name: "virtualizer-ui.env" sorts before
+	// "virtualizer.env", and the server should come before its siblings.
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items, nil
 }
 
 func concatWorkloadEnvs(dir string, files []string) (string, error) {

@@ -1,10 +1,6 @@
 package prepare
 
-import (
-	"context"
-
-	"k8s.io/apimachinery/pkg/runtime/schema"
-)
+import "context"
 
 var stepDLC = Step{
 	Name:        "prepare-dlc",
@@ -25,15 +21,5 @@ var stepDLC = Step{
 // objects keeps a re-run from deleting the GitOps dlc-entity Deployment
 // that replaced the legacy one under the same name.
 func planDLC(ctx context.Context, opts Options) ([]Operation, error) {
-	var ops []Operation
-	for _, gvk := range []schema.GroupVersionKind{gvkIngress, gvkDeployment} {
-		objs, err := legacyObjects(ctx, opts, gvk)
-		if err != nil {
-			return nil, err
-		}
-		for _, obj := range objs {
-			ops = append(ops, deleteOp(obj))
-		}
-	}
-	return ops, nil
+	return planDeleteLegacy(ctx, opts, gvkIngress, gvkDeployment)
 }

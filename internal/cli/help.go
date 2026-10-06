@@ -88,21 +88,47 @@ const doctorExample = `  flux stratio doctor
 
 const tenantLong = `Commands that create tenant artifacts. Only "import" exists today.`
 
-const tenantImportLong = `Scans the live, not-yet-migrated cluster and renders a skeleton of the tenant's
-ResourceSetInputProvider (the tenant file): one components.<key> entry for
-each app it recognises. Read-only on the cluster. Use it once, to create the
-tenant file; afterwards "apps migrate" adds patches to it.
+const tenantImportLong = `Scans the live, not-yet-migrated cluster for the tenant's apps (read-only) and
+creates the tenant file, or completes the one you already have. What it does
+depends on --output:
 
-Prints to stdout, or writes --output. It will not overwrite an existing
---output unless you pass --force, and regenerating drops anything written by
-hand (fields, comments, patches). --size sets the default size (S, M or L)
-every component is rendered with (the keos-apps size overlays); it does not
-change what the legacy apps were given.
+  no --output, or a file that doesn't exist yet   CREATE
+      renders a fresh skeleton of the tenant's ResourceSetInputProvider: one
+      components.<key> entry per app it recognises, plus the required
+      entries they depend on. Prints to stdout, or writes --output.
+
+  --output names a file that exists               COMPLETE
+      adds what that file lacks and nothing else: config fields the
+      component templates read (virtualizer's uiEnabled is true when its
+      monitor or ui runs on the cluster, so a release doesn't remove them),
+      dependencies, the storage type, the top-level fields (tenantName,
+      size, ...). It never removes, reorders, uncomments or overwrites
+      anything: your values win (a disagreement with the cluster is only a
+      warning), commented-out blocks stay commented out, patches and
+      comments are untouched, and the lines added are the only difference
+      in "git diff". Running it again changes nothing. Components found on
+      the cluster that the file doesn't declare are added as new entries
+      (a commented-out block counts as declared: it stays as it is). An
+      entry makes Flux deploy the component, so review the result, or run
+      --dry-run first: it prints what would be added as a diff and writes
+      nothing.
+
+--force regenerates --output from scratch, dropping anything written by
+hand (fields, comments, patches): use it only on a file you want replaced.
+--size sets the default size (S, M or L) every component is rendered with
+(the keos-apps size overlays); it does not change what the legacy apps were
+given.
+
+Fields a template reads that have no default and can't be derived from the
+cluster (genai's llmModels, litellm's models, ...) are never dropped
+silently: each is reported as a warning to set by hand.
 
 The tenant is the global --tenant (or the environment file's).`
 
 const tenantImportExample = `  flux stratio tenant import                                  # print the skeleton
-  flux stratio tenant import --output stratio.yaml --size M   # write it, default size M
+  flux stratio tenant import --output stratio.yaml --size M   # create it, default size M
+  flux stratio tenant import --output stratio.yaml --dry-run  # file exists: show what would be added
+  flux stratio tenant import --output stratio.yaml            # file exists: add what is missing
   flux stratio tenant import --output stratio.yaml --force    # replace an existing file`
 
 const appsLong = `Back up, compare and migrate the apps CCT installed on the cluster.
@@ -116,7 +142,8 @@ GitOps name (psql-gosec-agent); the type is detected from the catalog, and
 
 Order: backup, then diff, then "migrate --dry-run", then migrate.`
 
-const appsDiffLong = `Shows what migrating an app would change, or whether it has drifted.
+const appsDiffLong = `Shows how an app differs from the tenant file (what migrating would change, or
+what a migrated app still differs in), or whether it has drifted.
 Read-only: it never writes to the cluster or to the tenant file.
 
 <name> is the live object's name (psql, kafka1) or its GitOps name
@@ -125,16 +152,14 @@ or answer up front with --as <type>[/<entry>].
 
 What is compared (pick one mode):
 
-  (default)      the GitOps desired state, rendered from the tenant file
-                 WITHOUT its current patch for this app, against the live
-                 cluster. The difference is the patch "apps migrate" writes.
+  (default)      what the tenant file renders for this app, patches
+                 included, against the live cluster. No patch yet: the
+                 difference is what migrating would write. A patch in place:
+                 what it still leaves different. To compare against plain
+                 GitOps, comment the patch out; "apps migrate --dry-run"
+                 shows the whole patch it would write.
   --baseline X   the same, against a backup instead of live. Use it when Flux
                  has already reset the live app (a warning tells you).
-  --patched      the desired state WITH the tenant patch applied, as Flux
-                 would apply it, against live: what does the migrated app
-                 still differ in? (An app that already has a patch looks like
-                 a big difference in the default view: closing it is the
-                 patch's job.)
   --drift X      no GitOps rendering: live now against a backup. Has the app
                  changed since it was backed up?
 
@@ -147,8 +172,9 @@ X, for --baseline and --drift, is one of:
 
 For a chart-based app (a HelmRelease) every workload is compared on its
 environment variables and on its container resources, image, replicas and
-selector. The resources the legacy workload had are carried into the patch
-(and checked by rendering the chart again); everything else is reported:
+selector. For an app with no patch yet, the resources the legacy workload had
+are carried into the patch (and checked by rendering the chart again);
+everything else is reported:
 
   warning  can break the migrated app, so "apps migrate --yes" stops on it:
            less memory than live had, a different image tag, replicas going
@@ -158,13 +184,19 @@ selector. The resources the legacy workload had are carried into the patch
            catalog's "exclude" list keeps out on purpose
 
 --view picks how it is shown:
-  unified  a diff in the terminal (default)
-  patch    the patch "apps migrate" would write (not with --drift or --patched)
-  meld     open meld, even when nothing differs, to look at both sides`
+  unified  a diff in the terminal (default): "---"/"+++" name the two sides,
+           in colour on a terminal, with the part of a value that differs marked
+  patch    the patch for what differs: for an app with no patch yet, the
+           one "apps migrate" would write (not with --drift)
+  meld     open meld on both sides, even when nothing differs. An app of
+           several resources (a chart's workloads: env vars, specs) opens as
+           one window with a tab for every resource: environment variables
+           first, then the rest; in each, what differs first and the
+           identical ones last, marked "(identical)"`
 
-const appsDiffExample = `  flux stratio apps diff psql                          # what would migrating change?
-  flux stratio apps diff psql --view patch             # print the patch migrate would write
-  flux stratio apps diff psql --patched --view meld    # after migrating: what still differs from live?
+const appsDiffExample = `  flux stratio apps diff psql                          # what would migrating change? / after migrating: what still differs?
+  flux stratio apps diff psql --view patch             # print the patch for what differs (for an app with no patch yet: the one migrate writes)
+  flux stratio apps diff psql --view meld              # look at both sides in meld
   flux stratio apps diff pool-psql --baseline latest   # Flux already reset live: use the backup
   flux stratio apps diff psql --drift latest           # has psql changed since the last backup?
   flux stratio apps diff kafka1 --as kafka/kafka       # live kafka1 belongs to tenant entry "kafka"`
@@ -215,10 +247,16 @@ Prepare steps change the live cluster (a backup is taken first). Today:
   datamarket-agent  suspend and scale down the legacy agent
   bdl-datarest      remove the legacy ingress that collides with the new one
   dlc-entity        remove the legacy ingress and Deployment
+  dg-agent          remove the legacy Deployment (new immutable selector)
+  discovery         remove the legacy Deployment (new immutable selector)
+  litellm           remove the legacy Deployment (new immutable selector)
+  virtualizer       remove the legacy server, monitor and ui Deployments
   genai             rewrite stored component references (SQL; asks its own
                     confirmation, which --yes never answers)
---skip-prepare leaves them out and lists them at the end; run
-"apps migrate <app>" later to do just the step.
+Each step asks before it runs. Answer n to skip that step only: the migration
+goes on without it (the patch is still written), the step is listed at the end,
+and you can do it by hand or run "apps migrate <app>" later for just the step.
+--skip-prepare skips them all without asking.
 
 Which app (exactly one):
   <name>   a live name or GitOps name. If its tenant entry is not obvious you

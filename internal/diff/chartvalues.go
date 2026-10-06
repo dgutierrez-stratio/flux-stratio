@@ -41,6 +41,9 @@ type ChartFile struct {
 	// Values maps a key to its .Values dot path, for every line shaped
 	// like chartValueLineRe.
 	Values map[string]string
+	// Lines maps every top-level key to the text after its colon, to tell
+	// why a key with no path has none (see classifyChartLine).
+	Lines map[string]string
 }
 
 // ScanChartFiles scans every .yaml/.yml/.tpl file under chartPath
@@ -94,10 +97,11 @@ func isScannableChartFile(path string) bool {
 }
 
 func scanChartFile(content string) ChartFile {
-	file := ChartFile{Keys: map[string]bool{}, Values: map[string]string{}}
+	file := ChartFile{Keys: map[string]bool{}, Values: map[string]string{}, Lines: map[string]string{}}
 	for _, line := range strings.Split(content, "\n") {
 		if m := topLevelKeyRe.FindStringSubmatch(line); m != nil {
 			file.Keys[m[1]] = true
+			file.Lines[m[1]] = strings.TrimSpace(strings.TrimPrefix(line, m[0]))
 		}
 		// Unindented only: an indented line is a nested key (a .tpl's
 		// template body), never one of a key-value env file's variables.

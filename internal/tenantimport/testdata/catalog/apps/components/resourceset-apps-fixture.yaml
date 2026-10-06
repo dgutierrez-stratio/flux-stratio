@@ -79,7 +79,7 @@ spec:
     connectors: << get $connectorsDependency "name" >>
     hdfs: << get $hdfsDependency "name" >>
     <<- end >>
-    UI_ENABLED: << get $componentConfig "uiEnabled" | default "false" >>
+    STRATIO_VIRTUALIZER_UI_ENABLED: '<< if hasKey $componentConfig "uiEnabled" >><< get $componentConfig "uiEnabled" >><< else >>false<< end >>'
     ---
     apiVersion: kustomize.toolkit.fluxcd.io/v1
     kind: Kustomization
@@ -123,4 +123,5 @@ spec:
       path: components/kafka/app/overlays/default/<< $componentSize >>
       patches: << get $component "patches" | default list | toJson >>
     KAFKA_EXPOSED: << get $componentConfig "kafkaClusterExposed" | default "false" >>
+    KAFKA_TOPICS: << get $componentConfig "topics" | default list | toJson >>
     <<- end >>

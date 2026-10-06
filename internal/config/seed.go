@@ -156,7 +156,9 @@ func SeedCatalog() Catalog {
 					{Key: annService, Operator: OpIn, Values: []string{"connectors-dfs", "connectors-rdbms"}},
 				}},
 			},
-			Chart: &Chart{Path: "dg-agent"},
+			Chart:   &Chart{Path: "dg-agent"},
+			Prepare: "prepare-dg-agent",
+			Notes:   "prepare-dg-agent runs automatically before migrating: removes the legacy agent Deployment (the chart gives it a new, immutable selector under the same name).",
 		},
 		{
 			Type:      "eureka-agent",
@@ -196,8 +198,10 @@ func SeedCatalog() Catalog {
 			Chart: &Chart{Path: "virtualizer", Siblings: []Match{
 				cctMatch(kindDeployment, "virtualizer", "virtualizer-monitor"),
 				cctMatch(kindDeployment, "virtualizer", "virtualizer-ui"),
-			}},
+			}, EnabledBy: "uiEnabled"},
 			MemoryEnv: []string{"VR_POD_MEMORY_LIMIT"},
+			Prepare:   "prepare-virtualizer",
+			Notes:     "prepare-virtualizer runs automatically before migrating: removes the legacy virtualizer, monitor and ui Deployments (the chart gives them new, immutable selectors under the same names); legacy ingresses stay.",
 			Exclude: []string{
 				"spec.values.virtualizerMonitor.general.approlename",
 				"spec.values.virtualizerServer.general.governanceRegistration.governanceDeployment",
@@ -212,6 +216,8 @@ func SeedCatalog() Catalog {
 			Match:     cctMatch(kindDeployment, "discovery", ""),
 			Chart:     &Chart{Path: "discovery"},
 			MemoryEnv: []string{"MEMORY"},
+			Prepare:   "prepare-discovery",
+			Notes:     "prepare-discovery runs automatically before migrating: removes the legacy Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress stays.",
 			Exclude:   []string{"spec.values.discovery.environment.approlename"},
 		},
 		{
@@ -304,9 +310,10 @@ func SeedCatalog() Catalog {
 			// legacy Ingress's route) and the vault approlename (the chart's
 			// SecretsIdentity role). Kept: the legacy Postgres database/schema,
 			// gosec groups and autoUvicornWorkers.
-			Match:  cctMatch(kindDeployment, "genai", "genai-litellm"),
-			Object: "litellm",
-			Chart:  &Chart{Path: "litellm"},
+			Match:   cctMatch(kindDeployment, "genai", "genai-litellm"),
+			Object:  "litellm",
+			Chart:   &Chart{Path: "litellm"},
+			Prepare: "prepare-litellm",
 			Exclude: []string{
 				"spec.values.liteLlm.general.networking.ingressHost",
 				"spec.values.liteLlm.general.networking.ingressBasePath",
@@ -314,7 +321,7 @@ func SeedCatalog() Catalog {
 				"spec.values.liteLlm.environment.sso.oauth2ProxyLogoutNextUrl",
 				"spec.values.liteLlm.general.identity.approlename",
 			},
-			Notes: "The tenant entry's name stays the legacy live name (genai-litellm): keos-use-cases substitutes it into LITELLM_NAME, which only sets the Helm release name (spec.releaseName), so the release keeps the legacy identity and database grants while the GitOps object (Kustomization/HelmRelease) stays the generic 'litellm', uniform with every other component. The patch keeps the legacy Postgres database and schema. The legacy Vault secrets can't be kept: the release gets fresh ones, so before cutover delete the rows the legacy salt encrypted (LiteLLM_ProxyModelTable, LiteLLM_CredentialsTable) and declare the models in the entry's config.models to re-register them. Needs the litellm chart whose GosecPolicy follows postgresDatabase, and keos-apps/keos-use-cases with releaseName decoupled from the GitOps object name (LITELLM_NAME only substitutes releaseName).",
+			Notes: "prepare-litellm runs automatically before migrating: removes the legacy Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress stays. The tenant entry's name stays the legacy live name (genai-litellm): keos-use-cases substitutes it into LITELLM_NAME, which only sets the Helm release name (spec.releaseName), so the release keeps the legacy identity and database grants while the GitOps object (Kustomization/HelmRelease) stays the generic 'litellm', uniform with every other component. The patch keeps the legacy Postgres database and schema. The legacy Vault secrets can't be kept: the release gets fresh ones, so before cutover delete the rows the legacy salt encrypted (LiteLLM_ProxyModelTable, LiteLLM_CredentialsTable) and declare the models in the entry's config.models to re-register them. Needs the litellm chart whose GosecPolicy follows postgresDatabase, and keos-apps/keos-use-cases with releaseName decoupled from the GitOps object name (LITELLM_NAME only substitutes releaseName).",
 		},
 		{
 			Type:      "rocket",

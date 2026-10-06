@@ -14,11 +14,26 @@ import (
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
+	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
-func TestReportChartReview(t *testing.T) {
+// reviewOutput is what reportChartReview prints for r with -v, undecorated:
+// notes listed and values whole.
+func reviewOutput(r chartReview) string {
 	var buf bytes.Buffer
-	reportChartReview(log.New(&buf, false), chartReview{
+	reportChartReview(log.New(&buf, true).WithTerminal(maxWidth, false), r)
+	// A long cell wraps onto further lines: compare the text, not the breaks.
+	return strings.Join(strings.Fields(buf.String()), " ")
+}
+
+// sectionsOutput is what a list of sections renders to, undecorated, with
+// the notes listed.
+func sectionsOutput(sections []reviewSection) string {
+	return strings.Join(renderReview(sections, reviewStyle{Verbose: true}), "\n")
+}
+
+func TestReportChartReview(t *testing.T) {
+	out := reviewOutput(chartReview{
 		Unmapped: []diff.UnmappedDiff{
 			{Name: "VAULT_ROLE", Rendered: "genai_genai-ui", Live: "legacy", Reason: diff.UnmappedAmbiguous,
 				Candidates: []string{"genaiApi.general.identity.approlename", "genaiUi.general.identity.approlename"}},
@@ -29,26 +44,31 @@ func TestReportChartReview(t *testing.T) {
 		},
 		Missing: []string{"Deployment stratio-genai/genai-ui"},
 		LiveOnly: []diff.LiveOnlyVar{
-			{Workload: "rocket", Name: "LEGACY_FLAG", Live: "true"},
+			{Workload: "rocket-debug", Name: "LEGACY_FLAG", Live: "true"},
 			{Name: "EXTRA_JARS", Live: "a.jar,b.jar"},
 		},
 		Source: "backup",
 	})
-	out := buf.String()
 	for _, want := range []string{
-		"Deployment stratio-genai/genai-ui: rendered by the chart but not in the backup",
-		"4 difference(s) need manual review",
-		`KERBEROS_REALM_NAME: rendered "eosdev.int", live "EOSDEV.INT" — conflicting live values for cluster.domain, which also sets PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN=eosdev.int`,
-		`HARDCODED: rendered "1", live "2" — set inline in the container env`,
-		`VAULT_ROLE: rendered "genai_genai-ui", live "legacy" — ambiguous between genaiApi.general.identity.approlename, genaiUi.general.identity.approlename`,
-		`rocket/TENANT: rendered "a", live "b" — conflicting live values for rocketCommon.tenant`,
-		"2 variable(s) in the backup aren't rendered by the chart",
-		`rocket/LEGACY_FLAG: live "true"`,
-		`EXTRA_JARS: live "a.jar,b.jar"`,
+		"[REVIEW] 1 rendered workload(s) not found in the backup",
+		"Deployment stratio-genai/genai-ui",
+		"[REVIEW] 4 variable(s) differ and can't be written to the patch",
+		// one table: the reason for each is a column, not a sub-heading
+		"NAME GITOPS LIVE WHY",
+		"could be set by genaiApi.general.identity.approlename, genaiUi.general.identity.approlename",
+		"its path, cluster.domain, also sets PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN=eosdev.int",
+		"set in the container's own env, not through values",
+		// two workloads involved: every row names its own
+		"rocket/TENANT", "rocket-debug/LEGACY_FLAG",
+		"[REVIEW] 2 variable(s) in the backup aren't rendered by the chart",
+		"EXTRA_JARS", "a.jar,b.jar",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "⚠") {
+		t.Errorf("a review is laid out by section, not as ⚠ lines:\n%s", out)
 	}
 }
 
@@ -64,19 +84,18 @@ func TestReportChartReview_ExcludedIsInformationOnly(t *testing.T) {
 		t.Error("hasWarnings() = true with only Excluded set: it must not make --yes stop")
 	}
 
-	var buf bytes.Buffer
-	reportChartReview(log.New(&buf, false), review)
-	out := buf.String()
+	out := reviewOutput(review)
 	for _, want := range []string{
-		`excluded by the catalog: genai-api/VAULT_ROLE live "legacy-role", GitOps default "genai_genai-api" (genaiApi.general.identity.approlename)`,
-		`excluded by the catalog: ROLE live "b", GitOps default "a" (x.role)`,
+		"[NOTE] 2 value(s) excluded by the catalog",
+		"VAULT_ROLE", "genai_genai-api", "legacy-role", "genaiApi.general.identity.approlename",
+		"x.role",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "⚠") {
-		t.Errorf("excluded differences were printed as warnings:\n%s", out)
+	if strings.Contains(out, "[REVIEW]") || strings.Contains(out, "[ACTION]") {
+		t.Errorf("excluded differences were presented as something to review:\n%s", out)
 	}
 }
 
@@ -99,32 +118,30 @@ func TestReportNoChange_UnmappedIsNotNoDifferences(t *testing.T) {
 	}
 }
 
-func TestReportLegacyAgentPatches(t *testing.T) {
+func TestLegacyAgentSection(t *testing.T) {
 	app := config.App{Object: "opensearch1-gosec-agent"}
-	var buf bytes.Buffer
-	reportLegacyAgentPatches(log.New(&buf, false), app, 0)
-	if buf.Len() != 0 {
-		t.Errorf("no legacy patch: output = %q, want nothing", buf.String())
+	if got := legacyAgentSection(app, 0); got != nil {
+		t.Errorf("no legacy patch: %v, want nothing", got)
 	}
-	reportLegacyAgentPatches(log.New(&buf, false), app, 1)
-	for _, want := range []string{"opensearch1-gosec-agent", "config.agent.patches", "remove"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Errorf("output missing %q: %s", want, buf.String())
+	out := sectionsOutput(legacyAgentSection(app, 1))
+	for _, want := range []string{"opensearch1-gosec-agent", "config.agent.patches", "move or remove"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %s", want, out)
 		}
 	}
 }
 
-func TestReportUnresolvedDeps(t *testing.T) {
-	var buf bytes.Buffer
+func TestUnresolvedDepsSection(t *testing.T) {
 	app := config.App{Object: "rocket", Kustomization: "apps-rocket"}
-	reportUnresolvedDeps(log.New(&buf, false), app, []tenantfile.UnresolvedDependency{
+	out := sectionsOutput(unresolvedDepsSection(app, []tenantfile.UnresolvedDependency{
 		{Key: "dgAgent", Name: "dg-agent", Declared: []string{"dg-hdfs-agent"}},
 		{Key: "virtualizer", Name: "virtualizer"},
-	})
-	out := buf.String()
+	}))
 	for _, want := range []string{
-		`rocket depends on dgAgent "dg-agent", which the tenant file doesn't declare (declared: dg-hdfs-agent) — Flux will hold apps-rocket back on apps-dg-agent until it's fixed`,
-		`rocket depends on virtualizer "virtualizer", which the tenant file doesn't declare (none declared)`,
+		"rocket depends on 2 entr(y/ies) the tenant file doesn't declare",
+		"Flux holds apps-rocket back",
+		"dgAgent", "dg-agent", "dg-hdfs-agent",
+		"virtualizer", "none declared",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -186,15 +203,13 @@ func TestReportChartReview_SpecDiffs(t *testing.T) {
 		},
 		Source: "live cluster",
 	}
-	var buf bytes.Buffer
-	reportChartReview(log.New(&buf, false), review)
-	out := buf.String()
+	out := reviewOutput(review)
 	for _, want := range []string{
-		"2 workload setting(s) differ from the live cluster and can break the migrated workload",
-		`dg-hdfs-agent/agent resources.limits.memory: rendered "2048Mi", live "4096M"`,
-		`intelligence/intelligence resources.limits.memory: rendered "512M", live unset`,
-		"1 other workload setting(s) differ from the live cluster",
-		`rocket/rocket resources.limits.cpu: rendered "1", live "4"`,
+		"[REVIEW] 2 workload setting(s) differ from the live cluster and can break the migrated workload",
+		"dg-hdfs-agent/agent", "resources.limits.memory", "2048Mi", "4096M",
+		"intelligence", "512M", "unset",
+		"[NOTE] 1 other workload setting(s) differ from the live cluster",
+		"rocket", "resources.limits.cpu",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -202,6 +217,29 @@ func TestReportChartReview_SpecDiffs(t *testing.T) {
 	}
 	if !review.hasWarnings() {
 		t.Error("hasWarnings() = false with risky spec diffs, want true: --yes must stop")
+	}
+}
+
+// An immutable selector is something to act on, shown whole and apart from
+// the other settings.
+func TestReportChartReview_SelectorNeedsAction(t *testing.T) {
+	out := reviewOutput(chartReview{
+		SpecDiffs: []diff.SpecDiff{{
+			Workload: "dg-hdfs-agent", Field: diff.SelectorField, Severity: diff.SpecRisk,
+			Rendered: "app.kubernetes.io/component=dg-agent,app.kubernetes.io/instance=dg-hdfs-agent",
+			Live:     "cct.stratio.com/application_id=dg-hdfs-agent.stratio-datastores",
+		}},
+		Source: "live cluster",
+	})
+	for _, want := range []string{
+		"[ACTION] 1 workload(s) can't be updated in place: their selector is immutable",
+		"Delete the legacy workload before Flux installs the release",
+		"component=dg-agent,instance=dg-hdfs-agent",
+		"cct.stratio.com/application_id=dg-hdfs-agent.stratio-datastores",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -226,18 +264,18 @@ func TestReportNoChange_SpecDiffsAreNotNoDifferences(t *testing.T) {
 }
 
 func TestReportChartReview_NamesTheListShadowingAChartDefault(t *testing.T) {
-	var buf bytes.Buffer
-	reportChartReview(log.New(&buf, false), chartReview{
+	out := reviewOutput(chartReview{
 		LiveOnly: []diff.LiveOnlyVar{{Workload: "rocket", Name: "ROCKET_POD_NAME", Live: "rocket", ShadowedBy: "controllers.rocket.containers.rocket.env"}},
 		Source:   "live cluster",
 	})
-	want := `rocket/ROCKET_POD_NAME: live "rocket" — chart default env ROCKET_POD_NAME is shadowed by the list at controllers.rocket.containers.rocket.env`
-	if out := buf.String(); !strings.Contains(out, want) {
-		t.Errorf("output missing %q:\n%s", want, out)
+	for _, want := range []string{"ROCKET_POD_NAME", "the chart's default is hidden by the env list at controllers.rocket.containers.rocket.env"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 }
 
-func TestReportSizeMismatch(t *testing.T) {
+func TestSizeSection(t *testing.T) {
 	fleet := t.TempDir()
 	path := tenantfile.Path(fleet, "eosdev", "stratio")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -250,39 +288,104 @@ func TestReportSizeMismatch(t *testing.T) {
 	repos := config.RepoPaths{Fleet: fleet}
 
 	for name, tt := range map[string]struct{ live, want string }{
-		"live runs another size": {"M", "tenant size S but live rocket reports CUSTOMER_SIZE=M: overlay sizing will differ from live"},
+		"live runs another size": {"M", "tenant size S, but live rocket reports CUSTOMER_SIZE=M"},
 		"the same size":          {"S", ""},
 		"live reports no size":   {"", ""},
 	} {
-		var buf bytes.Buffer
-		reportSizeMismatch(log.New(&buf, false), repos, "eosdev", "stratio", "rocket", tt.live)
-		if tt.want == "" && buf.Len() != 0 || !strings.Contains(buf.String(), tt.want) {
-			t.Errorf("%s: output = %q, want %q", name, buf.String(), tt.want)
+		got := sizeSection(repos, "eosdev", "stratio", "rocket", tt.live)
+		if tt.want == "" && got != nil || !strings.Contains(sectionsOutput(got), tt.want) {
+			t.Errorf("%s: sections = %v, want %q", name, got, tt.want)
 		}
 	}
 }
 
 func TestReportChartReview_EnvVsLimit(t *testing.T) {
-	var buf bytes.Buffer
 	review := chartReview{
 		SpecDiffs: []diff.SpecDiff{{Workload: "dg-hdfs-agent", Container: "agent", Field: diff.EnvVsLimitField + "JAVA_OPTS", Rendered: "2048Mi", Live: "-Xmx3072m", Severity: diff.SpecRisk}},
 		Source:    "live cluster",
 	}
-	reportChartReview(log.New(&buf, false), review)
-	want := "dg-hdfs-agent/agent JAVA_OPTS=-Xmx3072m asks for more memory than the container's limit 2048Mi"
-	if !strings.Contains(buf.String(), want) || !review.hasWarnings() {
-		t.Errorf("output = %q (hasWarnings %v), want %q as a warning", buf.String(), review.hasWarnings(), want)
+	out := reviewOutput(review)
+	for _, want := range []string{
+		"[ACTION] 1 variable(s) ask for more memory than the container's limit",
+		"dg-hdfs-agent", "JAVA_OPTS", "-Xmx3072m", "2048Mi",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if !review.hasWarnings() {
+		t.Error("hasWarnings() = false, want the memory request to stop --yes")
 	}
 }
 
-func TestAppsDiff_PatchedIsRefusedWhereItHasNoMeaning(t *testing.T) {
-	for name, tt := range map[string]struct{ view, drift, want string }{
-		"with --drift":      {viewUnified, "latest", "--patched has no meaning with --drift"},
-		"with --view patch": {viewPatch, "", "--patched has no --view patch"},
+// apps diff compares the tenant file as it is: there is no flag to apply (or
+// leave out) its patch, so the comparison never needs a mode.
+func TestAppsDiff_HasNoPatchModeFlags(t *testing.T) {
+	cmd := newAppsDiffCommand()
+	for _, name := range []string{"patched", "unpatched"} {
+		if cmd.Flags().Lookup(name) != nil {
+			t.Errorf("apps diff has --%s: the tenant file's patch is applied by default, with no flag", name)
+		}
+	}
+}
+
+// With the tenant patch applied and nothing left to patch, diff says so
+// plainly; "nothing to migrate" is a migrate message.
+func TestReportNoChange_NothingLeftAfterThePatch(t *testing.T) {
+	var buf bytes.Buffer
+	reportNoChange(log.New(&buf, false), false, 0, chartReview{})
+	if out := buf.String(); !strings.Contains(out, "no differences") || strings.Contains(out, "nothing to migrate") {
+		t.Errorf("output = %q, want a plain \"no differences\"", out)
+	}
+}
+
+// A variable with no .Values path says, in its WHY column, what the chart's
+// line for it is made of; a composed one names the values it is built from.
+func TestReportChartReview_NoPathSaysWhatTheChartLineIs(t *testing.T) {
+	out := reviewOutput(chartReview{
+		Unmapped: []diff.UnmappedDiff{
+			{Name: "DISCOVERY_BASE_URI", Rendered: "a", Live: "b", Reason: diff.UnmappedNoPath, Origin: diff.OriginFixed},
+			{Name: "VAULT_ROLE", Rendered: "a", Live: "b", Reason: diff.UnmappedNoPath, Origin: diff.OriginRelease},
+			{Name: "COMM_DS_URL", Rendered: "a", Live: "b", Reason: diff.UnmappedNoPath, Origin: diff.OriginComposed,
+				Sources: []string{"dependencies.postgres.name", "dependencies.postgres.port"}},
+			{Name: "OPAQUE", Rendered: "a", Live: "b", Reason: diff.UnmappedNoPath, Origin: diff.OriginComposed},
+			{Name: "MYSTERY", Rendered: "a", Live: "b", Reason: diff.UnmappedNoPath},
+		},
+		Source: "live cluster",
+	})
+	for _, want := range []string{
+		"fixed in the chart: no value sets it",
+		"follows the release's name or namespace",
+		"built from dependencies.postgres.(name, port)",
+		"built by a helper this scan couldn't follow",
+		"no chart config file the scan reads defines it",
 	} {
-		err := runAppsDiff(&cobra.Command{}, "psql", tt.view, "", tt.drift, "", "", true)
-		if err == nil || !strings.Contains(err.Error(), tt.want) {
-			t.Errorf("%s: err = %v, want %q", name, err, tt.want)
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, not := range []string{"assembled from other values", "derived from the release", "the chart has no value that sets them"} {
+		if strings.Contains(out, not) {
+			t.Errorf("the review still has a sub-heading or the old hint, %q:\n%s", not, out)
+		}
+	}
+}
+
+// TestLiveSource_NamesTheSideAfterWhatItIs: the file meld shows for the live
+// side says whether it is the live cluster or a backup (--baseline), and
+// both sides' labels are the ones internal/ui defines.
+func TestLiveSource_NamesTheSideAfterWhatItIs(t *testing.T) {
+	if got := liveSource(""); got != "live cluster" {
+		t.Errorf("liveSource(\"\") = %q, want %q", got, "live cluster")
+	}
+	if got := liveSource("/backups/psql/2026-10-01T10-00-00Z"); got != "backup" {
+		t.Errorf("liveSource(<backup>) = %q, want %q", got, "backup")
+	}
+	for got, want := range map[string]string{
+		ui.LabelDesired: "desired state", ui.LabelLive: "live cluster", ui.LabelBackup: "backup", ui.LabelLiveNow: "live now",
+	} {
+		if got != want {
+			t.Errorf("label %q, want %q", got, want)
 		}
 	}
 }

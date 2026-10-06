@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -17,7 +18,6 @@ import (
 	"github.com/Stratio/flux-stratio/internal/drift"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/runner"
-	"github.com/Stratio/flux-stratio/internal/tenantfile"
 	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
@@ -58,7 +58,6 @@ func newAppsDiffCommand() *cobra.Command {
 	var view string
 	var dir string
 	var as string
-	var patched bool
 
 	cmd := &cobra.Command{
 		Use:     "diff <name>",
@@ -67,24 +66,22 @@ func newAppsDiffCommand() *cobra.Command {
 		Example: appsDiffExample,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAppsDiff(cmd, args[0], view, baseline, driftAgainst, dir, as, patched)
+			return runAppsDiff(cmd, args[0], view, baseline, driftAgainst, dir, as)
 		},
 	}
 	addAsFlag(cmd, &as)
 	cmd.Flags().StringVar(&baseline, "baseline", "",
 		"compare against a backup instead of the live cluster: latest, an app's backup directory, or the backups root")
 	cmd.Flags().StringVar(&driftAgainst, "drift", "",
-		"compare the live cluster now against a backup, with no GitOps rendering (same values as --baseline; not with --baseline, --patched or --view patch)")
+		"compare the live cluster now against a backup, with no GitOps rendering (same values as --baseline; not with --baseline or --view patch)")
 	cmd.Flags().StringVar(&view, "view", viewUnified,
 		"how to show the result: unified (a diff, default), patch (the patch migrate would write) or meld (open meld, even with no differences)")
-	cmd.Flags().BoolVar(&patched, "patched", false,
-		"render the desired state WITH the tenant patch applied: what does the migrated app still differ in? (not with --drift or --view patch)")
 	cmd.Flags().StringVar(&dir, "dir", "",
 		"backups root, where --baseline/--drift latest look (default: a backups/ directory next to the catalog file; must match the --dir of apps backup)")
 	return cmd
 }
 
-func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag, as string, patched bool) error {
+func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag, as string) error {
 	switch view {
 	case viewUnified, viewPatch, viewMeld:
 	default:
@@ -92,12 +89,6 @@ func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag
 	}
 	if baseline != "" && driftAgainst != "" {
 		return fmt.Errorf("provide at most one of --baseline or --drift")
-	}
-	if patched && driftAgainst != "" {
-		return fmt.Errorf("--patched has no meaning with --drift: there's no GitOps rendering to apply the patch to")
-	}
-	if patched && view == viewPatch {
-		return fmt.Errorf("--patched has no --view patch: the patch is already in the tenant file; what's left is a comparison")
 	}
 	if view == viewPatch && driftAgainst != "" {
 		return fmt.Errorf("--view patch has no meaning with --drift: there's no GitOps patch, only what changed live")
@@ -123,13 +114,13 @@ func runAppsDiff(cmd *cobra.Command, name, view, baseline, driftAgainst, dirFlag
 	if driftAgainst != "" {
 		return runAppsDriftDiff(cmd, app, s, driftAgainst, view, dirFlag)
 	}
-	return runAppsDesiredDiff(cmd, app, s.env, s.client, baseline, view, dirFlag, patched, s.log)
+	return runAppsDesiredDiff(cmd, app, s.env, s.client, baseline, view, dirFlag, s.log)
 }
 
 // runAppsDesiredDiff is the default `apps diff` comparison: the rendered
 // GitOps desired state against the live cluster, or (--baseline) a
 // previously captured backup standing in for it.
-func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environment, c client.Client, baseline, view, dirFlag string, patched bool, logger *log.Logger) error {
+func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environment, c client.Client, baseline, view, dirFlag string, logger *log.Logger) error {
 	resolvedBaseline := ""
 	if baseline != "" {
 		var err error
@@ -140,46 +131,35 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	}
 
 	comparison := desiredComparison(baseline, resolvedBaseline)
-	if patched {
-		comparison = strings.Replace(comparison, "desired state", "desired state with the tenant patch applied", 1)
-	}
 	logger.Actionf("diffing %q: %s", app.Name, comparison)
 	result, err := appdiff.Diff(cmd.Context(), appdiff.Options{
 		Repos: env.RepoPaths(), Cluster: env.Cluster, Tenant: env.Tenant,
-		App:             app,
-		Runner:          runner.Exec{},
-		Client:          c,
-		Baseline:        resolvedBaseline,
-		WithTenantPatch: patched,
-		Log:             logger,
+		App:      app,
+		Runner:   runner.Exec{},
+		Client:   c,
+		Baseline: resolvedBaseline,
+		Log:      logger,
 	})
 	if err != nil {
 		return err
 	}
 
 	// meld opens even when there's nothing to change, so both sides can be
-	// inspected: with UpToDate they still differ by the tenant file's own
-	// patch, which the base is rendered without — the desired side's label
-	// says so, or its differences read as contradicting "nothing to migrate".
+	// inspected.
 	openMeld := func() error {
-		desiredLabel := "desired state"
-		switch {
-		case patched:
-			desiredLabel = "desired state with tenant patch"
-		case result.ExistingPatches > 0:
-			desiredLabel = "desired state without tenant patch"
-		}
-		return ui.Meld(cmd.Context(), runner.Exec{}, desiredLabel, result.Before, liveSource(resolvedBaseline), result.After)
+		return ui.OpenMeld(cmd.Context(), runner.Exec{}, ui.LabelDesired, result.Before, liveSource(resolvedBaseline), result.After, result.Items)
 	}
 
-	warnFluxManaged(logger, app, result.FluxManagedBy)
 	review := chartReview{
 		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly,
 		SpecDiffs: result.SpecDiffs, Carried: result.CarriedResources, Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
 	}
+	review.Extra = slices.Concat(
+		fluxManagedSection(app, result.FluxManagedBy),
+		sizeSection(env.RepoPaths(), env.Cluster, env.Tenant, app.Object, result.LiveSize),
+		droppedSection(result.DroppedFromExisting),
+	)
 	reportChartReview(logger, review)
-	reportSizeMismatch(logger, env.RepoPaths(), env.Cluster, env.Tenant, app.Object, result.LiveSize)
-	reportDroppedFromExisting(logger, app, result.DroppedFromExisting)
 	if result.Patch == nil || result.UpToDate {
 		reportNoChange(logger, result.UpToDate, result.ObsoletePatches, review)
 		if view == viewMeld {
@@ -199,7 +179,8 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	case viewMeld:
 		return openMeld()
 	default:
-		return ui.FileDiff(cmd.OutOrStdout(), result.Before, result.After)
+		return ui.FileDiffWith(cmd.OutOrStdout(), result.Before, result.After,
+			diffOptions(cmd, desiredLabel, liveSource(resolvedBaseline), sectionsFor(app.ChartPath)))
 	}
 }
 
@@ -233,9 +214,9 @@ func runAppsDriftDiff(cmd *cobra.Command, app config.App, s *session, driftAgain
 	// meld opens even without drift, so both sides can be inspected; an
 	// empty unified diff has nothing to show.
 	if view == viewMeld {
-		return ui.Meld(cmd.Context(), runner.Exec{}, "backup", result.Before, "live now", result.After)
+		return ui.OpenMeld(cmd.Context(), runner.Exec{}, ui.LabelBackup, result.Before, ui.LabelLiveNow, result.After, result.Items)
 	}
-	return ui.FileDiff(cmd.OutOrStdout(), result.Before, result.After)
+	return ui.FileDiffWith(cmd.OutOrStdout(), result.Before, result.After, diffOptions(cmd, ui.LabelBackup, ui.LabelLiveNow, ui.SectionsNone))
 }
 
 // resolveBackupArg turns a --baseline/--drift value into an actual
@@ -255,19 +236,6 @@ func resolveBackupArg(value, appID, dirFlag string) (string, error) {
 		}
 	}
 	return backup.ResolveBaseline(root, appID)
-}
-
-// warnFluxManaged warns when the live object compared against is already
-// reconciled by Flux: its state is then the GitOps render's, not the
-// legacy installation's, so legacy values Flux reset are invisible to the
-// comparison — the patch should come from a backup taken before cutover.
-func warnFluxManaged(logger *log.Logger, app config.App, managedBy string) {
-	if managedBy == "" {
-		return
-	}
-	logger.Warningf("live %s/%s is already managed by Flux (%s): it may no longer hold the legacy values — "+
-		"compare against a pre-cutover backup instead: --baseline latest (see apps backup)",
-		app.LiveNamespace(), app.LiveName(), managedBy)
 }
 
 // reportNoChange narrates a diff/migrate that found nothing to write:
@@ -311,6 +279,10 @@ type chartReview struct {
 	Excluded []diff.ExcludedDiff
 	// Source names the live side: "live cluster" or "backup".
 	Source string
+	// Extra are findings that aren't about the comparison itself (Flux
+	// already manages the live object, the tenant size, the dependencies the
+	// patch needs ...), laid out with the rest.
+	Extra []reviewSection
 }
 
 // hasWarnings reports whether reportChartReview warns about anything for r:
@@ -330,151 +302,12 @@ func specDiffsOf(diffs []diff.SpecDiff, severity diff.SpecSeverity) []diff.SpecD
 	return out
 }
 
-// reportSizeMismatch warns when the tenant file's size isn't the one the
-// legacy application reports: the GitOps size overlay it is rendered with
-// then differs from what ran. Nothing is inferred or rewritten.
-func reportSizeMismatch(logger *log.Logger, repos config.RepoPaths, cluster, tenant, app, liveSize string) {
-	if liveSize == "" {
-		return
-	}
-	doc, err := tenantfile.Load(tenantfile.Path(repos.Fleet, cluster, tenant))
-	if err != nil {
-		return // the diff already read the tenant file; nothing useful to add
-	}
-	if size := doc.DefaultSize(); size != "" && size != liveSize {
-		logger.Warningf("tenant size %s but live %s reports CUSTOMER_SIZE=%s: overlay sizing will differ from live", size, app, liveSize)
-	}
-}
-
-// reportCarried says which containers' live resources the patch carries.
-func reportCarried(logger *log.Logger, r chartReview) {
-	for _, e := range r.Carried {
-		var fields []string
-		for _, d := range e.Diffs {
-			live := d.Live
-			if live == "" {
-				live = "unset"
-			}
-			fields = append(fields, strings.TrimPrefix(d.Field, "resources.")+" "+live+" (GitOps "+orUnset(d.Rendered)+")")
-		}
-		logger.Actionf("carrying the legacy resources of %s/%s into the patch (%s): %s",
-			e.Workload, e.Container, e.Path, strings.Join(fields, ", "))
-	}
-}
-
-func orUnset(v string) string {
-	if v == "" {
-		return "unset"
-	}
-	return v
-}
-
-// reportSpecDiffs prints the risky differences as warnings and the others as
-// plain information, grouped under their workload.
-func reportSpecDiffs(logger *log.Logger, r chartReview) {
-	if risks := specDiffsOf(r.SpecDiffs, diff.SpecRisk); len(risks) > 0 {
-		logger.Warningf("%d workload setting(s) differ from the %s and can break the migrated workload — not written to the patch:", len(risks), r.Source)
-		for _, d := range risks {
-			logger.Warningf("  %s", describeSpecDiff(d))
-		}
-	}
-	if infos := specDiffsOf(r.SpecDiffs, diff.SpecInfo); len(infos) > 0 {
-		logger.Actionf("%d other workload setting(s) differ from the %s:", len(infos), r.Source)
-		for _, d := range infos {
-			logger.Actionf("  %s", describeSpecDiff(d))
-		}
-	}
-}
-
-func describeSpecDiff(d diff.SpecDiff) string {
-	name := d.Workload
-	if d.Container != "" {
-		name += "/" + d.Container
-	}
-	quote := func(v string) string {
-		if v == "" {
-			return "unset"
-		}
-		return fmt.Sprintf("%q", v)
-	}
-	if env, ok := strings.CutPrefix(d.Field, diff.EnvVsLimitField); ok {
-		return fmt.Sprintf("%s %s=%s asks for more memory than the container's limit %s", name, env, d.Live, d.Rendered)
-	}
-	if d.Field == diff.SelectorField {
-		return fmt.Sprintf("%s selector: rendered %s, live %s — a selector is immutable, so the legacy workload can't be updated in place: "+
-			"it has to be deleted before Flux installs the release", name, quote(d.Rendered), quote(d.Live))
-	}
-	return fmt.Sprintf("%s %s: rendered %s, live %s", name, d.Field, quote(d.Rendered), quote(d.Live))
-}
-
-// reportChartReview warns about everything a chart-mode diff/migrate
-// leaves out of its patch, so none of it is lost silently: rendered
-// workloads it had nothing to compare against, differences it couldn't
-// attribute to one .Values path (listed one per line, with the candidate
-// paths), and live variables the chart has no place for. Differences the
-// catalog's exclude list kept out on purpose are listed last, as plain
-// information.
-func reportChartReview(logger *log.Logger, r chartReview) {
-	for _, w := range r.Missing {
-		logger.Warningf("%s: rendered by the chart but not in the %s — nothing of it is carried into the patch", w, r.Source)
-	}
-	if len(r.Unmapped) > 0 {
-		logger.Warningf("%d difference(s) need manual review — not written to the patch:", len(r.Unmapped))
-		for _, u := range r.Unmapped {
-			logger.Warningf("  %s", describeUnmapped(u))
-		}
-	}
-	if len(r.LiveOnly) > 0 {
-		logger.Warningf("%d variable(s) in the %s aren't rendered by the chart: their values will be lost after migration:", len(r.LiveOnly), r.Source)
-		for _, v := range r.LiveOnly {
-			name := v.Name
-			if v.Workload != "" {
-				name = v.Workload + "/" + v.Name
-			}
-			if v.ShadowedBy != "" {
-				logger.Warningf("  %s: live %q — chart default env %s is shadowed by the list at %s", name, v.Live, v.Name, v.ShadowedBy)
-				continue
-			}
-			logger.Warningf("  %s: live %q", name, v.Live)
-		}
-	}
-	reportCarried(logger, r)
-	reportSpecDiffs(logger, r)
-	for _, e := range r.Excluded {
-		name := e.Name
-		if e.Workload != "" {
-			name = e.Workload + "/" + e.Name
-		}
-		logger.Actionf("excluded by the catalog: %s live %q, GitOps default %q (%s)", name, e.Live, e.Rendered, e.Path)
-	}
-}
-
-func describeUnmapped(u diff.UnmappedDiff) string {
-	name := u.Name
-	if u.Workload != "" {
-		name = u.Workload + "/" + u.Name
-	}
-	line := fmt.Sprintf("%s: rendered %q, live %q — %s", name, u.Rendered, u.Live, u.Reason)
-	switch u.Reason {
-	case diff.UnmappedAmbiguous:
-		line += " between " + strings.Join(u.Candidates, ", ")
-	case diff.UnmappedNotReproduced:
-		line += " (" + strings.Join(u.Candidates, ", ") + ")"
-	case diff.UnmappedConflict:
-		line += " for " + strings.Join(u.Candidates, ", ")
-		if len(u.Shared) > 0 {
-			line += ", which also sets " + strings.Join(u.Shared, ", ")
-		}
-	}
-	return line
-}
-
 // liveSource names what a desired-state diff compared against.
 func liveSource(resolvedBaseline string) string {
 	if resolvedBaseline != "" {
-		return "backup"
+		return ui.LabelBackup
 	}
-	return "live cluster"
+	return ui.LabelLive
 }
 
 // desiredComparison names what a desired-state diff (apps diff without

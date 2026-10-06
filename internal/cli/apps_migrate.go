@@ -3,10 +3,11 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"io"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/Stratio/flux-stratio/internal/appmigrate"
@@ -19,7 +20,6 @@ import (
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/runner"
-	"github.com/Stratio/flux-stratio/internal/tenantfile"
 	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
@@ -37,6 +37,13 @@ type migrateFlags struct {
 // failure of the tool, but not a migrated app either — `--all` leaves its
 // dependents out, and the command's exit status says it wasn't migrated.
 var errNotConfirmed = errors.New("not confirmed")
+
+// errPrepareDeclined is a prepare step the operator answered no to: not a
+// failure and not an interruption — the migration goes on without the step,
+// which is left for them to do by hand or by running apps migrate again. It
+// never leaves migrateOne: the prepared closure turns it into a warning and
+// the end-of-run summary.
+var errPrepareDeclined = errors.New("prepare step declined")
 
 func newAppsMigrateCommand() *cobra.Command {
 	var all bool
@@ -202,15 +209,18 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	if err != nil {
 		return err
 	}
-	warnFluxManaged(logger, app, planned.FluxManagedBy)
 	review := chartReview{
 		Unmapped: planned.UnmappedDiffs, Missing: planned.MissingWorkloads, LiveOnly: planned.LiveOnly,
 		SpecDiffs: planned.SpecDiffs, Carried: planned.CarriedResources, Excluded: planned.Excluded, Source: liveSource(resolvedBaseline),
 	}
+	review.Extra = slices.Concat(
+		fluxManagedSection(app, planned.FluxManagedBy),
+		sizeSection(repos, cluster, tenant, app.Object, planned.LiveSize),
+		unresolvedDepsSection(app, planned.UnresolvedDeps),
+		legacyAgentSection(app, planned.LegacyAgentPatches),
+		droppedSection(planned.DroppedFromExisting),
+	)
 	reportChartReview(logger, review)
-	reportSizeMismatch(logger, repos, cluster, tenant, app.Object, planned.LiveSize)
-	reportUnresolvedDeps(logger, app, planned.UnresolvedDeps)
-	reportLegacyAgentPatches(logger, app, planned.LegacyAgentPatches)
 	// The patch is planned, and saved, before app's prepare step runs: a
 	// prepare step may delete the very live workload the patch is read
 	// from (prepare-dlc), so a patch saved only afterwards would be lost
@@ -227,15 +237,11 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 			return nil
 		}
 		if flags.skipPrepare {
-			reportSkippedPrepare(logger, app, tenant)
-			if flags.onSkippedPrepare != nil {
-				flags.onSkippedPrepare(app)
-			}
+			skipPrepare(logger, app, tenant, flags, "--skip-prepare")
 			return nil
 		}
-		return ensurePrepared(cmd, app, tenant, c, execer, backupFirst, logger, dryRun, yes)
+		return skipIfDeclined(ensurePrepared(cmd, app, tenant, c, execer, backupFirst, logger, dryRun, yes), logger, app, tenant, flags)
 	}
-	reportDroppedFromExisting(logger, app, planned.DroppedFromExisting)
 	// An obsolete patch (reportNoChange warns of it below) and a patch that
 	// would replace one carrying more than the new patch does are warnings
 	// like any other: --yes must not wave them through unreviewed.
@@ -251,6 +257,12 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		// changes nothing, so there is nothing for them to stop.
 		if !flags.skipPrepare {
 			if err := confirmWarnings(cmd, app, warned, flags, "Run its prepare step"); err != nil {
+				if errors.Is(err, errNotConfirmed) {
+					// The only thing left to do here is the prepare step: no
+					// is declining it, and the migration goes on without it.
+					skipPrepare(logger, app, tenant, flags, "declined")
+					return nil
+				}
 				return err
 			}
 		}
@@ -261,7 +273,7 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 		return err
 	}
 
-	if err := ui.FileDiff(cmd.OutOrStdout(), planned.Before, planned.After); err != nil {
+	if err := ui.FileDiffWith(cmd.OutOrStdout(), planned.Before, planned.After, diffOptions(cmd, tenantFileCurrent, tenantFileWithNew, ui.SectionsYAML)); err != nil {
 		return err
 	}
 
@@ -354,68 +366,40 @@ func confirmWarnings(cmd *cobra.Command, app config.App, warned bool, flags migr
 	return nil
 }
 
-// reportDroppedFromExisting warns that replacing app's existing patch with
-// the computed one loses what only the existing one sets.
-func reportDroppedFromExisting(logger *log.Logger, app config.App, dropped []string) {
-	if len(dropped) == 0 {
-		return
+// skipIfDeclined turns a prepare step the operator answered no to into a
+// skipped one — a warning and an entry in the end-of-run summary, no error —
+// and passes any other result through.
+func skipIfDeclined(err error, logger *log.Logger, app config.App, tenant string, flags migrateFlags) error {
+	if errors.Is(err, errPrepareDeclined) {
+		skipPrepare(logger, app, tenant, flags, "declined")
+		return nil
 	}
-	logger.Warningf("%q: the patch replaces the tenant file's existing one for this object, and drops %d path(s) only the existing patch sets "+
-		"(a hand edit, or a value this diff cannot see): %s", app.Name, len(dropped), strings.Join(dropped, ", "))
+	return err
 }
 
-// reportSkippedPrepare warns that --skip-prepare left app's prepare step
-// out, and what that leaves undone.
-func reportSkippedPrepare(logger *log.Logger, app config.App, tenant string) {
-	step := prepare.Find(app.Prepare)
-	if step == nil {
-		logger.Warningf("%q: its prepare step %q was skipped (--skip-prepare)", app.Name, app.Prepare)
-		return
+// skipPrepare leaves app's prepare step out — --skip-prepare, or the
+// operator answering no to it (why) — tells them what that leaves undone,
+// and records it for the summary at the end of the run. The migration goes
+// on either way.
+func skipPrepare(logger *log.Logger, app config.App, tenant string, flags migrateFlags, why string) {
+	reportSkippedPrepare(logger, app, tenant, why)
+	if flags.onSkippedPrepare != nil {
+		flags.onSkippedPrepare(app)
 	}
-	logger.Warningf("%q: prepare step %q skipped (--skip-prepare): %s. The patch is in the tenant file, but Flux shouldn't reconcile the app "+
-		"until the step is done: run `flux stratio apps migrate %s` without --skip-prepare (it finds the patch up to date and goes straight to the step).",
-		app.Name, step.Name, step.Description, app.ID)
-	if !step.Automated && step.Query == nil {
-		logger.Warningf("%q: done by hand, the step is:\n%s", app.Name, step.InstructionsFor(tenant))
-	}
+}
+
+// reportSkippedPrepare says app's prepare step was NOT run (why: the
+// --skip-prepare flag, or "declined" at its prompt), that the migration went
+// on without it, and what that leaves undone.
+func reportSkippedPrepare(logger *log.Logger, app config.App, tenant, why string) {
+	showSections(logger, skippedPrepareSection(app, tenant, why))
 }
 
 // reportSkippedPrepares lists, at the end of a run, every app whose prepare
-// step --skip-prepare left out, so they can't scroll away unnoticed.
+// step was left out (--skip-prepare, or declined), so they can't scroll away
+// unnoticed.
 func reportSkippedPrepares(logger *log.Logger, apps []config.App) {
-	if len(apps) == 0 {
-		return
-	}
-	lines := make([]string, len(apps))
-	for i, a := range apps {
-		lines[i] = fmt.Sprintf("  %s (%s): flux stratio apps migrate %s", a.ID, a.Prepare, a.ID)
-	}
-	logger.Warningf("%d app(s) still need their prepare step before Flux reconciles them:\n%s", len(apps), strings.Join(lines, "\n"))
-}
-
-// reportUnresolvedDeps warns about each of app's tenant-file dependencies
-// that names an entry the tenant file doesn't declare. The patch is still
-// written (the missing entry may be added in the same change), but Flux
-// holds the app's Kustomization back on the missing apps-<name> until
-// the name is fixed.
-func reportUnresolvedDeps(logger *log.Logger, app config.App, deps []tenantfile.UnresolvedDependency) {
-	for _, d := range deps {
-		declared := "none declared"
-		if len(d.Declared) > 0 {
-			declared = "declared: " + strings.Join(d.Declared, ", ")
-		}
-		logger.Warningf("%s depends on %s %q, which the tenant file doesn't declare (%s) — Flux will hold %s back on apps-%s until it's fixed",
-			app.Object, d.Key, d.Name, declared, app.Kustomization, d.Name)
-	}
-}
-
-// reportLegacyAgentPatches warns of gosec-agent patches the legacy client
-// wrote to the parent entry's patches, where nothing reads them.
-func reportLegacyAgentPatches(logger *log.Logger, app config.App, n int) {
-	if n > 0 {
-		logger.Warningf("%d patch(es) for %s sit in the parent entry's patches: the legacy client put them there and they are ignored — "+
-			"the agent reads config.agent.patches; remove them", n, app.Object)
-	}
+	showSections(logger, skippedPreparesSection(apps)...)
 }
 
 // ensurePrepared checks app's declared prepare precondition and, if it
@@ -429,7 +413,10 @@ func reportLegacyAgentPatches(logger *log.Logger, app config.App, n int) {
 // never skipped by --yes — no Kubernetes API can verify a
 // data rewrite happened correctly, so apps migrate never claims to on its
 // own. A non-automated, non-Query step prints what the operator must do
-// by hand and always asks the same way.
+// by hand and always asks the same way. Answering no to any of those
+// questions is errPrepareDeclined: the step is skipped, never the whole
+// migration (the one exception is the Query step's second question, asked
+// after the SQL already ran, whose no is a real failure).
 func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.Client, execer kubeclient.Execer, backupFirst func() error, logger *log.Logger, dryRun, yes bool) error {
 	step := prepare.Find(app.Prepare)
 	if step == nil {
@@ -441,7 +428,7 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 	}
 
 	if !step.Automated {
-		logger.Warningf("prepare step %q is required for %q: %s. Do it by hand:\n%s", step.Name, app.Name, step.Description, step.InstructionsFor(tenant))
+		showSections(logger, prepareManualSection(step, app, tenant, dryRun))
 		if dryRun {
 			logger.Successf("dry run: would ask whether you have completed prepare step %q", step.Name)
 			return nil
@@ -451,12 +438,12 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 			return err
 		}
 		if !proceed {
-			return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
+			return errPrepareDeclined
 		}
 		return nil
 	}
 
-	popts := prepare.Options{TenantName: tenant, LiveName: app.LiveName(), LiveNamespace: app.LiveNamespace(), Client: c, Log: logger}
+	popts := prepareOptions(app, tenant, c, nil, logger)
 	ops, err := step.Plan(cmd.Context(), popts)
 	if err != nil {
 		return fmt.Errorf("planning prepare step %q: %w", step.Name, err)
@@ -466,13 +453,7 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 		return nil
 	}
 
-	logger.Actionf("prepare step %q is required for %q: %s. It will:", step.Name, app.Name, step.Description)
-	for i, op := range ops {
-		logger.Actionf("  %d. %s", i+1, op)
-	}
-	if err := writePrepareManifests(cmd.OutOrStdout(), ops); err != nil {
-		return err
-	}
+	showSections(logger, prepareOpsSection(step, app, ops, dryRun, yes))
 	if dryRun {
 		logger.Successf("dry run: would run prepare step %q (%d operation(s) above)", step.Name, len(ops))
 		return nil
@@ -483,7 +464,7 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 			return err
 		}
 		if !proceed {
-			return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
+			return errPrepareDeclined
 		}
 	}
 	if backupFirst == nil {
@@ -499,8 +480,18 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 		}
 	}
 	logger.Successf("prepare step %q complete", step.Name)
-	logger.Warningf("what prepare step %q deleted or scaled down stays that way until the tenant file's change is committed, pushed and reconciled by Flux", step.Name)
+	showSections(logger, preparedSection(step))
 	return nil
+}
+
+// prepareOptions is what a prepare step is given about app: its live
+// object, and the selector for every legacy workload of its family.
+func prepareOptions(app config.App, tenant string, c client.Client, execer kubeclient.Execer, logger *log.Logger) prepare.Options {
+	return prepare.Options{
+		TenantName: tenant, LiveName: app.LiveName(), LiveNamespace: app.LiveNamespace(),
+		IsLegacy: func(obj *unstructured.Unstructured) bool { return components.MatchesAny(app.Family, obj) },
+		Client:   c, Execer: execer, Log: logger,
+	}
 }
 
 // ensurePreparedQuery shows step's Query — the SQL, with the tenant
@@ -511,14 +502,13 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 // client's own version of this same check exited 0 unconditionally,
 // marking the step migrated on faith whether or not the SQL was ever run.
 func ensurePreparedQuery(cmd *cobra.Command, step prepare.Step, app config.App, tenant string, c client.Client, execer kubeclient.Execer, logger *log.Logger, dryRun bool) error {
-	popts := prepare.Options{TenantName: tenant, LiveName: app.LiveName(), LiveNamespace: app.LiveNamespace(), Client: c, Execer: execer, Log: logger}
+	popts := prepareOptions(app, tenant, c, execer, logger)
 
 	pod, _, _, err := step.RunQuery(cmd.Context(), popts, tenant, true)
 	if err != nil {
 		return fmt.Errorf("resolving prepare step %q's target pod: %w", step.Name, err)
 	}
-	logger.Warningf("prepare step %q is required for %q: %s. It will run against pod %s/%s:\n%s",
-		step.Name, app.Name, step.Description, pod.Namespace, pod.Name, strings.ReplaceAll(step.Query.SQL, "<tenant>", tenant))
+	showSections(logger, prepareQuerySection(&step, app, tenant, pod.Namespace+"/"+pod.Name, dryRun))
 	if dryRun {
 		logger.Successf("dry run: would run prepare step %q against pod %s/%s", step.Name, pod.Namespace, pod.Name)
 		return nil
@@ -529,7 +519,7 @@ func ensurePreparedQuery(cmd *cobra.Command, step prepare.Step, app config.App, 
 		return err
 	}
 	if !proceed {
-		return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
+		return errPrepareDeclined
 	}
 
 	logger.Actionf("running prepare step %q", step.Name)
@@ -554,21 +544,6 @@ func ensurePreparedQuery(cmd *cobra.Command, step prepare.Step, app config.App, 
 	}
 	if !proceed {
 		return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
-	}
-	return nil
-}
-
-// writePrepareManifests writes each operation's live object as a YAML
-// document, headed by a comment naming the operation.
-func writePrepareManifests(w io.Writer, ops []prepare.Operation) error {
-	for i, op := range ops {
-		manifest, err := op.Manifest()
-		if err != nil {
-			return fmt.Errorf("rendering %s: %w", op, err)
-		}
-		if _, err := fmt.Fprintf(w, "---\n# %d. %s\n%s", i+1, op, manifest); err != nil {
-			return err
-		}
 	}
 	return nil
 }

@@ -64,9 +64,43 @@ review it before committing:
 - Any dependency the scan couldn't resolve is still emitted, with an empty `name:` and a warning
   logged to stderr explaining why — search the file for empty `name: ""` dependency entries and
   fill them in.
-- The scan never writes to the file directly (`--output` is required, or it prints to stdout), and
-  refuses to overwrite an existing `--output` without `--force` — regenerating a tenant file that
-  already has hand-authored fields or patches would drop them.
+- A field a component template reads that has no default and can't be derived from the cluster
+  (genai's `llmModels`, litellm's `models`, ...) is not scaffolded; a warning names it so you set it
+  by hand. Virtualizer's `uiEnabled` is scaffolded: `true` when its monitor or ui runs on the
+  cluster, `false` otherwise.
+- Without `--output` the skeleton goes to stdout.
+
+### Completing a tenant file you already have
+
+`tenant import` works on an existing tenant file too — the usual case mid-migration, when half of it
+is commented-out component blocks and it carries migrated patches. Pointing `--output` at that file
+*completes* it instead of replacing it:
+
+```shell
+flux stratio tenant import --dry-run \
+  --output keos-fleet/clusters/<cluster>/tenants/config/<tenant>.yaml   # the diff, nothing written
+flux stratio tenant import \
+  --output keos-fleet/clusters/<cluster>/tenants/config/<tenant>.yaml   # write the additions
+```
+
+- It adds only what's missing from the *active* entries: the config fields their templates read
+  (virtualizer's `uiEnabled` among them: without it the chart drops the monitor and ui, and the
+  server pod logs `permission denied for database "virtualizer-monitor"`), dependencies it can
+  resolve, the storage type, and the top-level fields (`tenantName`, `size`, ...) the file lacks.
+- It never removes, reorders, uncomments or overwrites anything. A value you wrote wins even when the
+  cluster disagrees (e.g. `uiEnabled: false` next to a running virtualizer-ui): that is a warning.
+  Commented-out `# <key>:` blocks stay commented out; run it again after uncommenting one.
+- The added lines are the entire `git diff`, and running it twice in a row changes nothing ("nothing to
+  add"). The tool never commits.
+- Components live on the cluster that the file doesn't declare are added as new entries, unless the key
+  is commented out. A new entry makes Flux render that component, so read the diff before committing
+  (`--dry-run` first). If the key already declares another entry, you get a warning in case it is the
+  same component under another name.
+- `--force` regenerates the whole file and drops everything written by hand; use it only to start over.
+- The virtualizer's `uiEnabled` is derived through `chart.enabledBy` in `catalog.yaml` (see
+  [`config-reference.md`](config-reference.md)); a catalog seeded before that field existed gets the
+  seed's value for the same type, so it needs no re-seeding. If the catalog can't be loaded at all,
+  the command warns that such keys are not set.
 
 Commit the reviewed file to `keos-fleet` before continuing.
 
@@ -88,13 +122,26 @@ single-app run to answer up front, e.g. `flux stratio apps migrate kafka1 --as k
 
 For an app with a declared `prepare` step, read what that step actually does before your first run
 against production. Run `flux stratio apps migrate <name> --dry-run` first: it lists every operation
-the step would perform and prints the live manifest of each object it would touch, without
+the step would perform, without
 changing anything. `flux stratio apps migrate` then asks before running exactly those, but a step like
 `prepare-datamarket-agent` suspends and scales down a live workload, which is disruptive by nature
 even though it's exactly what needs to happen before cutover. The step runs only after you've
 confirmed the patch, which was computed while the legacy objects were still live, so a step that
 deletes them (`prepare-dlc`) never leaves the patch with nothing to read from. See
-[`config-reference.md`](config-reference.md#prepare) for what each of the four steps does.
+[`config-reference.md`](config-reference.md#prepare) for what each step does.
+
+**Virtualizer** is three legacy Deployments (the server, `virtualizer-monitor`, `virtualizer-ui`) that the
+chart renders as one release, each under a new immutable selector. `tenant import` writes `uiEnabled: true`
+on the virtualizer entry while the monitor or ui run, which makes the chart render them; pushed before the
+legacy Deployments are gone, the upgrade fails and Flux's rollback fails after it (`original object Job …
+not found`, because the chart names its prerequisites Job after the release revision), hiding the real
+error. So run `apps migrate virtualizer` first — its `prepare-virtualizer` step deletes the legacy
+Deployments of the whole family, and re-running it after the cutover plans nothing — and only then push.
+It leaves the legacy ingresses, Services and the `virtualizer-loadbalancer` Service alone: if the patch
+carries the legacy `virtualizerUi.general.monitorAPI`/`logoutAPI` (hosts `virtualizer.stratio.<domain>`) the
+UI depends on those ingresses; delete them by hand once the patch uses the chart's `admin.` hosts. The
+legacy `virtualizer-loadbalancer` Service selects the old CCT label and has no endpoints after the
+cutover, and the chart has no LoadBalancer: decide what replaces it.
 
 ## 5. Back up before touching anything
 
@@ -155,8 +202,8 @@ delta, and never trusting "already done."
 >
 > Then commit and push the tenant file: Flux re-applies the component with the patch, restoring the
 > legacy values (a changed replica count or resources roll the component's pods). Confirm with
-> `flux stratio apps diff pool-psql --baseline latest`, which should now report nothing to migrate: the
-> tenant file's existing patch already covers every difference.
+> `flux stratio apps diff pool-psql --baseline latest`, which compares with the patch applied and should
+> now report no differences.
 
 **`--baseline` is the exception, not the rule.** Migrate against the live cluster (the default)
 while the component's legacy workloads still run untouched. Reach for `--baseline` only when you

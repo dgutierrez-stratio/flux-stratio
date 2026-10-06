@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"io"
 	"strings"
 )
@@ -21,7 +20,7 @@ type diffOp struct {
 	text string
 }
 
-// FileDiff writes a unified diff between before and after to w, in the
+// FileDiff writes a plain unified diff between before and after to w, in the
 // style of `diff -u`: hunks of "@@ -oldStart,oldCount +newStart,newCount
 // @@" headers, a few lines of surrounding context, "-" for removed lines
 // and "+" for added lines. It is flux-stratio's one diff renderer, reused
@@ -32,27 +31,9 @@ type diffOp struct {
 // Two identical documents produce no output at all — a caller that wants
 // to announce "no differences" checks for that itself before calling
 // FileDiff, the same way internal/diff already needs to know whether a
-// patch is empty.
+// patch is empty. FileDiffWith is the styled one (labels, colour, headers).
 func FileDiff(w io.Writer, before, after string) error {
-	ops := diffLines(splitLines(before), splitLines(after))
-	for _, h := range buildHunks(ops, 3) {
-		if _, err := fmt.Fprintf(w, "@@ -%d,%d +%d,%d @@\n", h.oldStart, h.oldCount, h.newStart, h.newCount); err != nil {
-			return err
-		}
-		for _, op := range h.ops {
-			prefix := ' '
-			switch op.tag {
-			case tagDelete:
-				prefix = '-'
-			case tagInsert:
-				prefix = '+'
-			}
-			if _, err := fmt.Fprintf(w, "%c%s\n", prefix, op.text); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return FileDiffWith(w, before, after, DiffOptions{})
 }
 
 // splitLines splits s on "\n", dropping one trailing empty element left by
@@ -65,12 +46,49 @@ func splitLines(s string) []string {
 	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
-// diffLines computes a minimal edit script turning a into b from a classic
-// longest-common-subsequence table, O(len(a)*len(b)) time and space. That
-// is more than adequate for what this plugin diffs — tenant YAML files and
-// rendered Helm/CR value trees, at most a few hundred lines.
+// maxLCSCells caps the longest-common-subsequence table diffLines builds
+// (cells, 8 bytes each): two documents of thousands of lines that share
+// nothing would otherwise ask for gigabytes. Past it the differing middle is
+// shown as removed in full and added in full — correct, if not minimal.
+var maxLCSCells = 16_000_000
+
+// diffLines computes an edit script turning a into b. What the two share at
+// the start and at the end is peeled off first (most diffs are a few changes in
+// a long document), and the middle gets a classic longest-common-subsequence
+// table, O(len*len) time and space — within maxLCSCells, past which the
+// middle is one block of deletions and one of insertions.
 func diffLines(a, b []string) []diffOp {
+	pre := 0
+	for pre < len(a) && pre < len(b) && a[pre] == b[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(a)-pre && suf < len(b)-pre && a[len(a)-1-suf] == b[len(b)-1-suf] {
+		suf++
+	}
+	ops := make([]diffOp, 0, len(a)+len(b))
+	for _, l := range a[:pre] {
+		ops = append(ops, diffOp{tag: tagEqual, text: l})
+	}
+	ops = append(ops, diffMiddle(a[pre:len(a)-suf], b[pre:len(b)-suf])...)
+	for _, l := range a[len(a)-suf:] {
+		ops = append(ops, diffOp{tag: tagEqual, text: l})
+	}
+	return ops
+}
+
+func diffMiddle(a, b []string) []diffOp {
 	n, m := len(a), len(b)
+	if n == 0 || m == 0 || (n+1)*(m+1) > maxLCSCells {
+		ops := make([]diffOp, 0, n+m)
+		for _, l := range a {
+			ops = append(ops, diffOp{tag: tagDelete, text: l})
+		}
+		for _, l := range b {
+			ops = append(ops, diffOp{tag: tagInsert, text: l})
+		}
+		return ops
+	}
 	lcs := make([][]int, n+1)
 	for i := range lcs {
 		lcs[i] = make([]int, m+1)

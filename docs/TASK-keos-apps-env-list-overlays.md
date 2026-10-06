@@ -1,9 +1,33 @@
 # Task: keos-apps rocket (and virtualizer) overlays must not replace the chart's env list
 
-**Status: open, low priority.** Repo: **`Stratio/keos-apps`** (not flux-stratio; this file lives here
-only so the task is next to its siblings). Branch off `main` in a new worktree; **not** part of
-PR #147 (litellm). Related: `docs/TASK-chart-spec-comparison.md` (item 4 warns about this),
+**Status: done, pending merge.** Implemented in **`Stratio/keos-apps` PR #152**
+(https://github.com/Stratio/keos-apps/pull/152, branch `nojira/env-list-overlays`, off `main`; not part
+of PR #147). Do not redo the change; review/merge that PR instead. The only step left is the post-merge
+check below. Repo: **`Stratio/keos-apps`** (not flux-stratio; this file lives here only so the task is
+next to its siblings). Related: `docs/TASK-chart-spec-comparison.md` (item 4 warns about this),
 `docs/TASK-charts-universe-alignment.md` (makes this matter more, see Why now).
+
+### Outcome (2026-10-02)
+- 15 overlays changed. Rocket (6): `env:` list removed, the 12 `SPARTA_BOOTSTRAP_*` values now set through
+  `rocketServer.environment.workers.*`. Virtualizer (9): the `VR_*` list, identical to the chart default, removed.
+- Real chart keys differ from the examples under "Change": `externalServiceCpusRequest/Limit` (plural
+  "Cpus") and `validatorCpuRequest/Limit`. All 12 variables had a `workers.*` path, so nothing was dropped.
+- Verification (effective env = ConfigMap data from `envFrom`, then `env` on top; a raw render diff is
+  misleading because the sizing now lives in the ConfigMap): rocket, all 6 overlays, differ only by the
+  added `ROCKET_POD_NAME`; virtualizer, all 9, no difference. Same result against Stratio/charts#258
+  (head `614ddaa`), which touches none of these paths. Rocket pods roll on reconcile (`checksum/configMaps`);
+  virtualizer renders are byte-identical.
+- eosdev, read-only `flux stratio apps diff rocket --repo keos-apps=<PR worktree>`: the patch carries the
+  chart default env list (`SERVICE_ACCOUNT_NAME` + gated `ROCKET_POD_NAME`) plus the
+  `PEKKO_DISCOVERY_KUBERNETES_POD_DOMAIN` pin, with live sizing under `workers.*`. With the old overlays it
+  reported "nothing to migrate".
+- **Still to do after the PR merges:** run the real `flux stratio apps migrate rocket` on eosdev (no
+  `--repo`), confirm it writes that patch, and that a second run reports it up to date. `vet.sh` was not run
+  locally (no `kubeconform`); PR CI covers it.
+
+**Universe reference:** if you compare a chart default or env list with the CCT descriptor, use
+**release 15.1 of `kubernetes-universe`** (`origin/branch-15.1`), never `master`/14.x, and record the
+SHA. See "Universe reference" in `docs/TASK-charts-universe-alignment.md`.
 
 ## Problem
 

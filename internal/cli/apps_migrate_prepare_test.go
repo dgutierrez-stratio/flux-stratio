@@ -121,8 +121,8 @@ func (r *prepareRun) ingressExists(t *testing.T) bool {
 }
 
 // TestEnsurePrepared_DryRunShowsThePlanAndChangesNothing: the operator
-// sees every operation (stderr) and each target's live manifest (stdout),
-// and nothing is asked or touched.
+// sees every operation (stderr), never the objects' manifests — kubectl is
+// there for that — and nothing is asked or touched.
 func TestEnsurePrepared_DryRunShowsThePlanAndChangesNothing(t *testing.T) {
 	r, err := runPrepare(t, datarestApp, noRead{t}, true, false, nil, nil, legacyIngress())
 	if err != nil {
@@ -131,26 +131,23 @@ func TestEnsurePrepared_DryRunShowsThePlanAndChangesNothing(t *testing.T) {
 	if r.muts.deletes+r.muts.patches != 0 || !r.ingressExists(t) || r.backups != 0 {
 		t.Errorf("dry run mutated the cluster or took a backup: %+v, backups = %d", r.muts, r.backups)
 	}
-	const op = "1. delete Ingress stratio-datastores/dg-datarest-pgi-admin.eosdev.int"
-	if !strings.Contains(r.stderr.String(), op) || !strings.Contains(r.stderr.String(), "dry run: would run prepare step") {
+	const row = "dg-datarest-pgi-admin.eosdev.int delete Ingress stratio-datastores"
+	if e := flat(r.stderr.String()); !strings.Contains(e, "[ACTION] prepare step \"prepare-datarest\"") || !strings.Contains(e, row) || !strings.Contains(e, "dry run: would run prepare step") {
 		t.Errorf("stderr lacks the plan:\n%s", r.stderr.String())
 	}
-	out := r.stdout.String()
-	for _, want := range []string{"---\n# " + op + "\n", "kind: Ingress", "name: dg-datarest-pgi-admin.eosdev.int", "ingressClassName: default-ingress-class"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("stdout lacks %q:\n%s", want, out)
-		}
+	if out := r.stdout.String(); out != "" {
+		t.Errorf("a manifest or narration reached stdout:\n%s", out)
 	}
-	if strings.Contains(out, "►") || strings.Contains(out, "✔") {
-		t.Errorf("narration leaked into stdout:\n%s", out)
+	if !strings.Contains(flat(r.stderr.String()), "kubectl get <kind> <name> -n <namespace> -o yaml") {
+		t.Errorf("no hint on how to inspect an object:\n%s", r.stderr.String())
 	}
 }
 
 func TestEnsurePrepared_DeclinedChangesNothing(t *testing.T) {
 	for _, answer := range []string{"n\n", "\n", ""} {
 		r, err := runPrepare(t, datarestApp, strings.NewReader(answer), false, false, nil, nil, legacyIngress())
-		if err == nil || !strings.Contains(err.Error(), "not confirmed") {
-			t.Errorf("answer %q: err = %v, want not confirmed", answer, err)
+		if !errors.Is(err, errPrepareDeclined) {
+			t.Errorf("answer %q: err = %v, want the step declined (skipped, not a failure)", answer, err)
 		}
 		if r.muts.deletes != 0 || !r.ingressExists(t) {
 			t.Errorf("answer %q: the Ingress was deleted without a yes", answer)
@@ -172,8 +169,8 @@ func TestEnsurePrepared_ConfirmedRunsExactlyThePlan(t *testing.T) {
 	if !strings.Contains(r.stderr.String(), `prepare step "prepare-datarest" complete`) {
 		t.Errorf("stderr:\n%s", r.stderr.String())
 	}
-	// The prompt is narration: with stdout redirected to capture the
-	// manifests, it must still reach the operator.
+	// The prompt is narration: with stdout redirected, it must still reach
+	// the operator.
 	const prompt = `Run these 1 operation(s) of prepare step "prepare-datarest" now? [y/N]`
 	if !strings.Contains(r.stderr.String(), prompt) || strings.Contains(r.stdout.String(), "[y/N]") {
 		t.Errorf("prompt went to stdout, not stderr:\nstdout: %s\nstderr: %s", r.stdout.String(), r.stderr.String())
@@ -181,14 +178,15 @@ func TestEnsurePrepared_ConfirmedRunsExactlyThePlan(t *testing.T) {
 }
 
 // TestEnsurePrepared_YesSkipsTheAutomatedPrompt: --yes answers the
-// automated step's confirmation, but the plan is still shown first.
+// automated step's confirmation, but the plan is still listed first.
 func TestEnsurePrepared_YesSkipsTheAutomatedPrompt(t *testing.T) {
 	r, err := runPrepare(t, datarestApp, noRead{t}, false, true, nil, nil, legacyIngress())
 	if err != nil {
 		t.Fatalf("ensurePrepared: %v", err)
 	}
-	if r.ingressExists(t) || !strings.Contains(r.stdout.String(), "kind: Ingress") {
-		t.Errorf("--yes: want the plan shown and applied")
+	e := flat(r.stderr.String())
+	if r.ingressExists(t) || !strings.Contains(e, "dg-datarest-pgi-admin.eosdev.int delete Ingress") || strings.Contains(e, "Answer n") || r.stdout.Len() != 0 {
+		t.Errorf("--yes: want the plan listed (no manifests, no question hint) and applied:\n%s", r.stderr.String())
 	}
 }
 
@@ -278,8 +276,8 @@ func TestEnsurePrepared_GenaiAlwaysAsks(t *testing.T) {
 
 	execer = newExecer()
 	r, err = runPrepare(t, app, strings.NewReader("n\n"), false, true, nil, execer, genaiMasterPod())
-	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
-		t.Errorf("--yes with a no before running: err = %v, want not confirmed (--yes must not answer it)", err)
+	if !errors.Is(err, errPrepareDeclined) {
+		t.Errorf("--yes with a no before running: err = %v, want the step declined (--yes must not answer it)", err)
 	}
 	if len(execer.Calls) != 0 {
 		t.Errorf("declined before running: execer was called: %v", execer.Calls)
@@ -339,3 +337,136 @@ func TestSaveThenPrepare_SaveFailureRunsNoPrepare(t *testing.T) {
 		t.Errorf("err = %v, want it to say the patch is saved and why prepare stopped", err)
 	}
 }
+
+// virtualizerFamilyApp is `apps migrate virtualizer` on eosdev once the
+// server is already Helm-managed: its live object is the GitOps
+// Deployment, and Family is what the seeded catalog selects.
+func virtualizerFamilyApp(t *testing.T) config.App {
+	t.Helper()
+	typ := config.SeedCatalog().Find("virtualizer")
+	if typ == nil {
+		t.Fatal("the seed catalog has no virtualizer type")
+	}
+	return config.App{
+		ID: "virtualizer", Name: "Virtualizer virtualizer", Prepare: typ.Prepare,
+		Family: append([]config.Match{typ.Match}, typ.SiblingMatches()...),
+		Live:   []config.ObjectRef{{GVK: gvkDeployment, Namespace: "stratio-apps", Name: "virtualizer"}},
+	}
+}
+
+func cctDeployment(name, model string, labels map[string]string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{}}
+	u.SetGroupVersionKind(gvkDeployment)
+	u.SetNamespace("stratio-apps")
+	u.SetName(name)
+	u.SetUID(types.UID("uid-" + name))
+	u.SetAnnotations(map[string]string{
+		"cct.stratio.com/application_service": "virtualizer",
+		"cct.stratio.com/application_model":   model,
+	})
+	u.SetLabels(labels)
+	return u
+}
+
+// TestEnsurePrepared_VirtualizerReplacesTheLegacySiblings: with the server
+// already Helm-managed, the step finds the legacy monitor and ui by the
+// catalog's sibling selectors — not by the app's own CCT id — and deletes
+// their Deployments only: the GitOps Deployment, every ingress and another
+// app stay.
+func TestEnsurePrepared_VirtualizerReplacesTheLegacySiblings(t *testing.T) {
+	ingress := func(name, id string) *unstructured.Unstructured {
+		u := legacyIngress()
+		u.SetNamespace("stratio-apps")
+		u.SetName(name)
+		u.SetUID(types.UID("uid-" + name))
+		u.SetLabels(map[string]string{"cct.stratio.com/application_id": id})
+		return u
+	}
+	objs := []client.Object{
+		cctDeployment("virtualizer", "default", map[string]string{"helm.toolkit.fluxcd.io/name": "virtualizer"}),
+		cctDeployment("virtualizer-monitor", "virtualizer-monitor", map[string]string{"cct.stratio.com/application_id": "virtualizer-monitor.stratio-apps"}),
+		cctDeployment("virtualizer-ui", "virtualizer-ui", map[string]string{"cct.stratio.com/application_id": "virtualizer-ui.stratio-apps"}),
+		ingress("virtualizer-monitor-virtualizer.stratio.eosdev", "virtualizer-monitor.stratio-apps"),
+		ingress("virtualizer-ui-virtualizer.stratio.eosdev", "virtualizer-ui.stratio-apps"),
+		ingress("discovery-discovery.stratio.eosdev", "discovery.stratio-apps"),
+	}
+
+	r, err := runPrepare(t, virtualizerFamilyApp(t), noRead{t}, true, false, nil, nil, objs...)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if r.muts.deletes != 0 {
+		t.Errorf("--dry-run deleted %d object(s)", r.muts.deletes)
+	}
+	e := flat(r.stderr.String())
+	for _, want := range []string{
+		"virtualizer-monitor delete Deployment stratio-apps",
+		"virtualizer-ui delete Deployment stratio-apps",
+	} {
+		if !strings.Contains(e, want) {
+			t.Errorf("the plan doesn't list %q:\n%s", want, r.stderr.String())
+		}
+	}
+	for _, not := range []string{"Ingress", "virtualizer delete Deployment", "discovery"} {
+		if strings.Contains(e, not) {
+			t.Errorf("the plan reaches %q:\n%s", not, r.stderr.String())
+		}
+	}
+
+	r, err = runPrepare(t, virtualizerFamilyApp(t), noRead{t}, false, true, nil, nil, objs...)
+	if err != nil {
+		t.Fatalf("--yes: %v", err)
+	}
+	if r.muts.deletes != 2 || r.backups != 1 {
+		t.Errorf("deletes = %d, backups = %d; want 2 deletes after exactly one backup", r.muts.deletes, r.backups)
+	}
+}
+
+// TestEnsurePrepared_AsksWhatNoDoes: every prepare question is preceded by
+// what answering no does — skip that step, go on with the migration.
+func TestEnsurePrepared_AsksWhatNoDoes(t *testing.T) {
+	r, err := runPrepare(t, datarestApp, strings.NewReader("n\n"), false, false, nil, nil, legacyIngress())
+	if !errors.Is(err, errPrepareDeclined) {
+		t.Fatalf("err = %v, want declined", err)
+	}
+	e := flat(r.stderr.String())
+	note := strings.Index(e, "Answer n at the question to skip only this step: the migration goes on without it")
+	prompt := strings.Index(e, "[y/N]")
+	if note < 0 || prompt < 0 || note > prompt {
+		t.Errorf("the note about n must come before the question:\n%s", r.stderr.String())
+	}
+	if !strings.Contains(e, "flux stratio apps migrate dg-datarest-pgi") {
+		t.Errorf("the note doesn't say how to run the step later:\n%s", r.stderr.String())
+	}
+}
+
+// TestSkipIfDeclined: a declined step is a warning and a line in the
+// summary, never an error; any other failure still stops the app.
+func TestSkipIfDeclined(t *testing.T) {
+	var out bytes.Buffer
+	logger := log.New(&out, false)
+	var skipped []config.App
+	flags := migrateFlags{onSkippedPrepare: func(a config.App) { skipped = append(skipped, a) }}
+	app := config.App{ID: "dg-hdfs-agent", Name: "Governance agent dg-hdfs-agent", Prepare: "prepare-dg-agent"}
+
+	if err := skipIfDeclined(errPrepareDeclined, logger, app, "stratio", flags); err != nil {
+		t.Fatalf("a declined step returned %v, want nil: the migration goes on", err)
+	}
+	if len(skipped) != 1 || skipped[0].ID != "dg-hdfs-agent" {
+		t.Errorf("skipped = %v, want the app recorded for the summary", skipped)
+	}
+	for _, want := range []string{`prepare step "prepare-dg-agent" was NOT run (you declined it)`, "flux stratio apps migrate dg-hdfs-agent"} {
+		if !strings.Contains(flat(out.String()), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+
+	boom := errors.New("boom")
+	if err := skipIfDeclined(boom, logger, app, "stratio", flags); !errors.Is(err, boom) || len(skipped) != 1 {
+		t.Errorf("a real failure: err = %v, skipped = %d; want it passed through and nothing recorded", err, len(skipped))
+	}
+}
+
+// flat collapses every run of whitespace, so a sentence the layout wrapped
+// onto several lines or a table row padded into columns can be searched for.
+func flat(s string) string { return strings.Join(strings.Fields(s), " ") }

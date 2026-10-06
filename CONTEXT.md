@@ -16,7 +16,7 @@ list of correctness bugs the port fixed along the way.
 The workflow it supports, end to end:
 
 1. `tenant import` — scan a live, not-yet-migrated cluster, render a tenant
-   `ResourceSetInputProvider` skeleton.
+   `ResourceSetInputProvider` skeleton, or complete an existing one (only additions).
 2. `apps backup` — capture every app's live legacy state to disk, for the record and as a
    comparison point.
 3. `apps diff` — compare an app's rendered GitOps desired state against its live legacy state (or
@@ -54,7 +54,7 @@ flux stratio doctor                            # preflight: binaries (+ optional
 flux stratio config init --base --cluster --tenant [--charts] [--dir] [--force]
                                                  # write catalog.yaml (19 seeded component types) + environment.yaml
 
-flux stratio tenant import [--size] [--output] [--force]
+flux stratio tenant import [--size] [--output] [--force] [--dry-run]
                                                  # scan the live cluster → tenant RSIP skeleton
 
 flux stratio apps backup <name> | --catalog | --all [--dir] [--as]
@@ -94,7 +94,7 @@ External binaries flux-stratio shells out to (never `kubectl` — see §6):
 | `flux` (≥2.9.0) | `internal/render` — `build kustomization --dry-run` | yes |
 | `helm` | `internal/diff.HelmTemplate` — chart-mode rendering | yes |
 | `kubectl` | version-check only; cluster access is via its own Go client | yes |
-| `meld` | `internal/ui.Meld` — `apps diff --view meld` | **optional** — `doctor` reports it as a non-blocking, informational check |
+| `meld` | `internal/ui.OpenMeld` — `apps diff --view meld` (one window, a tab per resource: `ui.MeldTabs`) | **optional** — `doctor` reports it as a non-blocking, informational check |
 
 ## 5. Repository layout & conventions
 
@@ -133,9 +133,11 @@ convention, that repo is the reference:
   `► ✚ ◎ ✔ ⚠️ ✗`. Nil-safe. `Debugf` only prints under `-v`.
 - **`internal/ui`** — the only place result *data* gets written (always stdout, never stderr — this
   split is load-bearing: it's what makes piping a command's output safe). Three renderers, each
-  reused by more than one caller: `Patch` (raw `patches:` YAML), `FileDiff` (hand-written unified
-  diff — two identical inputs produce no output at all), `Meld` (writes two temp files, shells out
-  to `meld`, blocks until the window closes).
+  reused by more than one caller: `Patch` (raw `patches:` YAML), `FileDiff`/`FileDiffWith` (hand-written unified
+  diff — two identical inputs produce no output at all; `FileDiffWith` adds the `---`/`+++` side labels, colour, per-workload or YAML-path hunk headers and the highlight of what differs within a removed/added pair), `Meld` (writes two temp files, shells out
+  to `meld`, blocks until the window closes), `MeldTabs`/`OpenMeld` (the same for several `Comparison`s: one meld,
+  one `--diff` tab each — meld's `--label` only names the first tab, so each side's file is named
+  `<label>-<resource>.yaml`, the labels being `ui.LabelDesired/LabelLive/LabelBackup/LabelLiveNow`).
 - **`internal/kubeclient`** — `New` builds a controller-runtime client from kubeconfig flags, field
   owner `"flux-stratio"`. `GetUnstructured`/`ListUnstructured` are the two primitives everything
   else in this repo uses to read a Flux/Stratio CRD without importing its API package.
@@ -304,14 +306,16 @@ convention, that repo is the reference:
   (writes), sharing one internal `plan()` so they can never diverge. `OrderApps` topologically
   sorts `--all` by the dependency edges already declared in the tenant file itself (DFS post-order,
   cycle-safe), not catalog order.
-- **`internal/prepare`** — the four ported one-time preconditions (`prepare-datamarket-agent`,
-  `prepare-datarest`, `prepare-dlc`, `prepare-genai`). An automated step's `Plan` reads live state
+- **`internal/prepare`** — the one-time preconditions (`prepare-datamarket-agent`,
+  `prepare-datarest`, `prepare-dlc`, `prepare-genai`, `prepare-virtualizer`). An automated step's `Plan` reads live state
   and returns `[]Operation`, each carrying the live object it acts on (empty = already satisfied).
   `ensurePrepared` (in `internal/cli/apps_migrate.go`, the only caller) runs after `apps migrate`
   has planned and confirmed the patch, which is then saved from that plan (`appmigrate.Result.Save`)
-  rather than re-read — `prepare-dlc` deletes the very Deployment the patch is read from. It prints those operations and their manifests, stops there under `--dry-run`, and
+  rather than re-read — `prepare-dlc` deletes the very Deployment the patch is read from. It lists those operations (not the objects' manifests: kubectl is for that) as an `[ACTION]` review section (`internal/cli/review_prepare.go`, laid out by `renderReview` like an app's review), stops there under `--dry-run`, and
   otherwise applies exactly them. Targets are found by CCT's `cct.stratio.com/application_id` label
-  (`<App.LiveName()>.<App.LiveNamespace()>`), skipping Flux-labelled objects; there are no
+  (`<App.LiveName()>.<App.LiveNamespace()>`) — or, for `prepare-virtualizer`, by the app's whole family of
+  selectors (`config.App.Family` = the type's `match` plus its chart siblings, via `Options.IsLegacy`), since
+  after the server's cutover its monitor and ui are legacy siblings no app id points at — skipping Flux-labelled objects; there are no
   hardcoded names, since the Python client's hardcoded DLC Ingress name was wrong on eosdev. Every
   delete or patch is UID-pinned. `prepare-genai`, a Postgres data rewrite no Kubernetes API can
   verify, has a `Query` (`DBQuery`): `RunQuery` finds the tenant's PgCluster primary pod by label
@@ -323,7 +327,12 @@ convention, that repo is the reference:
   (a new `DBQuery` value) rather than one-off exec code.
 - **`internal/tenantimport`** — `tenant import`'s live-cluster scan (CRD instances → Deployments →
   HelmReleases, three passes feeding one `Components` map), fixpoint-expanding mandatory
-  dependencies, then rendering a tenant-file skeleton. Deliberately **not** reused by
+  dependencies, then rendering a tenant-file skeleton (`Run`, Create mode); `Scan` is the same pipeline
+  returning the `Components` + `Live` (config values derived from live siblings via `chart.enabledBy`),
+  and `Complete` (`merge.go`) adds to an existing file only what it lacks — through `internal/tenantfile`'s
+  textual `AddToEntry`/`AddTopLevel`/`AppendEntry` (insertions into the file's text, positions read off
+  the yaml.Node tree; `Doc.Text()`), never a yaml.v3 re-encode, which would re-indent the file's
+  sequences. Deliberately **not** reused by
   `internal/discovery` — different job (infer *which catalog component* a live object belongs to,
   scoped to a tenant's own namespaces) than discovery's (find *this exact name*, cluster-wide, no
   catalog involved).
@@ -344,16 +353,22 @@ convention, that repo is the reference:
   because it's rendering *desired* state to compute a patch against). Don't casually swap one for
   the other — they answer different questions and have different prerequisites on purpose.
 - **Idempotency contract**: `apps migrate` recomputes its patch from live state (or a `--baseline`
-  backup) on every run and replaces patches by `target.kind` at the anchor — so `internal/render`
-  renders the base *without* the tenant file's existing patches for the object's kind
-  (`Result.ReplacedPatches`), making every computed patch the whole one, never a leftover delta that
-  would drop what the existing patch carried; `appdiff.Result.UpToDate` is "the tenant already
-  carries exactly this patch". Running it twice converges; it never trusts "I already migrated
+  backup) on every run and replaces patches by `target.kind` at the anchor — so for `migrate`
+  (`appdiff.Options.StripTenantPatch` -> `render.Options.StripPatches`) `internal/render` renders the
+  base *without* the tenant file's existing patches for the object's kind (`Result.ReplacedPatches`),
+  making every computed patch the whole one, never a leftover delta that would drop what the existing
+  patch carried; `appdiff.Result.UpToDate` is "the tenant already carries exactly this patch". `apps
+  diff` does not strip: it renders the tenant file as it is (patches applied, as Flux does), so a
+  migrated app reports no differences, and it carries nothing into the delta patch of an app that
+  already has one (`ChartDiffInput.NoResourceCarry`); to see plain GitOps you comment the patch out. Running it twice converges; it never trusts "I already migrated
   this." `--dry-run` on every mutating command; `--yes` skips confirmation
   (blank line/EOF both mean "no," ported from flux-keos's own `Confirm` semantics) — except
   `prepare-genai`'s two confirmations, which `--yes` never answers, and an app's warnings, which
-  stop it under `--yes` unless `--accept-warnings`. A declined prompt is `errNotConfirmed`: the app
-  isn't migrated, `--all` skips its dependents, and the exit status says so.
+  stop it under `--yes` unless `--accept-warnings`. A declined patch prompt is `errNotConfirmed`: the app
+  isn't migrated, `--all` skips its dependents, and the exit status says so. A declined *prepare* prompt is
+  `errPrepareDeclined`, which `migrateOne` turns into a warning and an entry in the end-of-run summary
+  (`skipIfDeclined`, the same path as `--skip-prepare`): the migration continues without the step. Only
+  `prepare-genai`'s second question (after the SQL ran) stays a failure.
 - **Secrets never leave `internal/envvars`.** A variable read from a Secret resolves to a
   `<secret:NAME/KEY>` placeholder (the same one a chart's rendered `secretKeyRef` gets), so no diff,
   warning, env file or patch can print, store or write a credential; an unresolvable reference is an
@@ -409,9 +424,11 @@ being tested in a feature package first.
 - `docs/config-reference.md` and this file can drift from the actual `config.ComponentType` fields —
   if you add/remove one, update `docs/config-reference.md` and `internal/config/seed.go` in the
   same change.
-- `tenant import`'s `ExtraConfig` scaffolding (`internal/catalog.Schema.ExtraConfig`) only
-  understands a flat scalar read directly off `$componentConfig`, with an optional quoted-string
-  default — a nested sub-config (a variable assigned from `$componentConfig` and read for several
-  leaf keys elsewhere, e.g. genai's own `llmModels.{chat,governance,translate}`) is silently
-  dropped from the generated skeleton with no warning, not just under-scaffolded. See
-  `docs/TASK-tenant-import-nested-config-scaffolding.md`.
+- `tenant import`'s `ExtraConfig` scaffolding (`internal/catalog.Schema.ExtraConfig`) understands a flat
+  scalar read directly off `$componentConfig`, with a quoted-string default or the `hasKey ... else
+  <literal>` form. A field with no default (genai's nested `llmModels.{chat,governance,translate}`,
+  litellm's `models`, ...) is no longer dropped silently but reported as a warning; scaffolding a nested
+  sub-config's shape is still open: see `docs/TASK-tenant-import-nested-config-scaffolding.md`.
+- `Doc.Bytes()` re-encodes the node tree (yaml.v3 re-indents sequences); a `Doc` edited through the
+  textual additions returns its original text plus the added lines instead, and the two edit styles must
+  not be mixed on one `Doc`.

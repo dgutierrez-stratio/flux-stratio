@@ -70,17 +70,30 @@ func TestReportSkippedPrepare(t *testing.T) {
 	logger := log.New(&out, false)
 	app := config.App{ID: "dlc-entity", Name: "DLC dlc-entity", Prepare: "prepare-dlc"}
 
-	reportSkippedPrepare(logger, app, "stratio")
+	reportSkippedPrepare(logger, app, "stratio", "--skip-prepare")
 	reportSkippedPrepares(logger, []config.App{app, {ID: "genai", Prepare: "prepare-genai"}})
 
 	for _, want := range []string{
-		`prepare step "prepare-dlc" skipped (--skip-prepare)`,
+		`[ACTION] prepare step "prepare-dlc"`,
+		`was NOT run (--skip-prepare)`,
 		"flux stratio apps migrate dlc-entity",
 		"2 app(s) still need their prepare step",
-		"genai (prepare-genai): flux stratio apps migrate genai",
+		"genai prepare-genai flux stratio apps migrate genai",
 	} {
-		if !strings.Contains(out.String(), want) {
+		if !strings.Contains(flat(out.String()), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+
+	out.Reset()
+	reportSkippedPrepare(logger, app, "stratio", "declined")
+	for _, want := range []string{
+		`prepare step "prepare-dlc" was NOT run (you declined it)`,
+		"The migration went on without it",
+		"do it by hand, or run `flux stratio apps migrate dlc-entity` again",
+	} {
+		if !strings.Contains(flat(out.String()), want) {
+			t.Errorf("declined: output lacks %q:\n%s", want, out.String())
 		}
 	}
 

@@ -28,6 +28,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/render"
 	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/ui"
 )
 
 // Options configures diffing one app.
@@ -50,38 +51,44 @@ type Options struct {
 	// (WorkloadEnvFile), or env-vars.env for a backup that has none. The
 	// rendered/desired side is unaffected either way.
 	Baseline string
-	// WithTenantPatch renders the desired side with the tenant file's patch
-	// applied (render.Options.KeepPatches), to see what Flux would apply
-	// against live. Whatever Patch then holds is only what that patched
-	// state still differs by, not something to migrate.
-	WithTenantPatch bool
-	Log             *log.Logger
+	// StripTenantPatch renders the desired side without the tenant file's
+	// patch for the object's kind (render.Options.StripPatches), so the
+	// patch computed is always the whole one: what apps migrate replaces
+	// the existing patch with. Unset, the tenant file renders as it is, and
+	// whatever Patch holds is only what the patched state still differs by.
+	StripTenantPatch bool
+	Log              *log.Logger
 }
 
 // Result is the outcome of diffing one app.
 type Result struct {
-	// Patch is the whole patch the app needs — computed against the
-	// rendered base *without* the tenant file's existing patch for this
-	// object's kind (see internal/render.Result.ReplacedPatches) — or nil
-	// if live and base agree.
+	// Patch is what the rendered desired state still needs to match live,
+	// or nil if they agree. With Options.StripTenantPatch it is the whole
+	// patch the app needs — computed against the base *without* the tenant
+	// file's existing patch for this object's kind (see
+	// internal/render.Result.ReplacedPatches), which is what apps migrate
+	// writes; without it, the tenant file renders as it is, so Patch is only
+	// what its patch leaves different from live.
 	Patch *diff.PatchDoc
 	// UpToDate is true when the tenant file already carries exactly Patch
 	// as this object's kind's only patch: migrating would change nothing.
+	// Only set with StripTenantPatch.
 	UpToDate bool
 	// ObsoletePatches counts existing patches for this object's kind in
 	// the tenant file when Patch is nil — live already matches the base,
 	// so whatever they set would move live away from its current state.
+	// Only set with StripTenantPatch.
 	ObsoletePatches int
 	// ExistingPatches counts the tenant file's patches for this object's
-	// kind, whatever Patch is: Before is rendered without them, so when it's
-	// non-zero Before is the unpatched base, not what Flux would apply.
+	// kind, whatever Patch is. Without StripTenantPatch they are applied to
+	// Before; with it, Before is the unpatched base.
 	ExistingPatches int
 	// DroppedFromExisting lists the paths the tenant file's existing patches
 	// for this object's kind set that Patch does not: migrating replaces
 	// them whole, so these are lost — a hand edit, a value the diff can't
 	// see (chart mode compares env vars only), an UnmappedDiff once carried
 	// by hand. Empty when there is no new Patch to replace them with (see
-	// ObsoletePatches), or when it is UpToDate.
+	// ObsoletePatches), when it is UpToDate, or without StripTenantPatch.
 	DroppedFromExisting []string
 	// FluxManagedBy is set (to "Kustomization <name>" or "HelmRelease
 	// <name>") when the live object compared against is already managed by
@@ -97,6 +104,10 @@ type Result struct {
 	// several). internal/ui.FileDiff(Before, After) is apps diff's default
 	// output; Patch (via internal/ui.Patch) is its --patch output.
 	Before, After string
+	// Items are Before and After split by resource — each workload's env vars
+	// when the chart renders several — for a view that shows them one by one
+	// (apps diff --view meld opens a tab each). Chart mode only.
+	Items []ui.Comparison
 	// The remaining fields are set only in chart mode (App.ChartPath !=
 	// ""); they stay at their zero value in manifest mode. See
 	// diff.ChartDiffResult for the first three.
@@ -141,7 +152,10 @@ func Diff(ctx context.Context, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	result.ExistingPatches = len(rendered.ReplacedPatches)
+	result.ExistingPatches = len(rendered.TenantPatches)
+	if !opts.StripTenantPatch {
+		return result, nil // a delta over the patched state: nothing to compare the patch with
+	}
 	switch {
 	case result.Patch == nil:
 		result.ObsoletePatches = len(rendered.ReplacedPatches)
@@ -288,7 +302,7 @@ func renderApp(ctx context.Context, opts Options) (*render.Result, error) {
 		Runner:        opts.Runner,
 		Client:        opts.Client,
 		Log:           opts.Log,
-		KeepPatches:   opts.WithTenantPatch,
+		StripPatches:  opts.StripTenantPatch,
 	})
 }
 

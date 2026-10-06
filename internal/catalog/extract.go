@@ -14,6 +14,12 @@ var (
 	storageIfRe   = regexp.MustCompile(`(?s)<<-?\s*if\s+eq\s+\$storageType\s+"([^"]+)"\s*>>(.*?)<<-?\s*end\s*>>`)
 	extraConfigRe = regexp.MustCompile(`get\s+\$componentConfig\s+"([^"]+)"(?:\s*\|\s*default\s+"([^"]*)")?`)
 
+	// hasKeyDefaultRe finds the `hasKey … else <literal>` form of a default:
+	// `<< if hasKey $componentConfig "k" >><< get $componentConfig "k" >><< else >>false<< end >>`.
+	// The default is the literal between else and end. The key is
+	// compared with the get's in code (RE2 has no backreferences).
+	hasKeyDefaultRe = regexp.MustCompile(`<<-?\s*if\s+hasKey\s+\$componentConfig\s+"([^"]+)"\s*>>\s*<<-?\s*get\s+\$componentConfig\s+"([^"]+)"[^>]*>>\s*<<-?\s*else\s*>>([^<]*)<<-?\s*end\s*>>`)
+
 	docSepRe    = regexp.MustCompile(`(?m)^\s*---\s*$`)
 	nameRe      = regexp.MustCompile(`name:\s*apps-(\S.*)`)
 	chartPathRe = regexp.MustCompile(`path:\s*(?:\./)?components/([^/\s]+)/app/`)
@@ -85,6 +91,25 @@ func extractSchema(key, block string) Schema {
 			field.Default = m[2]
 		}
 		s.ExtraConfig = append(s.ExtraConfig, field)
+	}
+
+	for _, m := range hasKeyDefaultRe.FindAllStringSubmatch(block, -1) {
+		if m[1] != m[2] {
+			continue
+		}
+		for i := range s.ExtraConfig {
+			f := &s.ExtraConfig[i]
+			if f.Key != m[1] || f.HasDefault {
+				continue
+			}
+			literal := strings.TrimSpace(m[3])
+			f.HasDefault = true
+			if unquoted, ok := unquote(literal); ok {
+				f.Default = unquoted
+			} else {
+				f.Default, f.Bare = literal, true
+			}
+		}
 	}
 
 	s.Kustomizations, s.ChartName = extractKustomizations(block)
@@ -230,4 +255,12 @@ func extractSourcePaths(block string) []SourcePath {
 		paths = append(paths, SourcePath{Source: sm[1], Path: pm[1]})
 	}
 	return paths
+}
+
+// unquote strips one pair of matching double or single quotes.
+func unquote(s string) (string, bool) {
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[len(s)-1] == s[0] {
+		return s[1 : len(s)-1], true
+	}
+	return s, false
 }

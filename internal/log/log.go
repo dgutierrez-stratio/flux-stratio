@@ -22,11 +22,52 @@ type Logger struct {
 	out     io.Writer
 	prefix  string // "[name] ", or "" when no step/command is active
 	verbose bool
+	width   int  // terminal columns, 0 when unknown
+	color   bool // ANSI styling is welcome
 }
 
 // New returns a Logger writing to out. verbose gates Debugf.
 func New(out io.Writer, verbose bool) *Logger {
 	return &Logger{out: out, verbose: verbose}
+}
+
+// WithTerminal returns a copy of l that knows the terminal it writes to:
+// its width in columns (0 when unknown) and whether ANSI styling is
+// welcome. Blocks that lay out tables (Block) use both; a Logger built
+// with New alone assumes neither.
+func (l *Logger) WithTerminal(width int, color bool) *Logger {
+	if l == nil {
+		return nil
+	}
+	cp := *l
+	cp.width, cp.color = width, color
+	return &cp
+}
+
+// Width is the terminal width in columns, or 0 when it isn't known.
+func (l *Logger) Width() int {
+	if l == nil {
+		return 0
+	}
+	return l.width
+}
+
+// Verbose reports whether Debugf output (and full, uncompacted detail) was asked for.
+func (l *Logger) Verbose() bool { return l != nil && l.verbose }
+
+// Color reports whether ANSI styling is welcome on this Logger's stream.
+func (l *Logger) Color() bool { return l != nil && l.color }
+
+// Block writes pre-formatted lines as they are — no symbol, no step
+// prefix — for output that is laid out as a whole (a grouped review
+// table) rather than narrated one line per event.
+func (l *Logger) Block(lines []string) {
+	if l == nil {
+		return
+	}
+	for _, line := range lines {
+		_, _ = fmt.Fprintln(l.out, line)
+	}
 }
 
 // WithStep returns a copy of l whose messages are prefixed "[name] ",

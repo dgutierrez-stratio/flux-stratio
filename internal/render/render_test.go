@@ -295,11 +295,13 @@ spec:
         kind: ConfigMap
 `
 
-// TestRender_StripsTheObjectKindsOwnPatches: the base is rendered without
-// the tenant file's existing patch for the selected object's kind (the one
-// tenantfile.Splice would replace), keeping every other kind's patch.
+// TestRender_StripsTheObjectKindsOwnPatches: with StripPatches the base is
+// rendered without the tenant file's existing patch for the selected
+// object's kind (the one tenantfile.Splice would replace), keeping every
+// other kind's patch.
 func TestRender_StripsTheObjectKindsOwnPatches(t *testing.T) {
 	opts := baseOptions(t)
+	opts.StripPatches = true
 	fakeRunner := &runner.Fake{Responses: map[string]runner.FakeResponse{
 		"flux-operator": {Stdout: []byte(rsetOutputWithPatches)},
 		"flux":          {Stdout: []byte(kustomizationBuildOutput)},
@@ -312,6 +314,9 @@ func TestRender_StripsTheObjectKindsOwnPatches(t *testing.T) {
 	}
 	if len(result.ReplacedPatches) != 1 || !strings.Contains(result.ReplacedPatches[0], "foo: patched") {
 		t.Fatalf("ReplacedPatches = %q, want the one HelmRelease patch", result.ReplacedPatches)
+	}
+	if len(result.TenantPatches) != 1 {
+		t.Errorf("TenantPatches = %q, want the one HelmRelease patch", result.TenantPatches)
 	}
 	patches, _, _ := unstructured.NestedSlice(result.Kustomization.Object, "spec", "patches")
 	if len(patches) != 1 {
@@ -331,17 +336,17 @@ func TestRender_StripsTheObjectKindsOwnPatches(t *testing.T) {
 	}
 }
 
-// TestRender_KeepPatchesRendersWithTheTenantPatch: for looking at what Flux
-// would apply, the object's kind's own patches stay in the Kustomization and
-// nothing is reported as replaced.
-func TestRender_KeepPatchesRendersWithTheTenantPatch(t *testing.T) {
+// TestRender_DefaultRendersTheTenantFileAsItIs: by default the object's
+// kind's own patches stay in the Kustomization (as Flux applies them), are
+// reported as the tenant's, and nothing is reported as replaced; one build
+// is enough.
+func TestRender_DefaultRendersTheTenantFileAsItIs(t *testing.T) {
 	opts := baseOptions(t)
 	fakeRunner := &runner.Fake{Responses: map[string]runner.FakeResponse{
 		"flux-operator": {Stdout: []byte(rsetOutputWithPatches)},
 		"flux":          {Stdout: []byte(kustomizationBuildOutput)},
 	}}
 	opts.Runner = fakeRunner
-	opts.KeepPatches = true
 
 	result, err := Render(context.Background(), opts)
 	if err != nil {
@@ -350,9 +355,21 @@ func TestRender_KeepPatchesRendersWithTheTenantPatch(t *testing.T) {
 	if len(result.ReplacedPatches) != 0 {
 		t.Errorf("ReplacedPatches = %q, want none when patches are kept", result.ReplacedPatches)
 	}
+	if len(result.TenantPatches) != 1 || !strings.Contains(result.TenantPatches[0], "foo: patched") {
+		t.Errorf("TenantPatches = %q, want the one HelmRelease patch", result.TenantPatches)
+	}
 	patches, _, _ := unstructured.NestedSlice(result.Kustomization.Object, "spec", "patches")
 	if len(patches) != 2 {
 		t.Errorf("rendered Kustomization has %d patches, want both (HelmRelease and ConfigMap)", len(patches))
+	}
+	var builds int
+	for _, c := range fakeRunner.Calls {
+		if c.Name == "flux" {
+			builds++
+		}
+	}
+	if builds != 1 {
+		t.Errorf("flux build ran %d times, want 1", builds)
 	}
 }
 

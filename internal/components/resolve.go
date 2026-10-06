@@ -516,6 +516,7 @@ func toApp(inst Instance, tenant string) (config.App, error) {
 		Exclude:       t.Exclude,
 		MemoryEnv:     t.MemoryEnv,
 		Notes:         t.Notes,
+		Family:        append([]config.Match{t.Match}, t.SiblingMatches()...),
 		Live:          live,
 	}, nil
 }

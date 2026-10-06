@@ -364,3 +364,39 @@ func TestCatalog_FindNoMatchReturnsNil(t *testing.T) {
 		t.Errorf(`Find("nope") = %+v, want nil`, got)
 	}
 }
+
+func TestLoad_ChartEnabledBy(t *testing.T) {
+	const siblings = "      siblings:\n        - kinds: [apps/v1/Deployment]\n          annotations:\n            matchLabels:\n              cct.stratio.com/application_model: sibling\n"
+	withChart := func(extra string) string {
+		return strings.Replace(validCatalogYAML, "    chart:\n      path: gosec-agent\n",
+			"    chart:\n      path: gosec-agent\n"+extra, 1)
+	}
+
+	cat, err := Load(writeFile(t, "catalog.yaml", withChart(siblings+"      enabledBy: uiEnabled\n")))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	typ := cat.Types[1]
+	if typ.EnabledBy() != "uiEnabled" {
+		t.Errorf("EnabledBy = %q, want uiEnabled", typ.EnabledBy())
+	}
+	if got := typ.SiblingNames(); len(got) != 1 || got[0] != "sibling" {
+		t.Errorf("SiblingNames = %v, want [sibling]", got)
+	}
+
+	_, err = Load(writeFile(t, "catalog.yaml", withChart("      enabledBy: uiEnabled\n")))
+	if err == nil || !strings.Contains(err.Error(), "chart.enabledBy") {
+		t.Errorf("Load error = %v, want a chart.enabledBy problem (no siblings)", err)
+	}
+}
+
+func TestSeedCatalog_VirtualizerEnabledByNamesItsSiblings(t *testing.T) {
+	typ := SeedCatalog().Find("virtualizer")
+	if typ == nil || typ.EnabledBy() != "uiEnabled" {
+		t.Fatalf("virtualizer = %+v, want EnabledBy uiEnabled", typ)
+	}
+	got := typ.SiblingNames()
+	if len(got) != 2 || got[0] != "virtualizer-monitor" || got[1] != "virtualizer-ui" {
+		t.Errorf("SiblingNames = %v, want [virtualizer-monitor virtualizer-ui]", got)
+	}
+}

@@ -64,9 +64,10 @@ func TestHelp_EveryFlagIsExplainedBriefly(t *testing.T) {
 // flag list can't drift apart.
 func TestHelp_LongTextNamesTheModeFlags(t *testing.T) {
 	want := map[string][]string{
-		"apps diff":    {"--baseline", "--drift", "--patched", "--view", "--as", "--dir"},
-		"apps migrate": {"--dry-run", "--yes", "--accept-warnings", "--skip-prepare", "--continue-on-error", "--baseline", "--all", "--as"},
-		"apps backup":  {"--catalog", "--all", "--dir"},
+		"apps diff":     {"--baseline", "--drift", "--view", "--as", "--dir"},
+		"apps migrate":  {"--dry-run", "--yes", "--accept-warnings", "--skip-prepare", "--continue-on-error", "--baseline", "--all", "--as"},
+		"apps backup":   {"--catalog", "--all", "--dir"},
+		"tenant import": {"--output", "--force", "--dry-run", "--size"},
 	}
 	root := NewRootCommand()
 	visited := 0

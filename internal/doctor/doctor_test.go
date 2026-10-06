@@ -559,3 +559,16 @@ func TestCheckRepoRevisions(t *testing.T) {
 		}
 	})
 }
+
+func TestMissingSeedPrepares(t *testing.T) {
+	cat := config.SeedCatalog()
+	if got := missingSeedPrepares(&cat); len(got) != 0 {
+		t.Errorf("the seed itself reports %v", got)
+	}
+	old := config.SeedCatalog()
+	old.Find("virtualizer").Prepare = ""
+	got := missingSeedPrepares(&old)
+	if len(got) != 1 || !strings.Contains(got[0], `"virtualizer"`) || !strings.Contains(got[0], "prepare-virtualizer") {
+		t.Errorf("missingSeedPrepares = %v, want one line naming virtualizer and prepare-virtualizer", got)
+	}
+}

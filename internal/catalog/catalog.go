@@ -33,6 +33,10 @@ type ExtraConfigField struct {
 	Key        string
 	Default    string
 	HasDefault bool
+	// Bare is set when Default is an unquoted literal in the template
+	// (`<< else >>false<< end >>`), i.e. a YAML scalar of its own type
+	// (bool, number) rather than the string a quoted `default "…"` is.
+	Bare bool
 }
 
 // AnchorKind classifies where a Kustomization's patches come from in the

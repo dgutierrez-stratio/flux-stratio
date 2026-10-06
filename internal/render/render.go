@@ -59,11 +59,12 @@ type Options struct {
 	// substituteFrom never needs it.
 	Client client.Client
 	Log    *log.Logger
-	// KeepPatches renders with the tenant file's patches for the object's
-	// kind applied, as Flux would — instead of the pristine base apps
-	// diff/migrate compute a patch against (see Render). Only for
-	// looking at the result: a patch computed from it would be a delta.
-	KeepPatches bool
+	// StripPatches renders the pristine base instead: without the tenant
+	// file's patches for the object's kind, which is what apps migrate
+	// computes the patch it replaces them with against (see Render).
+	// Everything else renders the tenant file as it is, patches applied, as
+	// Flux would.
+	StripPatches bool
 }
 
 // Result is what a successful Render produces.
@@ -77,10 +78,13 @@ type Result struct {
 	// AllDocs is every object flux build kustomization --dry-run rendered
 	// for this Kustomization, Object among them.
 	AllDocs []*unstructured.Unstructured
-	// ReplacedPatches are the patch bodies the tenant file already applies
-	// to Object's own kind (spec.patches entries whose target.kind is
-	// Object's kind). Object, Kustomization and AllDocs are rendered
-	// *without* them — see Render.
+	// TenantPatches are the patch bodies the tenant file applies to
+	// Object's own kind (spec.patches entries whose target.kind is Object's
+	// kind), whether or not they were stripped.
+	TenantPatches []string
+	// ReplacedPatches are the TenantPatches Object, Kustomization and
+	// AllDocs were rendered *without* — only with Options.StripPatches, see
+	// Render.
 	ReplacedPatches []string
 }
 
@@ -119,12 +123,12 @@ func Render(ctx context.Context, opts Options) (*Result, error) {
 	// replacement, would silently drop everything the existing patch
 	// already carried. Every keos-use-cases template takes its patches only
 	// from the tenant entry, so nothing template-authored is dropped here.
-	if opts.KeepPatches {
-		return &Result{Object: obj, Kustomization: ks, AllDocs: docs}, nil
-	}
 	replaced, stripped, err := withoutPatchesFor(ks, obj.GetKind())
 	if err != nil {
 		return nil, err
+	}
+	if !opts.StripPatches {
+		return &Result{Object: obj, Kustomization: ks, AllDocs: docs, TenantPatches: replaced}, nil
 	}
 	if len(replaced) > 0 {
 		opts.Log.Debugf("rendering %q without the tenant file's %d existing %s patch(es)", opts.Object, len(replaced), obj.GetKind())
@@ -136,7 +140,7 @@ func Render(ctx context.Context, opts Options) (*Result, error) {
 			return nil, err
 		}
 	}
-	return &Result{Object: obj, Kustomization: ks, AllDocs: docs, ReplacedPatches: replaced}, nil
+	return &Result{Object: obj, Kustomization: ks, AllDocs: docs, TenantPatches: replaced, ReplacedPatches: replaced}, nil
 }
 
 func findObject(docs []*unstructured.Unstructured, opts Options) (*unstructured.Unstructured, error) {

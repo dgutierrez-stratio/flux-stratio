@@ -139,6 +139,8 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 	diffResult, err := appdiff.Diff(ctx, appdiff.Options{
 		Repos: opts.Repos, Cluster: opts.Cluster, Tenant: opts.Tenant,
 		App: opts.App, Runner: opts.Runner, Client: opts.Client, Baseline: opts.Baseline, Log: opts.Log,
+		// The patch written replaces the whole existing one, so it is computed against the pristine base.
+		StripTenantPatch: true,
 	})
 	if err != nil {
 		return nil, nil, "", err

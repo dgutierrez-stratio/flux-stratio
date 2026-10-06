@@ -214,7 +214,28 @@ func checkCatalog(opts Options) (*config.Catalog, Check) {
 		return nil, Check{Name: CheckCatalog, OK: false, Detail: err.Error()}
 	}
 	opts.Log.Successf("catalog loaded (%d type(s))", len(cat.Types))
+	for _, msg := range missingSeedPrepares(cat) {
+		opts.Log.Warningf("%s", msg)
+	}
 	return cat, Check{Name: CheckCatalog, OK: true, Detail: fmt.Sprintf("%d type(s)", len(cat.Types))}
+}
+
+// missingSeedPrepares names the catalog types that declare no prepare step
+// where the seed declares one: a catalog.yaml seeded before a step existed
+// (prepare-virtualizer) would otherwise migrate without it, and the legacy
+// workloads it removes would fail the release. Only a missing step is
+// reported; a different one is a choice.
+func missingSeedPrepares(cat *config.Catalog) []string {
+	var out []string
+	for _, seed := range config.SeedCatalog().Types {
+		if seed.Prepare == "" {
+			continue
+		}
+		if t := cat.Find(seed.Type); t != nil && t.Prepare == "" {
+			out = append(out, fmt.Sprintf("catalog type %q declares no prepare step, the seed declares %q: re-run `flux stratio config init --force` to re-seed it", seed.Type, seed.Prepare))
+		}
+	}
+	return out
 }
 
 func checkEnvironment(opts Options) (*config.Environment, Check) {

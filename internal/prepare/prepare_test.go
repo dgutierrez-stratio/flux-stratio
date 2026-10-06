@@ -90,7 +90,7 @@ func applyAll(t *testing.T, c client.Client, ops []Operation) {
 }
 
 func TestFind(t *testing.T) {
-	for _, name := range []string{"prepare-datamarket-agent", "prepare-datarest", "prepare-dlc", "prepare-genai"} {
+	for _, name := range []string{"prepare-datamarket-agent", "prepare-datarest", "prepare-dlc", "prepare-genai", "prepare-virtualizer", "prepare-dg-agent", "prepare-discovery", "prepare-litellm"} {
 		if Find(name) == nil {
 			t.Errorf("Find(%q) = nil, want a step", name)
 		}
@@ -106,6 +106,10 @@ func TestSteps_ExactlyOneShapePerStep(t *testing.T) {
 		"prepare-datarest":         "automated",
 		"prepare-dlc":              "automated",
 		"prepare-genai":            "query",
+		"prepare-virtualizer":      "automated",
+		"prepare-dg-agent":         "automated",
+		"prepare-discovery":        "automated",
+		"prepare-litellm":          "automated",
 	}
 	for name, wantShape := range want {
 		step := Find(name)
@@ -137,27 +141,6 @@ func TestLegacyObjects_NeedsALiveObject(t *testing.T) {
 	_, err := legacyObjects(context.Background(), Options{Client: fakeClient(t)}, gvkIngress)
 	if err == nil {
 		t.Error("legacyObjects without LiveName/LiveNamespace: got nil error")
-	}
-}
-
-func TestOperation_ManifestDropsServerBookkeeping(t *testing.T) {
-	obj := object(gvkIngress, "ns", "ing")
-	obj.SetAnnotations(map[string]string{"kubectl.kubernetes.io/last-applied-configuration": "{}", "keep": "me"})
-	_ = unstructured.SetNestedSlice(obj.Object, []any{map[string]any{"manager": "x"}}, "metadata", "managedFields")
-	_ = unstructured.SetNestedField(obj.Object, "Ready", "status", "phase")
-
-	data, err := deleteOp(obj).Manifest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := string(data)
-	for _, gone := range []string{"managedFields", "last-applied-configuration", "status"} {
-		if strings.Contains(m, gone) {
-			t.Errorf("manifest still has %s:\n%s", gone, m)
-		}
-	}
-	if !strings.Contains(m, "keep: me") || !strings.Contains(m, "kind: Ingress") {
-		t.Errorf("manifest lost the object itself:\n%s", m)
 	}
 }
 
@@ -250,7 +233,10 @@ func TestPlans_ReadFailuresAreErrorsNotSatisfied(t *testing.T) {
 		if !step.Automated {
 			continue
 		}
-		opts := Options{TenantName: "stratio", LiveName: "app", LiveNamespace: "ns", Client: failingReads(t)}
+		opts := Options{
+			TenantName: "stratio", LiveName: "app", LiveNamespace: "ns", Client: failingReads(t),
+			IsLegacy: func(*unstructured.Unstructured) bool { return true },
+		}
 		ops, err := step.Plan(context.Background(), opts)
 		if err == nil || !strings.Contains(err.Error(), "apiserver unavailable") {
 			t.Errorf("%s: err = %v, want the read error", step.Name, err)
@@ -267,9 +253,9 @@ func TestWaitForNoPods_ListErrorFails(t *testing.T) {
 	}
 }
 
-func TestOnlyDLCReplacesTheLegacyWorkloads(t *testing.T) {
+func TestOnlyTheStepsThatDeleteWorkloadsReplaceThem(t *testing.T) {
 	for _, s := range Steps {
-		if want := s.Name == "prepare-dlc"; s.ReplacesWorkloads != want {
+		if want := s.Name == "prepare-dlc" || s.Name == "prepare-virtualizer" || s.Name == "prepare-dg-agent" || s.Name == "prepare-discovery" || s.Name == "prepare-litellm"; s.ReplacesWorkloads != want {
 			t.Errorf("%s: ReplacesWorkloads = %v, want %v", s.Name, s.ReplacesWorkloads, want)
 		}
 	}
