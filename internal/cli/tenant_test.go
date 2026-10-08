@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -80,7 +81,7 @@ func runComplete(t *testing.T, opts tenantimport.Options, f tenantImportFlags) s
 	cmd := &cobra.Command{}
 	cmd.SetOut(&stdout)
 	cmd.SetErr(io.Discard)
-	if err := completeTenantFile(cmd, opts, f, log.New(io.Discard, false)); err != nil {
+	if err := completeTenantFile(cmd, opts, f, log.New(io.Discard, false), func([]byte, string) error { return nil }); err != nil {
 		t.Fatalf("completeTenantFile: %v", err)
 	}
 	return stdout.String()
@@ -137,5 +138,21 @@ func TestTenantImport_DryRunNeedsAnExistingFile(t *testing.T) {
 		if err := runTenantImport(cmd, f); err == nil || !strings.Contains(err.Error(), "only applies when completing") {
 			t.Errorf("flags %+v: error = %v, want 'only applies when completing an existing --output file'", f, err)
 		}
+	}
+}
+
+func TestTenantImport_ValidationFailureFailsTheCommandButTheFileIsWritten(t *testing.T) {
+	opts, path := tenantImportFixture(t)
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	boom := errors.New("the tenant file has 1 problem(s)")
+	err := completeTenantFile(cmd, opts, tenantImportFlags{output: path}, log.New(io.Discard, false),
+		func([]byte, string) error { return boom })
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %v, want the validation error", err)
+	}
+	if data, _ := os.ReadFile(path); !strings.Contains(string(data), "uiEnabled: true") {
+		t.Errorf("the additions were not written before validating:\n%s", data)
 	}
 }

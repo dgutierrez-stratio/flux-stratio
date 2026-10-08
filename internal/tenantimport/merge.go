@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
 )
 
@@ -16,6 +17,9 @@ type CompleteOptions struct {
 	// Size is written as spec.defaultValues.size when the file has none;
 	// defaults to S.
 	Size string
+	// Config is the component catalog, read for requiredConfig. Nil uses
+	// the seed's.
+	Config *config.Catalog
 }
 
 // Report is what a Complete run did, grouped the way it is printed.
@@ -54,6 +58,7 @@ func Complete(doc *tenantfile.Doc, scanned Components, live Live, cat *catalog.C
 		return r, err
 	}
 
+	required := requiredConfig(opts.Config)
 	byKey := map[string][]string{} // component key -> active entry names, file order
 	for _, e := range entries {
 		byKey[e.Key] = append(byKey[e.Key], e.Name)
@@ -64,12 +69,12 @@ func Complete(doc *tenantfile.Doc, scanned Components, live Live, cat *catalog.C
 		if !ok {
 			continue
 		}
-		if err := completeEntry(doc, e, schema, scanned, live, byKey, &r); err != nil {
+		if err := completeEntry(doc, e, schema, scanned, live, byKey, required[e.Key], &r); err != nil {
 			return r, err
 		}
 	}
 
-	if err := completeUndeclared(doc, scanned, byKey, cat, &r); err != nil {
+	if err := completeUndeclared(doc, scanned, byKey, cat, required, &r); err != nil {
 		return r, err
 	}
 
@@ -116,7 +121,7 @@ func completeTopLevel(doc *tenantfile.Doc, opts CompleteOptions, r *Report) erro
 	return doc.AddTopLevel(missing)
 }
 
-func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, scanned Components, live Live, byKey map[string][]string, r *Report) error {
+func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, scanned Components, live Live, byKey map[string][]string, required map[string]bool, r *Report) error {
 	label := fmt.Sprintf("components.%s[%s]", e.Key, e.Name)
 	var fields []tenantfile.Field
 	var deps []tenantfile.DependencyRef
@@ -133,6 +138,17 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 	} else if schemaHasStorageType(schema, "hdfs") && len(scanned["hdfs"]) > 0 {
 		storageType = "hdfs"
 		addField("type", "hdfs")
+	}
+
+	// What the entry's live HelmRelease says about the dependencies it uses.
+	// Not found by name (the file may call it something else): the one
+	// scanned entry of the key stands for the one the file declares.
+	used := scanned.find(e.Key, e.Name)
+	if used == nil && len(scanned[e.Key]) == 1 && len(byKey[e.Key]) == 1 {
+		used = scanned[e.Key][0]
+	}
+	if used != nil {
+		completeUses(doc, e, schema, storageType, used, label, r)
 	}
 
 	// Config fields: the cluster's own value first, then the template
@@ -166,11 +182,12 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 		if _, ok := derived[field.Key]; ok || tenantfile.ConfigValue(e.Node, field.Key) != nil {
 			continue
 		}
-		if !field.HasDefault {
+		switch fieldPlan(field, storageType, required) {
+		case fieldWarn:
 			r.Warnings = append(r.Warnings, fmt.Sprintf("%s: config %q has no default; set it by hand", label, field.Key))
-			continue
+		case fieldDefault:
+			addField(field.Key, defaultValue(field))
 		}
-		addField(field.Key, defaultValue(field))
 	}
 
 	// Dependencies the schema declares and the entry lacks.
@@ -193,8 +210,16 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 		default:
 			r.Warnings = append(r.Warnings, fmt.Sprintf("%s: dependency %q has %d discovered instances; added %q, review before use", label, dep.Key, len(names), names[0]))
 		}
-		deps = append(deps, tenantfile.DependencyRef{Key: dep.Key, Name: names[0]})
-		r.Added = append(r.Added, fmt.Sprintf("%s: config.dependencies.%s.name: %s", label, dep.Key, names[0]))
+		ref := tenantfile.DependencyRef{Key: dep.Key, Name: names[0]}
+		added := fmt.Sprintf("%s: config.dependencies.%s.name: %s", label, dep.Key, names[0])
+		if used != nil && used.DepEnabled[dep.Key] != "" {
+			ref.Enabled = true
+			added += fmt.Sprintf(", enabled: true (spec.values.%s is set in its HelmRelease)", used.DepEnabled[dep.Key])
+		} else if used != nil && used.DepUnknown[dep.Key] {
+			r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep.Key))
+		}
+		deps = append(deps, ref)
+		r.Added = append(r.Added, added)
 	}
 
 	if err := doc.AddToEntry(e.Node, fields, deps); err != nil {
@@ -206,11 +231,49 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 	return nil
 }
 
+// completeUses settles `enabled` for the dependencies e already declares,
+// from the HelmRelease evidence in used: a declared dependency without it
+// gets `enabled: true` when its values show the integration in use; one the
+// operator set to false stays, with a warning; and one the cluster cannot
+// vouch for (no HelmRelease yet) is warned about, never guessed. A new
+// dependency is handled where it is added.
+func completeUses(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, storageType string, used *Entry, label string, r *Report) {
+	for _, dep := range schema.Dependencies {
+		if len(dep.StorageTypes) > 0 && !containsStr(dep.StorageTypes, storageType) {
+			continue
+		}
+		if !tenantfile.HasDependency(e.Node, dep.Key) {
+			continue
+		}
+		current := tenantfile.DependencyField(e.Node, dep.Key, "enabled")
+		switch evidence := used.DepEnabled[dep.Key]; {
+		case evidence != "" && current != nil:
+			if current.Value == "false" {
+				r.Warnings = append(r.Warnings, fmt.Sprintf(
+					"%s: config.dependencies.%s.enabled is false but spec.values.%s is set in its HelmRelease; left as is — the integration stays off",
+					label, dep.Key, evidence))
+			}
+		case evidence != "":
+			if tenantfile.DependencyNames(e.Node)[dep.Key] == "" {
+				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: dependency %q has no name; not enabled, fill it in by hand first", label, dep.Key))
+				continue
+			}
+			if err := doc.AddToDependency(e.Node, dep.Key, []tenantfile.Field{{Key: "enabled", Value: true}}); err != nil {
+				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: %v", label, err))
+				continue
+			}
+			r.Added = append(r.Added, fmt.Sprintf("%s: config.dependencies.%s.enabled: true (spec.values.%s is set in its HelmRelease)", label, dep.Key, evidence))
+		case used.DepUnknown[dep.Key] && current == nil:
+			r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep.Key))
+		}
+	}
+}
+
 // completeUndeclared handles the components the scan found live that the
 // file has no active entry for, appended as new entries — except under a
 // commented-out block, which is the operator's own switch-on-one-at-a-time
 // and never gets a duplicate.
-func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[string][]string, cat *catalog.Catalog, r *Report) error {
+func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[string][]string, cat *catalog.Catalog, required map[string]map[string]bool, r *Report) error {
 	keys := make([]string, 0, len(scanned))
 	for key := range scanned {
 		keys = append(keys, key)
@@ -237,7 +300,7 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[strin
 				byKey[key] = append(byKey[key], s.Name)
 				r.Added = append(r.Added, label+": new entry")
 				for _, field := range cat.Schemas[key].ExtraConfig {
-					if _, set := s.ExtraConfig[field.Key]; !set && !field.HasDefault {
+					if _, set := s.ExtraConfig[field.Key]; !set && fieldPlan(field, s.Type, required[key]) == fieldWarn {
 						r.Warnings = append(r.Warnings, fmt.Sprintf("%s: config %q has no default; set it by hand", label, field.Key))
 					}
 				}
@@ -245,6 +308,9 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[strin
 					if name == "" {
 						r.Warnings = append(r.Warnings, fmt.Sprintf("%s: dependency %q could not be resolved; not added, fill it in by hand", label, dep))
 					}
+				}
+				for _, dep := range undecidedUses(s) {
+					r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep))
 				}
 			}
 		}
@@ -266,7 +332,7 @@ func entryConfig(e *Entry) map[string]any {
 	deps := map[string]any{}
 	for k, v := range e.Deps {
 		if v != "" {
-			deps[k] = map[string]any{"name": v}
+			deps[k] = e.depConfig(k, v)
 		}
 	}
 	if len(deps) > 0 {

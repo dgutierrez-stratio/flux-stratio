@@ -123,6 +123,17 @@ Fields a template reads that have no default and can't be derived from the
 cluster (genai's llmModels, litellm's models, ...) are never dropped
 silently: each is reported as a warning to set by hand.
 
+Afterwards the resulting file is validated (also with --dry-run, on the
+proposed result): that it is a ResourceSetInputProvider with the label the
+ResourceSets select, that every component has a name and every dependency
+points at an entry the file declares, that "enabled" is true or false, and
+that every ResourceSet in keos-use-cases renders against it
+(flux-operator build rset) with no app waiting on a Kustomization nobody
+renders. The file is written either way; a problem is reported and makes the
+command exit non-zero. A fresh import usually has some (a dependency it
+could not resolve): fill them in and run the command again. --no-validate
+skips the check; without flux-operator only the structural part runs.
+
 The tenant is the global --tenant (or the environment file's).`
 
 const tenantImportExample = `  flux stratio tenant import                                  # print the skeleton

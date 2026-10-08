@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
 )
 
@@ -287,9 +288,16 @@ spec:
       kafka:
       - name: kafka1
 `
+	// topics is read with `| default list`: optional, unless the catalog
+	// lists it as required — then it is reported, never invented.
 	r, got := complete(t, reload(t, []byte(file)), Components{}, Live{}, CompleteOptions{})
+	if contains(r.Warnings, `"topics"`) {
+		t.Errorf("Warnings = %v, want the optional topics field left alone", r.Warnings)
+	}
+	required := &config.Catalog{Types: []config.ComponentType{{Type: "kafka", Component: "kafka", RequiredConfig: []string{"topics"}}}}
+	r, got = complete(t, reload(t, []byte(file)), Components{}, Live{}, CompleteOptions{Config: required})
 	if !contains(r.Warnings, `config "topics" has no default`) {
-		t.Errorf("Warnings = %v, want the topics field reported", r.Warnings)
+		t.Errorf("Warnings = %v, want the required topics field reported", r.Warnings)
 	}
 	if !strings.Contains(got, `kafkaClusterExposed: "false"`) {
 		t.Errorf("the kafkaClusterExposed default was not added:\n%s", got)
@@ -317,9 +325,14 @@ func TestComplete_TopLevelFieldsOnlyWhenAbsent(t *testing.T) {
 func TestCreate_DroppedFieldsWarn(t *testing.T) {
 	var warnings []string
 	components := Components{"kafka": {{Name: "kafka1", Deps: map[string]string{}}}}
-	enrich(loadFixtureCatalog(t), components, func(format string, a ...any) { warnings = append(warnings, strings.TrimSpace(format)) })
+	warn := func(format string, a ...any) { warnings = append(warnings, strings.TrimSpace(format)) }
+	enrich(loadFixtureCatalog(t), components, nil, warn)
+	if contains(warnings, "has no default") {
+		t.Errorf("warnings = %v, want none: topics defaults to an empty list", warnings)
+	}
+	enrich(loadFixtureCatalog(t), components, map[string]map[string]bool{"kafka": {"topics": true}}, warn)
 	if !contains(warnings, "has no default") {
-		t.Errorf("warnings = %v, want one for the topics field without a default", warnings)
+		t.Errorf("warnings = %v, want one for the required topics field", warnings)
 	}
 }
 

@@ -77,6 +77,14 @@ type ComponentType struct {
 	// fields the GitOps side is authoritative for and must never be
 	// back-ported from the live cluster (identity/vault/governance values).
 	Exclude []string `yaml:"exclude,omitempty"`
+	// RequiredConfig names config fields (read from the tenant entry by the
+	// component's ResourceSet) the component cannot run without, though the
+	// template defaults them to an empty dict or list: `tenant import`
+	// warns to set each by hand when the entry lacks it. Without this, a
+	// field the template defaults to an empty container is optional and is
+	// neither scaffolded nor warned about. Scalar fields are not listed here:
+	// one with no default is always warned about.
+	RequiredConfig []string `yaml:"requiredConfig,omitempty"`
 	// MemoryEnv names the env vars that hold a memory size in MB (a
 	// legacy pod's own memory setting, e.g. VR_POD_MEMORY_LIMIT): `apps
 	// diff` warns when the migrated container's memory limit is below one.
@@ -112,6 +120,24 @@ type Chart struct {
 	// Helm-managed — and false otherwise, so a missing key can't make the
 	// next release remove them. Needs Siblings.
 	EnabledBy string `yaml:"enabledBy,omitempty"`
+	// Uses lists the dependencies whose tenant-file `enabled` switch the
+	// chart's own configuration decides. `tenant import` writes
+	// `dependencies.<dependency>.enabled: true` when the entry's live
+	// HelmRelease values show the integration in use, and warns when it
+	// cannot tell (no HelmRelease yet): left off, the ResourceSet drops the
+	// dependency and the chart's prerequisites skip its setup.
+	Uses []Use `yaml:"uses,omitempty"`
+}
+
+// Use is one dependency a chart may or may not use, with the HelmRelease
+// values that prove it does.
+type Use struct {
+	// Dependency is the tenant-file dependency key (config.dependencies.<key>).
+	Dependency string `yaml:"dependency"`
+	// Values are dotted paths into the HelmRelease's spec.values. The
+	// dependency is in use when any of them is set to something other than
+	// false, an empty string, zero or null.
+	Values []string `yaml:"values"`
 }
 
 // Match selects live objects: an object matches when its kind is one of
@@ -244,6 +270,14 @@ func (t ComponentType) EnabledBy() string {
 	return t.Chart.EnabledBy
 }
 
+// Uses is Chart.Uses, or nil for a manifest-mode type.
+func (t ComponentType) Uses() []Use {
+	if t.Chart == nil {
+		return nil
+	}
+	return t.Chart.Uses
+}
+
 // SiblingNames returns the workload name of every sibling: the
 // application_model annotation value its selector requires, which for CCT
 // is also the Deployment's name, and stays the name once Helm manages the
@@ -336,6 +370,31 @@ func (c Catalog) validate() error {
 
 		if t.EnabledBy() != "" && len(t.SiblingMatches()) == 0 {
 			add("chart.enabledBy: %q needs chart.siblings — it names the key that switches the siblings on", t.EnabledBy())
+		}
+
+		seenUse := map[string]bool{}
+		for j, u := range t.Uses() {
+			switch {
+			case strings.TrimSpace(u.Dependency) == "":
+				add("chart.uses[%d].dependency is required", j)
+			case seenUse[u.Dependency]:
+				add("chart.uses[%d]: dependency %q is listed twice", j, u.Dependency)
+			}
+			seenUse[u.Dependency] = true
+			if len(u.Values) == 0 {
+				add("chart.uses[%d].values: at least one path into the HelmRelease values is required", j)
+			}
+			for _, v := range u.Values {
+				if strings.TrimSpace(v) == "" || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") || strings.Contains(v, "..") {
+					add("chart.uses[%d].values: %q is not a dotted path", j, v)
+				}
+			}
+		}
+
+		for j, name := range t.RequiredConfig {
+			if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " .") {
+				add("requiredConfig[%d]: %q is not a config field name", j, name)
+			}
 		}
 
 		for j, name := range t.MemoryEnv {

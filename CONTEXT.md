@@ -325,10 +325,17 @@ convention, that repo is the reference:
   SQL and the pod shown) and again over the real captured output, neither skipped by `--yes`;
   `--dry-run` only resolves the pod and shows the SQL, asking nothing. A future component's own manual DB rewrite reuses this shape
   (a new `DBQuery` value) rather than one-off exec code.
+- **`internal/tenantcheck`** — `Validate(path, opts)` of a tenant file as Flux will consume it: static checks on the
+  decoded RSIP, then `flux-operator build rset` of each keos-use-cases `resourceset-apps-*.yaml` through `runner.Runner`
+  (so it is testable with `runner.Fake`), failing on an `apps-*` tenant Kustomization some other one waits on that nothing
+  renders. Errors/Warnings/Notes; a missing `flux-operator` is a Note, never a pass. Called by `internal/cli/tenant.go`
+  after every `tenant import`.
 - **`internal/tenantimport`** — `tenant import`'s live-cluster scan (CRD instances → Deployments →
   HelmReleases, three passes feeding one `Components` map), fixpoint-expanding mandatory
   dependencies, then rendering a tenant-file skeleton (`Run`, Create mode); `Scan` is the same pipeline
-  returning the `Components` + `Live` (config values derived from live siblings via `chart.enabledBy`),
+  returning the `Components` + `Live` (config values derived from live siblings via `chart.enabledBy`; each entry also carries
+  `DepEnabled`/`DepUnknown`, from `chart.uses` evaluated over its live HelmRelease values in `uses.go`: the source of a dependency's
+  `enabled: true`, written on Create by `Entry.depConfig` and on Complete by `completeUses`/`AddToDependency`),
   and `Complete` (`merge.go`) adds to an existing file only what it lacks — through `internal/tenantfile`'s
   textual `AddToEntry`/`AddTopLevel`/`AppendEntry` (insertions into the file's text, positions read off
   the yaml.Node tree; `Doc.Text()`), never a yaml.v3 re-encode, which would re-indent the file's
@@ -424,11 +431,17 @@ being tested in a feature package first.
 - `docs/config-reference.md` and this file can drift from the actual `config.ComponentType` fields —
   if you add/remove one, update `docs/config-reference.md` and `internal/config/seed.go` in the
   same change.
-- `tenant import`'s `ExtraConfig` scaffolding (`internal/catalog.Schema.ExtraConfig`) understands a flat
-  scalar read directly off `$componentConfig`, with a quoted-string default or the `hasKey ... else
-  <literal>` form. A field with no default (genai's nested `llmModels.{chat,governance,translate}`,
-  litellm's `models`, ...) is no longer dropped silently but reported as a warning; scaffolding a nested
-  sub-config's shape is still open: see `docs/TASK-tenant-import-nested-config-scaffolding.md`.
+- `tenant import`'s `ExtraConfig` scaffolding (`internal/catalog.Schema.ExtraConfig`) reads every
+  `get $componentConfig "<field>"` and its `| default`: a quoted string, a bare scalar (`false`, `true`, a number:
+  scaffolded as that typed value), the `hasKey ... else <literal>` form, or an empty container (`dict`/`list`:
+  `Container`, optional, neither scaffolded nor warned about). A field whose every read sits inside
+  `if eq $storageType "<t>"` (before its else) carries `StorageTypes` and is skipped for other types. Anything
+  else with no default is reported as a warning, and so is a container field the catalog type lists in
+  `requiredConfig` (genai's `llmModels`, litellm's `models`); `fieldPlan` (`internal/tenantimport/fields.go`) is the
+  one place that decides. Scaffolding a nested sub-config's shape is still open: see
+  `docs/TASK-tenant-import-nested-config-scaffolding.md`. Known quirk, unchanged: a dependency read in the `else` of
+  a storage-type branch is still marked as conditional on that branch's type (`extractSchema`'s `StorageTypes` for
+  dependencies ignores `else`), so e.g. rocket's `connectors` is skipped for an entry of unknown type.
 - `Doc.Bytes()` re-encodes the node tree (yaml.v3 re-indents sequences); a `Doc` edited through the
   textual additions returns its original text plus the added lines instead, and the two edit styles must
   not be mixed on one `Doc`.

@@ -41,9 +41,11 @@ type Field struct {
 	Value any
 }
 
-// DependencyRef is one config.dependencies.<Key>.name to add.
+// DependencyRef is one config.dependencies.<Key> to add: its name, and
+// `enabled: true` when Enabled.
 type DependencyRef struct {
 	Key, Name string
+	Enabled   bool
 }
 
 // ActiveEntries returns every uncommented components entry that has a name,
@@ -80,6 +82,12 @@ func ConfigValue(entry *yaml.Node, key string) *yaml.Node {
 // whatever its name (even an empty one: the operator's value wins).
 func HasDependency(entry *yaml.Node, depKey string) bool {
 	return mapGet(ConfigValue(entry, "dependencies"), depKey) != nil
+}
+
+// DependencyField returns entry.config.dependencies.<depKey>.<field>'s node,
+// or nil when absent.
+func DependencyField(entry *yaml.Node, depKey, field string) *yaml.Node {
+	return mapGet(mapGet(mapGet(mapGet(entry, "config"), "dependencies"), depKey), field)
 }
 
 // HasTopLevel reports whether spec.defaultValues.<key> is set.
@@ -152,6 +160,29 @@ func (d *Doc) AddToEntry(entry *yaml.Node, fields []Field, deps []DependencyRef)
 		writeDeps(&b, childIndent+2, deps)
 	}
 	d.insert(lastLine(config), b.String())
+	return nil
+}
+
+// AddToDependency adds fields to the existing entry.config.dependencies.<depKey>
+// block (a dependency the entry already declares). The caller has checked
+// none is declared yet. A dependency written in flow style ({name: x}) or
+// as a bare null cannot be extended textually and is an error. Record it
+// before an AddToEntry on the same entry: both may land on the same line,
+// and the dependency's own fields must come first.
+func (d *Doc) AddToDependency(entry *yaml.Node, depKey string, fields []Field) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	key, dep := mapPair(ConfigValue(entry, "dependencies"), depKey)
+	if dep == nil {
+		return fmt.Errorf("dependency %q is not declared", depKey)
+	}
+	if dep.Kind != yaml.MappingNode || dep.Style&yaml.FlowStyle != 0 || len(dep.Content) == 0 {
+		return fmt.Errorf("config.dependencies.%s is not a block mapping (line %d); edit it by hand", depKey, key.Line)
+	}
+	var b strings.Builder
+	writeFields(&b, dep.Content[0].Column-1, fields)
+	d.insert(lastLine(dep), b.String())
 	return nil
 }
 
@@ -343,6 +374,9 @@ func writeFields(b *strings.Builder, pad int, fields []Field) {
 func writeDeps(b *strings.Builder, pad int, deps []DependencyRef) {
 	for _, dep := range deps {
 		b.WriteString(indent(pad) + dep.Key + ":\n")
+		if dep.Enabled {
+			b.WriteString(indent(pad+2) + "enabled: true\n")
+		}
 		b.WriteString(indent(pad+2) + "name: " + scalar(dep.Name) + "\n")
 	}
 }

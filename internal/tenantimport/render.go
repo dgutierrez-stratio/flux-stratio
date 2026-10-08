@@ -77,7 +77,7 @@ func renderEntries(entries []*Entry) []map[string]any {
 		if len(e.Deps) > 0 {
 			deps := map[string]any{}
 			for k, v := range e.Deps {
-				deps[k] = map[string]any{"name": v}
+				deps[k] = e.depConfig(k, v)
 			}
 			config["dependencies"] = deps
 		}

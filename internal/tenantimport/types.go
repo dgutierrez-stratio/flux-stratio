@@ -32,6 +32,12 @@ type Entry struct {
 	// ExtraConfig holds extra scalar config fields resolved during
 	// enrichment (see internal/catalog.Schema.ExtraConfig).
 	ExtraConfig map[string]any
+	// DepEnabled maps a dependency key to the HelmRelease values path that
+	// shows this entry uses it (see scanUses): its `enabled: true` is written.
+	DepEnabled map[string]string
+	// DepUnknown marks the dependencies with a chart.uses rule that could not
+	// be decided because the entry has no live HelmRelease yet.
+	DepUnknown map[string]bool
 }
 
 // Components is component key -> discovered entries, the working set
@@ -55,4 +61,15 @@ func (c Components) names(key string) []string {
 		out = append(out, e.Name)
 	}
 	return out
+}
+
+// depConfig is the config.dependencies.<key> block of e: its name, and
+// `enabled: true` when the entry's HelmRelease shows it uses the dependency
+// and the name is resolved.
+func (e *Entry) depConfig(key, name string) map[string]any {
+	dep := map[string]any{"name": name}
+	if name != "" && e.DepEnabled[key] != "" {
+		dep["enabled"] = true
+	}
+	return dep
 }

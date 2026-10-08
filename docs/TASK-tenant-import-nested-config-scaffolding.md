@@ -2,6 +2,10 @@
 
 > **Update:** point 3 below (warn, always, when a field has no usable default) landed with
 > `docs/TASK-tenant-import-idempotent-merge.md`; the nested scaffolding shape (points 1, 2, 4) is still open.
+>
+> **Update 2:** the regex's blind spot for a bare default (`| default dict`, `| default false`) is fixed: a bare scalar is now a typed
+> default, and `dict`/`list` marks an optional sub-config (silent) unless the catalog type lists the field in `requiredConfig`
+> (seeded: genai `llmModels`, litellm `models`), which keeps the warning. Still open: the *shape* of a required nested block (`chat`/`governance`/`translate`).
 
 ## Summary
 

@@ -15,7 +15,11 @@
 // decision 2 in the project plan.
 package catalog
 
-import "k8s.io/apimachinery/pkg/runtime/schema"
+import (
+	"slices"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
 
 // Dependency is one dependency key a component's template resolves via
 // `get $dependencies "<key>"`, in first-declared order.
@@ -37,6 +41,22 @@ type ExtraConfigField struct {
 	// (`<< else >>false<< end >>`), i.e. a YAML scalar of its own type
 	// (bool, number) rather than the string a quoted `default "…"` is.
 	Bare bool
+	// Container is "dict" or "list" when the template defaults the field to
+	// an empty container (`| default dict`, `| default list`): an optional
+	// sub-config whose absence is valid. HasDefault stays false (there is no
+	// scalar to scaffold); the field is not warned about unless the
+	// component's catalog type lists it as required.
+	Container string
+	// StorageTypes lists the storage types under which every read of the
+	// field sits inside an `if eq $storageType "<type>"` branch (the part
+	// before its else). Empty means the field is read for any type.
+	StorageTypes []string
+}
+
+// AppliesTo reports whether the field is read for an entry of storageType:
+// always, unless every read is inside storage-type branches that exclude it.
+func (f ExtraConfigField) AppliesTo(storageType string) bool {
+	return len(f.StorageTypes) == 0 || slices.Contains(f.StorageTypes, storageType)
 }
 
 // AnchorKind classifies where a Kustomization's patches come from in the

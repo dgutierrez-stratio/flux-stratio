@@ -101,6 +101,20 @@ flux stratio tenant import \
   [`config-reference.md`](config-reference.md)); a catalog seeded before that field existed gets the
   seed's value for the same type, so it needs no re-seeding. If the catalog can't be loaded at all,
   the command warns that such keys are not set.
+- A dependency's `enabled` (what the ResourceSets read to wire it in: rocket's and intelligence's `genai`,
+  `virtualizer`, `opensearch`, `litellm`) is derived through `chart.uses`: `enabled: true` is written when the app's
+  live HelmRelease values show the integration in use, and the line says which value did. Without a HelmRelease
+  (the app is not migrated yet) the command cannot tell and warns instead: run it again after `apps migrate`, or
+  set `enabled` by hand. A value you wrote, `false` included, is never changed. Left off, the dependency is
+  dropped from the app's `dependsOn` and its prerequisites skip its setup (rocket then gets 403 from genai-api).
+
+- The resulting file is validated every time (`tenantcheck`, also on `--dry-run`, against the proposed result): structure
+  and label, entry names, dependencies pointing at declared entries, `enabled` being a boolean, and `flux-operator build
+  rset` of every keos-use-cases ResourceSet against it, failing on an app that waits on an `apps-*` Kustomization nothing
+  renders. The file is written regardless; a problem is listed and the command exits non-zero. An unresolved dependency
+  name is only a warning unless the dependency has `enabled: true`: a fresh import leaves some empty, and the render check
+  is what fails if an app really waits on one. `--no-validate` skips it; without `flux-operator` only the structural
+  checks run and a note says so.
 
 Commit the reviewed file to `keos-fleet` before continuing.
 

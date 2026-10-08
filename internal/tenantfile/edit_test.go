@@ -59,7 +59,7 @@ func TestAddToEntry_AddsAfterTheLastKeyOfConfigAndKeepsEveryOtherLine(t *testing
 	d := docFrom(t, editBase)
 	err := d.AddToEntry(entryNamed(t, d, "psql"),
 		[]Field{{"retention", "7d"}, {"enabled", true}},
-		[]DependencyRef{{"pgbouncer", "pool"}})
+		[]DependencyRef{{Key: "pgbouncer", Name: "pool"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestAddToEntry_AddsAfterTheLastKeyOfConfigAndKeepsEveryOtherLine(t *testing
 
 func TestAddToEntry_CreatesConfigWhenAbsentAfterTheWholeEntry(t *testing.T) {
 	d := docFrom(t, editBase)
-	if err := d.AddToEntry(entryNamed(t, d, "kafka1"), []Field{{"kafkaClusterExposed", "false"}}, []DependencyRef{{"postgres", "psql"}}); err != nil {
+	if err := d.AddToEntry(entryNamed(t, d, "kafka1"), []Field{{"kafkaClusterExposed", "false"}}, []DependencyRef{{Key: "postgres", Name: "psql"}}); err != nil {
 		t.Fatal(err)
 	}
 	want := strings.Replace(editBase, "      - name: kafka1\n",
@@ -186,5 +186,34 @@ func TestSaveAfterTextualAdditionsWritesThemAndKeepsEditing(t *testing.T) {
 	}
 	if !strings.Contains(string(d.Text()), "          b: 2\n") {
 		t.Errorf("second addition lost:\n%s", d.Text())
+	}
+}
+
+func TestAddToDependency_AddsAfterTheDependencyAndBeforeANewOne(t *testing.T) {
+	d := docFrom(t, editBase)
+	entry := entryNamed(t, d, "psql")
+	// Recorded in this order: the dependency's own field, then a new
+	// dependency landing on the same line.
+	if err := d.AddToDependency(entry, "pgbackuprepository", []Field{{"enabled", true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AddToEntry(entry, nil, []DependencyRef{{Key: "pgbouncer", Name: "pool", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Replace(editBase, "              name: backups\n",
+		"              name: backups\n              enabled: true\n            pgbouncer:\n              enabled: true\n              name: pool\n", 1)
+	if got := string(d.Text()); got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAddToDependency_FlowAndMissingDependencyAreErrors(t *testing.T) {
+	d := docFrom(t, "spec:\n  defaultValues:\n    components:\n      kafka:\n      - name: k\n        config:\n          dependencies:\n            zk: {name: z}\n")
+	entry := entryNamed(t, d, "k")
+	if err := d.AddToDependency(entry, "zk", []Field{{"enabled", true}}); err == nil {
+		t.Error("a flow-style dependency was edited textually, want an error")
+	}
+	if err := d.AddToDependency(entry, "nope", []Field{{"enabled", true}}); err == nil {
+		t.Error("an undeclared dependency was edited, want an error")
 	}
 }

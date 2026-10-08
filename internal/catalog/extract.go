@@ -12,7 +12,13 @@ var (
 	depRe         = regexp.MustCompile(`\$(\w+Dependency)\s*:=\s*get\s+\$dependencies\s+"([^"]+)"`)
 	depVarTokenRe = regexp.MustCompile(`\$(\w+Dependency)\b`)
 	storageIfRe   = regexp.MustCompile(`(?s)<<-?\s*if\s+eq\s+\$storageType\s+"([^"]+)"\s*>>(.*?)<<-?\s*end\s*>>`)
-	extraConfigRe = regexp.MustCompile(`get\s+\$componentConfig\s+"([^"]+)"(?:\s*\|\s*default\s+"([^"]*)")?`)
+	// extraConfigRe finds a read of a config field and its `| default`: a
+	// quoted string (group 2) or a bare token (group 3: false, true, a
+	// number, dict or list; anything else is not taken for a default).
+	extraConfigRe = regexp.MustCompile(`get\s+\$componentConfig\s+"([^"]+)"(?:\s*\|\s*default\s+(?:"([^"]*)"|(false|true|-?\d+(?:\.\d+)?|dict|list)\b))?`)
+
+	// storageElseRe splits a storage-type branch at its `else`.
+	storageElseRe = regexp.MustCompile(`<<-?\s*else\s*>>`)
 
 	// hasKeyDefaultRe finds the `hasKey … else <literal>` form of a default:
 	// `<< if hasKey $componentConfig "k" >><< get $componentConfig "k" >><< else >>false<< end >>`.
@@ -78,17 +84,56 @@ func extractSchema(key, block string) Schema {
 		}
 	}
 
-	seenExtra := map[string]bool{}
+	// Reads of each field in total, and per storage type inside the part of
+	// an `if eq $storageType` branch that precedes its else: a field every
+	// read of which is so conditioned only applies to those types. A read
+	// after an else, or past a nested `end` the lazy match stops at, counts
+	// as unconditional — the safe side: the field is then still reported.
+	totalReads := map[string]int{}
 	for _, m := range extraConfigRe.FindAllStringSubmatch(block, -1) {
-		fieldKey := m[1]
+		totalReads[m[1]]++
+	}
+	condReads := map[string]map[string]int{} // field -> storage type -> reads
+	for _, m := range storageIfRe.FindAllStringSubmatch(block, -1) {
+		then := storageElseRe.Split(m[2], 2)[0]
+		for _, fm := range extraConfigRe.FindAllStringSubmatch(then, -1) {
+			if condReads[fm[1]] == nil {
+				condReads[fm[1]] = map[string]int{}
+			}
+			condReads[fm[1]][m[1]]++
+		}
+	}
+
+	seenExtra := map[string]bool{}
+	for _, idx := range extraConfigRe.FindAllStringSubmatchIndex(block, -1) {
+		fieldKey := block[idx[2]:idx[3]]
 		if extraConfigIgnore[fieldKey] || seenExtra[fieldKey] {
 			continue
 		}
 		seenExtra[fieldKey] = true
 		field := ExtraConfigField{Key: fieldKey}
-		if strings.Contains(m[0], "| default") {
-			field.HasDefault = true
-			field.Default = m[2]
+		switch {
+		case idx[4] >= 0: // a quoted default, possibly ""
+			field.HasDefault, field.Default = true, block[idx[4]:idx[5]]
+		case idx[6] >= 0:
+			bare := block[idx[6]:idx[7]]
+			if bare == "dict" || bare == "list" {
+				field.Container = bare
+			} else {
+				field.HasDefault, field.Default, field.Bare = true, bare, true
+			}
+		}
+		if n := totalReads[fieldKey]; n > 0 {
+			conditioned := 0
+			for _, c := range condReads[fieldKey] {
+				conditioned += c
+			}
+			if conditioned == n {
+				for t := range condReads[fieldKey] {
+					field.StorageTypes = append(field.StorageTypes, t)
+				}
+				slices.Sort(field.StorageTypes)
+			}
 		}
 		s.ExtraConfig = append(s.ExtraConfig, field)
 	}

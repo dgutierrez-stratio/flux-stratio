@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -398,5 +399,75 @@ func TestSeedCatalog_VirtualizerEnabledByNamesItsSiblings(t *testing.T) {
 	got := typ.SiblingNames()
 	if len(got) != 2 || got[0] != "virtualizer-monitor" || got[1] != "virtualizer-ui" {
 		t.Errorf("SiblingNames = %v, want [virtualizer-monitor virtualizer-ui]", got)
+	}
+}
+
+func TestLoad_ChartUses(t *testing.T) {
+	withChart := func(extra string) string {
+		return strings.Replace(validCatalogYAML, "    chart:\n      path: gosec-agent\n",
+			"    chart:\n      path: gosec-agent\n"+extra, 1)
+	}
+
+	cat, err := Load(writeFile(t, "catalog.yaml", withChart("      uses:\n        - dependency: genai\n          values: [a.b.enabled]\n")))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := cat.Types[1].Uses()
+	if len(got) != 1 || got[0].Dependency != "genai" || len(got[0].Values) != 1 || got[0].Values[0] != "a.b.enabled" {
+		t.Errorf("Uses = %+v, want genai/[a.b.enabled]", got)
+	}
+
+	for name, extra := range map[string]string{
+		"no dependency": "      uses:\n        - values: [a.b]\n",
+		"no values":     "      uses:\n        - dependency: genai\n",
+		"bad path":      "      uses:\n        - dependency: genai\n          values: [a..b]\n",
+		"duplicate":     "      uses:\n        - dependency: genai\n          values: [a]\n        - dependency: genai\n          values: [b]\n",
+	} {
+		_, err := Load(writeFile(t, "catalog.yaml", withChart(extra)))
+		if err == nil || !strings.Contains(err.Error(), "chart.uses") {
+			t.Errorf("%s: Load error = %v, want a chart.uses problem", name, err)
+		}
+	}
+}
+
+func TestSeedCatalog_RocketAndIntelligenceDeclareTheirUses(t *testing.T) {
+	want := map[string][]string{
+		"rocket":       {"genai", "virtualizer"},
+		"intelligence": {"genai", "virtualizer", "opensearch", "litellm"},
+	}
+	for typeID, deps := range want {
+		typ := SeedCatalog().Find(typeID)
+		if typ == nil {
+			t.Fatalf("seed has no %s type", typeID)
+		}
+		var got []string
+		for _, u := range typ.Uses() {
+			got = append(got, u.Dependency)
+		}
+		if !slices.Equal(got, deps) {
+			t.Errorf("%s uses = %v, want %v", typeID, got, deps)
+		}
+	}
+}
+
+func TestLoad_RequiredConfig(t *testing.T) {
+	withField := func(extra string) string {
+		return strings.Replace(validCatalogYAML, "    chart:\n      path: gosec-agent\n", extra+"    chart:\n      path: gosec-agent\n", 1)
+	}
+	cat, err := Load(writeFile(t, "catalog.yaml", withField("    requiredConfig: [llmModels]\n")))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got := cat.Types[1].RequiredConfig; len(got) != 1 || got[0] != "llmModels" {
+		t.Errorf("RequiredConfig = %v, want [llmModels]", got)
+	}
+	if _, err := Load(writeFile(t, "catalog.yaml", withField("    requiredConfig: [a.b]\n"))); err == nil || !strings.Contains(err.Error(), "requiredConfig") {
+		t.Errorf("Load error = %v, want a requiredConfig problem", err)
+	}
+	for typeID, field := range map[string]string{"genai": "llmModels", "litellm": "models"} {
+		typ := SeedCatalog().Find(typeID)
+		if typ == nil || len(typ.RequiredConfig) != 1 || typ.RequiredConfig[0] != field {
+			t.Errorf("seed %s RequiredConfig = %+v, want [%s]", typeID, typ, field)
+		}
 	}
 }

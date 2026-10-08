@@ -255,6 +255,9 @@ func SeedCatalog() Catalog {
 			// the chart any more, so it isn't a sibling.
 			Match: cctMatch(kindDeployment, "genai", "genai-api"),
 			Entry: `{{ .Live.Name | trimSuffix "-api" }}`,
+			// The chart cannot run without it, though the template defaults it to an
+			// empty container: `tenant import` warns until it is set.
+			RequiredConfig: []string{"llmModels"},
 			Chart: &Chart{Path: "genai", Siblings: []Match{
 				cctMatch(kindDeployment, "genai", "genai-ui"),
 				cctMatch(kindDeployment, "genai", "genai-developer-proxy"),
@@ -310,10 +313,13 @@ func SeedCatalog() Catalog {
 			// legacy Ingress's route) and the vault approlename (the chart's
 			// SecretsIdentity role). Kept: the legacy Postgres database/schema,
 			// gosec groups and autoUvicornWorkers.
-			Match:   cctMatch(kindDeployment, "genai", "genai-litellm"),
-			Object:  "litellm",
-			Chart:   &Chart{Path: "litellm"},
-			Prepare: "prepare-litellm",
+			Match:  cctMatch(kindDeployment, "genai", "genai-litellm"),
+			Object: "litellm",
+			// The chart cannot run without it, though the template defaults it to an
+			// empty container: `tenant import` warns until it is set.
+			RequiredConfig: []string{"models"},
+			Chart:          &Chart{Path: "litellm"},
+			Prepare:        "prepare-litellm",
 			Exclude: []string{
 				"spec.values.liteLlm.general.networking.ingressHost",
 				"spec.values.liteLlm.general.networking.ingressBasePath",
@@ -332,7 +338,13 @@ func SeedCatalog() Catalog {
 			// are owned by this one and skipped by classification anyway;
 			// model=default excludes rocket-catalog-standalone.
 			Match: cctMatch(kindDeployment, "rocket", "default"),
-			Chart: &Chart{Path: "rocket"},
+			// The paths are legacy configuration the migration patch keeps in the
+			// HelmRelease values: the evidence that rocket uses the integration
+			// (see Chart.Uses).
+			Chart: &Chart{Path: "rocket", Uses: []Use{
+				{Dependency: "genai", Values: []string{"rocketCommon.general.genAI.genaiEnabled"}},
+				{Dependency: "virtualizer", Values: []string{"rocketCommon.general.catalog.virtualizerHost"}},
+			}},
 			Exclude: []string{
 				"spec.values.rocketServer.settings.governanceIntegration.crossdataCatalogGovernanceUri",
 				"spec.values.rocketServer.settings.governanceIntegration.crossdataCatalogGovernancePost",
@@ -348,7 +360,13 @@ func SeedCatalog() Catalog {
 			Component: "intelligence",
 			Rset:      rsetIntelligence,
 			Match:     cctMatch(kindDeployment, "intelligence", ""),
-			Chart:     &Chart{Path: "intelligence"},
+			// As rocket: legacy configuration kept in the HelmRelease values.
+			Chart: &Chart{Path: "intelligence", Uses: []Use{
+				{Dependency: "genai", Values: []string{"configuration.general.genaiSettings.genaiEnabled"}},
+				{Dependency: "virtualizer", Values: []string{"configuration.settings.AnalyticSettings.crossdataServer.CrossdataServerHost"}},
+				{Dependency: "opensearch", Values: []string{"configuration.general.genaiSettings.genaiLayerConf.genaiAPIIntegration.genaiChainsConf.sqlChainConf.sqlChainOpensearchEnabled"}},
+				{Dependency: "litellm", Values: []string{"configuration.general.genaiSettings.genaiLayerConf.litellmIntegration.litellmUrl"}},
+			}},
 			Exclude: []string{
 				"spec.values.configuration.security.vault.multiuser.approlename",
 				"spec.values.configuration.general.genaiSettings.genaiLayerConf.genaiAPIIntegration.genaiChainsConf.genaiChainsGovernanceUrl",

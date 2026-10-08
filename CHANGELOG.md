@@ -2,6 +2,36 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`tenant import` stops warning about config fields that have a default or don't apply.** Two gaps in the schema
+  scanner. (1) Only a quoted `| default "x"` counted as a default, so `| default false` (postgres `recoveryEnabled`,
+  genai `governanceOpenSearchEnabled`) was reported as "no default" although the template has one: a bare
+  `false`/`true`/number is now a typed default and is scaffolded as such, and `| default dict` / `| default list`
+  (postgres/opensearch `agent`, opensearch `backup`) marks an optional sub-config that is neither scaffolded nor
+  warned about. To keep the warning where the chart needs the content (genai `llmModels`, litellm `models`), the
+  catalog type has a new `requiredConfig` list, seeded on both (an older `catalog.yaml` inherits it). (2) A field read
+  only inside `if eq $storageType "local"` (pgbackuprepository `storageClassName`) is now skipped for entries of
+  another storage type instead of being reported. The first Complete after upgrading adds the explicit defaults
+  (`recoveryEnabled: false`, `governanceOpenSearchEnabled: false`) the templates already assumed.
+* **`tenant import` validates the tenant file it produces.** New package `internal/tenantcheck`, run after every import
+  (Create, Complete and, on the proposed result, `--dry-run`): the file is a `ResourceSetInputProvider` with the
+  `tenant-config` label, `tenantName`/`size` are sane, every entry has a unique name, every dependency has a name and
+  points at an entry the file declares (the app would otherwise wait on `apps-<name>` forever), `enabled` is a boolean,
+  and every `resourceset-apps-*.yaml` of keos-use-cases renders against it with `flux-operator build rset` with no
+  tenant `apps-*` Kustomization waited on and not rendered. The file is still written; problems are listed and the
+  command exits non-zero. `--no-validate` skips it; without `flux-operator` the render step is skipped with a note.
+  An empty or undeclared dependency name is an Error only when the dependency has `enabled: true`; otherwise it is a
+  warning, since a switched-off dependency blocks nothing and the render check fails on any real dangling wait (a fresh
+  import, which leaves unresolved names empty, therefore exits 0). `uses` evidence ignores string spellings of off
+  (`"False"`, `"0"`, `"no"`, `"off"`).
+* **`tenant import` writes `dependencies.<dep>.enabled: true` for the integrations an app already uses.** It wrote only
+  `{name: ...}`, and the ResourceSets read `enabled` (default false): a migrated rocket or intelligence got
+  `genai.enabled: false`, so the prerequisites job skipped the genai role assignment and genai-api answered 403 to
+  chain registration every five minutes. The new catalog field `chart.uses` (`{dependency, values}`, seeded on `rocket`
+  and `intelligence`; an older `catalog.yaml` inherits the seed's rules) names the live HelmRelease values that prove
+  the use. Create and Complete both write `enabled: true` on that evidence and report the value; a hand-written
+  `enabled: false` stays, with a warning; an app with no HelmRelease yet is warned about, never guessed. New
+  `tenantfile.AddToDependency` adds the line inside an existing block-style dependency. The `add-catalog-component`
+  skill now investigates `chart.enabledBy` and `chart.uses` for a new component.
 * **`prepare-litellm`: the legacy LiteLLM Deployment is replaced by `apps migrate`.** Same problem and same helper as
   `prepare-discovery` and `prepare-dg-agent` (`replaceLegacyDeployment`): the chart changes the Deployment's immutable
   selector under the legacy name `genai-litellm`. It is found by CCT's app id, never a Flux-managed one, asks like every

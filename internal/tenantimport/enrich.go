@@ -15,20 +15,22 @@ import (
 // component type — is still emitted with an empty name and a warning, so
 // the generated YAML's structure is always complete; the operator fills
 // it in by hand. A config field with no default is never dropped silently:
-// it is warned about.
-func enrich(cat *catalog.Catalog, components Components, warn func(string, ...any)) {
+// it is warned about — except one the template defaults to an empty dict or
+// list (optional unless the catalog lists it as required) and one only read
+// for another storage type.
+func enrich(cat *catalog.Catalog, components Components, required map[string]map[string]bool, warn func(string, ...any)) {
 	for key, entries := range components {
 		schema, ok := cat.Schemas[key]
 		if !ok {
 			continue
 		}
 		for _, entry := range entries {
-			enrichEntry(schema, entry, components, warn)
+			enrichEntry(schema, entry, components, required[key], warn)
 		}
 	}
 }
 
-func enrichEntry(schema catalog.Schema, entry *Entry, components Components, warn func(string, ...any)) {
+func enrichEntry(schema catalog.Schema, entry *Entry, components Components, required map[string]bool, warn func(string, ...any)) {
 	// HDFS storage-type inference: generalized over any dependency
 	// declaring "hdfs" in its StorageTypes, rather than the Python
 	// client's hardcoded 4-component name list (design decision 8).
@@ -58,6 +60,10 @@ func enrichEntry(schema catalog.Schema, entry *Entry, components Components, war
 		}
 	}
 
+	for _, dep := range undecidedUses(entry) {
+		warn(undecidedUseFormat, entry.Name, dep)
+	}
+
 	if entry.ExtraConfig == nil {
 		entry.ExtraConfig = map[string]any{}
 	}
@@ -65,11 +71,12 @@ func enrichEntry(schema catalog.Schema, entry *Entry, components Components, war
 		if _, already := entry.ExtraConfig[field.Key]; already {
 			continue
 		}
-		if !field.HasDefault {
+		switch fieldPlan(field, entry.Type, required) {
+		case fieldWarn:
 			warn("%s: config %q has no default; set it by hand", entry.Name, field.Key)
-			continue
+		case fieldDefault:
+			entry.ExtraConfig[field.Key] = defaultValue(field)
 		}
-		entry.ExtraConfig[field.Key] = defaultValue(field)
 	}
 }
 

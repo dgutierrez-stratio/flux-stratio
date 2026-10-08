@@ -304,3 +304,72 @@ func TestExtractSchema_HasKeyWithoutElseKeepsNoDefault(t *testing.T) {
 		t.Errorf("ExtraConfig = %+v, want one field without a default", s.ExtraConfig)
 	}
 }
+
+func TestExtractSchema_ExtraConfigBareDefaultsAndContainers(t *testing.T) {
+	block := `
+      A: << get $componentConfig "recoveryEnabled" | default false >>
+      B: "<< get $componentConfig "governanceOpenSearchEnabled" | default true >>"
+      C: << get $componentConfig "replicas" | default 3 | quote >>
+      D: << get $componentConfig "ratio" | default 0.5 >>
+      E: << $agentConfig := get $componentConfig "agent" | default dict >>
+      F: << get $componentConfig "indices" | default list | toJson | quote >>
+      G: << get $componentConfig "quoted" | default "x y" | quote >>
+      H: << get $componentConfig "dynamic" | default $something >>
+      I: << get $componentConfig "plain" | quote >>
+`
+	byKey := map[string]ExtraConfigField{}
+	for _, f := range extractSchema("foo", block).ExtraConfig {
+		byKey[f.Key] = f
+	}
+	for key, want := range map[string]ExtraConfigField{
+		"recoveryEnabled":             {Key: "recoveryEnabled", HasDefault: true, Default: "false", Bare: true},
+		"governanceOpenSearchEnabled": {Key: "governanceOpenSearchEnabled", HasDefault: true, Default: "true", Bare: true},
+		"replicas":                    {Key: "replicas", HasDefault: true, Default: "3", Bare: true},
+		"ratio":                       {Key: "ratio", HasDefault: true, Default: "0.5", Bare: true},
+		"agent":                       {Key: "agent", Container: "dict"},
+		"indices":                     {Key: "indices", Container: "list"},
+		"quoted":                      {Key: "quoted", HasDefault: true, Default: "x y"},
+		"dynamic":                     {Key: "dynamic"},
+		"plain":                       {Key: "plain"},
+	} {
+		got := byKey[key]
+		if got.Key != want.Key || got.HasDefault != want.HasDefault || got.Default != want.Default || got.Bare != want.Bare || got.Container != want.Container {
+			t.Errorf("%s = %+v, want %+v", key, got, want)
+		}
+	}
+}
+
+func TestExtractSchema_ExtraConfigStorageTypeBranches(t *testing.T) {
+	block := `
+      <<- if eq $storageType "local" >>
+      CLASS: << get $componentConfig "storageClassName" | quote >>
+      MODE: << get $componentConfig "accessMode" | default "ReadWriteOnce" | quote >>
+      <<- else >>
+      OTHER: << get $componentConfig "elseOnly" | quote >>
+      <<- end >>
+      <<- if eq $storageType "hdfs" >>
+      A: << get $componentConfig "both" | quote >>
+      <<- end >>
+      <<- if eq $storageType "local" >>
+      B: << get $componentConfig "both" | quote >>
+      C: << get $componentConfig "storageClassName" | quote >>
+      <<- end >>
+      OUTSIDE: << get $componentConfig "accessMode" | default "ReadWriteOnce" | quote >>
+`
+	byKey := map[string]ExtraConfigField{}
+	for _, f := range extractSchema("foo", block).ExtraConfig {
+		byKey[f.Key] = f
+	}
+	if f := byKey["storageClassName"]; len(f.StorageTypes) != 1 || f.StorageTypes[0] != "local" || f.AppliesTo("s3") || !f.AppliesTo("local") {
+		t.Errorf("storageClassName = %+v, want local only", f)
+	}
+	if f := byKey["both"]; len(f.StorageTypes) != 2 || f.StorageTypes[0] != "hdfs" || f.StorageTypes[1] != "local" || f.AppliesTo("s3") {
+		t.Errorf("both = %+v, want hdfs and local", f)
+	}
+	if f := byKey["accessMode"]; len(f.StorageTypes) != 0 || !f.AppliesTo("s3") {
+		t.Errorf("accessMode = %+v, want unconditional (also read outside the branch)", f)
+	}
+	if f := byKey["elseOnly"]; len(f.StorageTypes) != 0 {
+		t.Errorf("elseOnly = %+v, want unconditional (read in the else of the branch)", f)
+	}
+}

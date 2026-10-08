@@ -18,8 +18,9 @@ type Options struct {
 	Size    string
 	Catalog *catalog.Catalog
 	// Config is the migration catalog, read for Chart.EnabledBy to derive
-	// config fields from the live siblings (virtualizer's uiEnabled). Nil
-	// derives nothing.
+	// config fields from the live siblings (virtualizer's uiEnabled) and
+	// Chart.Uses to derive dependencies' `enabled` from the live
+	// HelmRelease values. Nil derives nothing.
 	Config *config.Catalog
 	Client client.Client
 	Log    *log.Logger
@@ -47,6 +48,7 @@ func Scan(ctx context.Context, opts Options, expandSkeleton bool) (Components, L
 	if err := scanHelmReleases(ctx, opts.Client, opts.Catalog, opts.TenantName, components); err != nil {
 		return nil, Live{}, fmt.Errorf("scanning helmreleases: %w", err)
 	}
+	scanUses(opts, components)
 	live, err := scanEnabledBy(ctx, opts.Client, opts.Config, opts.TenantName)
 	if err != nil {
 		return nil, Live{}, fmt.Errorf("scanning sibling workloads: %w", err)
@@ -64,13 +66,21 @@ func Scan(ctx context.Context, opts Options, expandSkeleton bool) (Components, L
 			}
 		}
 	}
-	enrich(opts.Catalog, components, warn)
+	enrich(opts.Catalog, components, requiredConfig(opts.Config), warn)
 	return components, live, nil
 }
 
 func (o Options) warn(format string, a ...any) {
 	if o.Log != nil {
 		o.Log.Warningf(format, a...)
+	}
+}
+
+// note reports something the run decided from the cluster, as opposed to a
+// warning about something it could not decide.
+func (o Options) note(format string, a ...any) {
+	if o.Log != nil {
+		o.Log.Generatef(format, a...)
 	}
 }
 
