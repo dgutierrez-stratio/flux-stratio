@@ -3,7 +3,8 @@
 // component catalog and environment files, the GitOps repo layout, each
 // chart-mode type's on-disk chart directory, each type's component key
 // and prepare step, every Kustomization path its template renders, cluster
-// access, and the target tenant file —
+// access, Vault access (the read-only reads of the prepare steps that need
+// it, for the legacy apps they'll handle), and the target tenant file —
 // so a broken prerequisite is caught up front, not discovered
 // mid-migration.
 package doctor
@@ -15,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -24,12 +26,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/components"
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
+	"github.com/Stratio/flux-stratio/internal/vault"
 )
 
 // Options configures a doctor run. NewClient and Runner default to the
@@ -51,6 +56,9 @@ type Options struct {
 	// Git runs `git -C dir args...` and returns its stdout. Defaults to the
 	// real git through Runner; tests inject a fake.
 	Git func(ctx context.Context, dir string, args ...string) (string, error)
+	// NewExecer builds the pod exec the Vault check runs the vault CLI
+	// through, from KubeconfigArgs. Defaults to kubeclient.NewExecer.
+	NewExecer func(*genericclioptions.ConfigFlags) (kubeclient.Execer, error)
 }
 
 // CheckName identifies one of doctor's checks.
@@ -67,8 +75,11 @@ const (
 	CheckTypes       CheckName = "catalog types"
 	CheckSourcePaths CheckName = "kustomization paths"
 	CheckCluster     CheckName = "cluster access"
-	CheckRevisions   CheckName = "repo revisions"
-	CheckTenant      CheckName = "tenant file"
+	// CheckVault is required when a legacy app on the cluster has a
+	// prepare step that NeedsVault; otherwise it is skipped (Optional).
+	CheckVault     CheckName = "vault access"
+	CheckRevisions CheckName = "repo revisions"
+	CheckTenant    CheckName = "tenant file"
 	// CheckMeld is Optional: apps diff --meld is the only thing it gates.
 	CheckMeld CheckName = "meld (optional)"
 )
@@ -149,9 +160,10 @@ func Run(ctx context.Context, opts Options) Report {
 			report.Checks = append(report.Checks, narrate(opts.Log, checkSourcePaths(cat, templates, repos)))
 		}
 	}
-	clusterCheck := checkCluster(ctx, opts)
+	c, clusterCheck := checkCluster(ctx, opts)
 	report.Checks = append(report.Checks, clusterCheck)
 	if clusterCheck.OK {
+		report.Checks = append(report.Checks, checkVault(ctx, opts, c, cat, env.Tenant))
 		report.Checks = append(report.Checks, narrateOptional(opts.Log, checkRepoRevisions(ctx, opts, repos)))
 	}
 	report.Checks = append(report.Checks, narrate(opts.Log, checkTenantFile(repos.Fleet, env.Cluster, env.Tenant)))
@@ -416,7 +428,9 @@ func anyDir(pattern string) bool {
 	return false
 }
 
-func checkCluster(ctx context.Context, opts Options) Check {
+// checkCluster builds the cluster client and checks it can list; the
+// client is returned for the checks that follow it.
+func checkCluster(ctx context.Context, opts Options) (client.Client, Check) {
 	opts.Log.Actionf("checking cluster access")
 	newClient := opts.NewClient
 	c, err := newClient(opts.KubeconfigArgs)
@@ -427,10 +441,128 @@ func checkCluster(ctx context.Context, opts Options) Check {
 	}
 	if err != nil {
 		opts.Log.Failuref("%v", err)
-		return Check{Name: CheckCluster, OK: false, Detail: err.Error()}
+		return nil, Check{Name: CheckCluster, OK: false, Detail: err.Error()}
 	}
 	opts.Log.Successf("cluster reachable")
-	return Check{Name: CheckCluster, OK: true}
+	return c, Check{Name: CheckCluster, OK: true}
+}
+
+// vaultApp is a legacy app on the cluster whose prepare step reaches Vault.
+type vaultApp struct {
+	step            *prepare.Step
+	name, namespace string
+}
+
+// legacyVaultApps finds the legacy instances of cat's types whose prepare
+// step NeedsVault, classified the way apps diff/migrate classify them, and
+// names those steps. A migrated instance (the chart's workload no longer
+// matches the type's legacy selectors) needs nothing from Vault and isn't
+// one.
+func legacyVaultApps(ctx context.Context, c client.Client, cat *config.Catalog, tenant string) ([]vaultApp, []string, error) {
+	if cat == nil {
+		return nil, nil, nil
+	}
+	sub := &config.Catalog{}
+	steps := map[string]*prepare.Step{}
+	var stepNames []string
+	var kinds []schema.GroupVersionKind
+	for _, t := range cat.Types {
+		step := prepare.Find(t.Prepare)
+		if step == nil || !step.NeedsVault() {
+			continue
+		}
+		sub.Types = append(sub.Types, t)
+		steps[t.Type] = step
+		if !slices.Contains(stepNames, step.Name) {
+			stepNames = append(stepNames, step.Name)
+		}
+		for _, k := range t.Match.Kinds {
+			gvk, err := config.ParseKind(k)
+			if err != nil {
+				return nil, nil, fmt.Errorf("type %q: %w", t.Type, err)
+			}
+			if !slices.Contains(kinds, gvk) {
+				kinds = append(kinds, gvk)
+			}
+		}
+	}
+	var objs []*unstructured.Unstructured
+	for _, gvk := range kinds {
+		list, err := kubeclient.ListUnstructured(ctx, c, gvk, "")
+		if kubeclient.IsNoMatch(err) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing %s: %w", gvk.Kind, err)
+		}
+		for i := range list.Items {
+			objs = append(objs, &list.Items[i])
+		}
+	}
+	instances, err := components.Classify(sub, objs, tenant)
+	if err != nil {
+		return nil, nil, err
+	}
+	apps := make([]vaultApp, 0, len(instances))
+	for _, inst := range instances {
+		p := inst.Primary()
+		apps = append(apps, vaultApp{step: steps[inst.Type.Type], name: p.GetName(), namespace: p.GetNamespace()})
+	}
+	return apps, stepNames, nil
+}
+
+// checkVault proves the environment lets the prepare steps that need Vault
+// do their job: for every legacy app such a step will handle, it reaches
+// Vault exactly as the step does (package vault: the root token Secret, the
+// server pod, the vault CLI through pod exec) and makes exactly the
+// read-only reads the step's plan starts with (prepare.InspectPasswords:
+// the mount must be kv v1, then the names in the app's passwords folder and
+// its legacy/ backups). No value is read and nothing is written. It is
+// required when such an app exists; with none (nothing left to migrate that
+// needs Vault) it is skipped without touching Vault.
+func checkVault(ctx context.Context, opts Options, c client.Client, cat *config.Catalog, tenant string) Check {
+	opts.Log.Actionf("checking Vault access for the prepare steps that need it")
+	apps, stepNames, err := legacyVaultApps(ctx, c, cat, tenant)
+	if err != nil {
+		return narrate(opts.Log, Check{Name: CheckVault, Detail: err.Error()})
+	}
+	if len(apps) == 0 {
+		detail := "skipped: no catalog type's prepare step needs Vault"
+		if len(stepNames) > 0 {
+			detail = fmt.Sprintf("skipped: no legacy app on the cluster for %s, nothing to read in Vault", strings.Join(stepNames, ", "))
+		}
+		return narrateOptional(opts.Log, Check{Name: CheckVault, OK: true, Optional: true, Detail: detail})
+	}
+
+	var needed []string
+	for _, a := range apps {
+		needed = append(needed, fmt.Sprintf("%s for %s/%s", a.step.Name, a.namespace, a.name))
+	}
+	fail := func(err error) Check {
+		detail := fmt.Sprintf("%v (needed by %s)", err, strings.Join(needed, ", "))
+		return narrate(opts.Log, Check{Name: CheckVault, Detail: detail})
+	}
+	newExecer := opts.NewExecer
+	if newExecer == nil {
+		newExecer = kubeclient.NewExecer
+	}
+	ex, err := newExecer(opts.KubeconfigArgs)
+	if err != nil {
+		return fail(err)
+	}
+	v, err := vault.Connect(ctx, c, ex)
+	if err != nil {
+		return fail(err)
+	}
+	details := []string{v.Pod()}
+	for _, a := range apps {
+		state, err := prepare.InspectPasswords(ctx, v, prepare.Options{LiveName: a.name, LiveNamespace: a.namespace})
+		if err != nil {
+			return fail(err)
+		}
+		details = append(details, fmt.Sprintf("%s (%s kv v%s, %s): %s", state.Path, vault.UserlandMount, state.Mount.Version, a.step.Name, state.Summary(a.step.PasswordMoves)))
+	}
+	return narrate(opts.Log, Check{Name: CheckVault, OK: true, Detail: strings.Join(details, "; ")})
 }
 
 func checkTenantFile(fleet, cluster, tenant string) Check {

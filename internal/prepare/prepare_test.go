@@ -17,6 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/Stratio/flux-stratio/internal/kubeclient"
 )
 
 func mustScheme(t *testing.T) *apiruntime.Scheme {
@@ -236,6 +238,7 @@ func TestPlans_ReadFailuresAreErrorsNotSatisfied(t *testing.T) {
 		opts := Options{
 			TenantName: "stratio", LiveName: "app", LiveNamespace: "ns", Client: failingReads(t),
 			IsLegacy: func(*unstructured.Unstructured) bool { return true },
+			Execer:   &kubeclient.FakeExecer{},
 		}
 		ops, err := step.Plan(context.Background(), opts)
 		if err == nil || !strings.Contains(err.Error(), "apiserver unavailable") {

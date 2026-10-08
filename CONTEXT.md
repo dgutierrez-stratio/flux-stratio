@@ -49,7 +49,9 @@ flux stratio version
 flux stratio doctor                            # preflight: binaries (+ optional meld), catalog, environment, repo layout,
                                                  # chart paths, exclude paths vs. chart values (warning only),
                                                  # catalog types vs. templates,
-                                                 # template kustomization paths vs. keos-apps, cluster, tenant file
+                                                 # template kustomization paths vs. keos-apps, cluster,
+                                                 # vault (the read-only reads a NeedsVault prepare step makes, for each legacy
+                                                 # app it will handle; skipped when there is none), tenant file
 
 flux stratio config init --base --cluster --tenant [--charts] [--dir] [--force]
                                                  # write catalog.yaml (19 seeded component types) + environment.yaml
@@ -142,6 +144,12 @@ convention, that repo is the reference:
   owner `"flux-stratio"`. `GetUnstructured`/`ListUnstructured` are the two primitives everything
   else in this repo uses to read a Flux/Stratio CRD without importing its API package.
   `ListUnstructured(ctx, c, gvk, "")` — empty namespace — lists cluster-wide.
+- **`internal/vault`** — the one way into the cluster's Vault, the operator's own route: `Connect` reads the root
+  token (`keos-core/vault-unseal-keys`, key `vault-root`) and picks the server pod (`vault-active=true` among
+  several); every call is the vault CLI exec'd in its `vault` container through `kubeclient.Execer`, the token as
+  stdin's first line (never argv, never output). `Mount`/`List`/`Read`/`Write` (JSON on stdin) and
+  **no delete**. `Data` redacts itself under every formatter. `vaulttest` is an in-memory fake answering those CLI
+  calls, plus the Secret and pod `Connect` looks up. Used by `prepare-litellm` and `doctor`'s `vault access` check.
 - **`internal/runner`** — `Runner` interface (`Run(ctx, name, args...) (stdout, stderr []byte,
   err error)` — **never merges stdout/stderr**, unlike the Python client's `stderr=STDOUT` bug that
   corrupted a captured patch with interleaved diagnostic output). `Exec` is the real `os/exec`
@@ -324,7 +332,17 @@ convention, that repo is the reference:
   wrapper — the Go equivalent of `kubectl exec`, avoiding a shell-out). It asks before running (the
   SQL and the pod shown) and again over the real captured output, neither skipped by `--yes`;
   `--dry-run` only resolves the pod and shows the SQL, asking nothing. A future component's own manual DB rewrite reuses this shape
-  (a new `DBQuery` value) rather than one-off exec code.
+  (a new `DBQuery` value) rather than one-off exec code. A step with `PasswordMoves` (`NeedsVault()`;
+  `prepare-litellm`) gets the same `Execer` (every automated step does) for `internal/vault`. `InspectPasswords`
+  (`vaultmove.go`) is its read-only start, shared with `doctor`: mount must be kv v1, then list the app's passwords
+  folder and its `legacy/` backups. `planPasswordMoves` then reads only entries that exist, backs each legacy
+  underscored password up verbatim under `legacy/` and copies its value to the chart's hyphenated name (from the backup
+  when the original is gone), deciding everything in `Plan` (conflict or wrong length = error before any write). It is
+  idempotent: what holds isn't planned again, and each write (`guardedWrite`) re-reads its target when it runs and
+  refuses one that changed since the plan (kv v1 has no CAS: this narrows, not closes, the window). Once the chart has
+  replaced the app (`releaseCutOver`: no legacy Deployment, the release's SecretsBundle exists) the step doesn't reach
+  Vault at all. Its operations carry a synthetic `VaultPassword` object (namespace = Vault folder) so they render in
+  the same review table.
 - **`internal/tenantcheck`** — `Validate(path, opts)` of a tenant file as Flux will consume it: static checks on the
   decoded RSIP, then `flux-operator build rset` of each keos-use-cases `resourceset-apps-*.yaml` through `runner.Runner`
   (so it is testable with `runner.Fake`), failing on an `apps-*` tenant Kustomization some other one waits on that nothing
@@ -382,6 +400,8 @@ convention, that repo is the reference:
   `<unresolved:...>` placeholder, never `""`. That covers *resolved env vars* only: the raw manifests
   a backup stores (`deployment.yaml`, `cr.yaml`, `values.yaml`) are dumped as-is and keep any
   credential written inline in them, plus `managedFields`. Hence backups are written 0700/0600.
+  The one place a secret *value* is handled is `internal/vault`: `prepare-litellm` moves Vault passwords from a
+  read to a write in memory, as `vault.Data`, which renders `<redacted>` however it is formatted.
 - **JSON6902 vs. strategic-merge-patch is auto-detected, never a flag.** See
   `internal/diff.NeedsJSON6902`'s doc comment for the exact rule.
 

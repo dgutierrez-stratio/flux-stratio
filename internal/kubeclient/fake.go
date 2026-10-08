@@ -25,7 +25,10 @@ type FakeExecResponse struct {
 // cluster reachable. Mirrors runner.Fake.
 type FakeExecer struct {
 	Response FakeExecResponse
-	Calls    []FakeExecCall
+	// Handle, when set, answers each call instead of Response — for a test
+	// whose calls need different answers (a fake vault CLI, for instance).
+	Handle func(FakeExecCall) FakeExecResponse
+	Calls  []FakeExecCall
 }
 
 // Exec implements Execer.
@@ -34,6 +37,11 @@ func (f *FakeExecer) Exec(_ context.Context, namespace, pod, container string, c
 	if stdin != nil {
 		_, _ = io.Copy(&sb, stdin)
 	}
-	f.Calls = append(f.Calls, FakeExecCall{Namespace: namespace, Pod: pod, Container: container, Command: command, Stdin: sb.String()})
-	return f.Response.Stdout, f.Response.Stderr, f.Response.Err
+	call := FakeExecCall{Namespace: namespace, Pod: pod, Container: container, Command: command, Stdin: sb.String()}
+	f.Calls = append(f.Calls, call)
+	resp := f.Response
+	if f.Handle != nil {
+		resp = f.Handle(call)
+	}
+	return resp.Stdout, resp.Stderr, resp.Err
 }

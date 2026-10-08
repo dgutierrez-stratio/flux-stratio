@@ -35,6 +35,10 @@ func declineHint(app config.App) string {
 // inspectHint tells how to look at an object before a step acts on it.
 const inspectHint = "To inspect an object first: kubectl get <kind> <name> -n <namespace> -o yaml."
 
+// inspectVaultHint is inspectHint for a Vault entry, whose NAMESPACE is its
+// Vault folder.
+const inspectVaultHint = "A " + prepare.KindVaultPassword + " is a Vault entry in the NAMESPACE folder: `vault list <namespace>` in the Vault pod (flux stratio doctor checks it is reachable); the step never shows its value."
+
 // prepareOpsSection lists the operations an automated step would perform.
 // dryRun and yes say what the operator can expect next: nothing asked or
 // changed, a run without a question, or the question.
@@ -49,11 +53,15 @@ func prepareOpsSection(step *prepare.Step, app config.App, ops []prepare.Operati
 		hint = "Changes the live cluster, after a backup of the app. " + declineHint(app)
 	}
 	rows := make([][]string, len(ops))
+	inspect := inspectHint
 	for i, op := range ops {
 		rows[i] = []string{op.Object.GetName(), op.Action, op.Object.GetKind(), op.Object.GetNamespace()}
+		if op.Object.GetKind() == prepare.KindVaultPassword {
+			inspect = inspectHint + " " + inspectVaultHint
+		}
 	}
 	return reviewSection{
-		Level: levelAction, Title: prepareTitle(step), Hint: hint + " " + inspectHint,
+		Level: levelAction, Title: prepareTitle(step), Hint: hint + " " + inspect,
 		Header: []string{"OBJECT", "ACTION", "KIND", "NAMESPACE"}, Rows: rows,
 	}
 }

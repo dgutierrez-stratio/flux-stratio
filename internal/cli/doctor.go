@@ -22,6 +22,7 @@ func newDoctorCommand() *cobra.Command {
 				KubeconfigArgs: kubeconfigArgs,
 				Runner:         runner.Exec{},
 				NewClient:      kubeclient.New,
+				NewExecer:      kubeclient.NewExecer,
 				Log:            rootLogger(cmd),
 			})
 			return report.Err()

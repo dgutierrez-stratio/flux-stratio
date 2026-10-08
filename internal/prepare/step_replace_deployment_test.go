@@ -5,17 +5,17 @@ import (
 	"testing"
 )
 
-// The Deployment-replacing steps (dg-agent, discovery) behave the same: the
-// legacy Deployment goes, found by its CCT app id; the GitOps one that
-// replaces it under the same name, another app's Deployment and every
-// Ingress stay, and a re-run plans nothing.
+// The Deployment-replacing steps (dg-agent, discovery; prepare-litellm does
+// the same after its Vault moves) behave the same: the legacy Deployment
+// goes, found by its CCT app id; the GitOps one that replaces it under the
+// same name, another app's Deployment and every Ingress stay, and a re-run
+// plans nothing.
 func TestReplaceLegacyDeploymentSteps(t *testing.T) {
 	for _, tt := range []struct {
 		step, name, namespace string
 	}{
 		{"prepare-dg-agent", "dg-hdfs-agent", "stratio-datastores"},
 		{"prepare-discovery", "discovery", "stratio-apps"},
-		{"prepare-litellm", "genai-litellm", "stratio-genai"},
 	} {
 		t.Run(tt.step, func(t *testing.T) {
 			step := Find(tt.step)
@@ -43,7 +43,7 @@ func TestReplaceLegacyDeploymentSteps(t *testing.T) {
 // After the cutover the GitOps Deployment has the legacy one's name; a
 // re-run must not delete it.
 func TestReplaceLegacyDeploymentSteps_NeverTheGitOpsDeployment(t *testing.T) {
-	for _, name := range []string{"prepare-dg-agent", "prepare-discovery", "prepare-litellm"} {
+	for _, name := range []string{"prepare-dg-agent", "prepare-discovery"} {
 		c := fakeClient(t, legacyDeployment("ns", "app", "app.ns", 1, "helm.toolkit.fluxcd.io/name", "app"))
 		ops, err := Find(name).Plan(context.Background(), Options{TenantName: "stratio", LiveName: "app", LiveNamespace: "ns", Client: c})
 		assertPlan(t, ops, err)

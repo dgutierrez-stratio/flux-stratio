@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -17,9 +19,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/Stratio/flux-stratio/internal/config"
+	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
 	"github.com/Stratio/flux-stratio/internal/reporequire"
 	"github.com/Stratio/flux-stratio/internal/runner"
+	"github.com/Stratio/flux-stratio/internal/vault"
+	"github.com/Stratio/flux-stratio/internal/vault/vaulttest"
 )
 
 // fixtureTemplate is a minimal keos-use-cases ResourceSet template
@@ -118,10 +123,22 @@ func passingRunner() *runner.Fake {
 	}}
 }
 
+// fakeClientFactory builds a client holding objs plus a reachable Vault's
+// token Secret and server pod (vaulttest.Objects).
 func fakeClientFactory(objs ...client.Object) func(*genericclioptions.ConfigFlags) (client.Client, error) {
 	return func(*genericclioptions.ConfigFlags) (client.Client, error) {
-		return fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(objs...).Build(), nil
+		scheme := runtime.NewScheme()
+		if err := corev1.AddToScheme(scheme); err != nil {
+			return nil, err
+		}
+		all := append(vaulttest.Objects(vaulttest.Token, "vault-0"), objs...)
+		return fake.NewClientBuilder().WithScheme(scheme).WithObjects(all...).Build(), nil
 	}
+}
+
+// execerFactory hands out srv's pod exec.
+func execerFactory(srv *vaulttest.Server) func(*genericclioptions.ConfigFlags) (kubeclient.Execer, error) {
+	return func(*genericclioptions.ConfigFlags) (kubeclient.Execer, error) { return srv.Exec, nil }
 }
 
 func baseOptions() Options {
@@ -129,6 +146,7 @@ func baseOptions() Options {
 		KubeconfigArgs: genericclioptions.NewConfigFlags(false),
 		Runner:         passingRunner(),
 		NewClient:      fakeClientFactory(),
+		NewExecer:      execerFactory(vaulttest.New()),
 		Log:            log.New(io.Discard, false),
 	}
 }
@@ -143,8 +161,8 @@ func TestRun_AllChecksPass(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("report.OK() = false, want true; error: %v", report.Err())
 	}
-	if len(report.Checks) != 12 {
-		t.Errorf("len(Checks) = %d, want 12", len(report.Checks))
+	if len(report.Checks) != 13 {
+		t.Errorf("len(Checks) = %d, want 13", len(report.Checks))
 	}
 }
 
@@ -159,8 +177,8 @@ func TestRun_MissingBinaries_OtherChecksStillRun(t *testing.T) {
 	if report.OK() {
 		t.Fatal("report.OK() = true, want false")
 	}
-	if len(report.Checks) != 12 {
-		t.Fatalf("len(Checks) = %d, want 12 (downstream checks must still run)", len(report.Checks))
+	if len(report.Checks) != 13 {
+		t.Fatalf("len(Checks) = %d, want 13 (downstream checks must still run)", len(report.Checks))
 	}
 	if report.Checks[0].Name != CheckBinaries || report.Checks[0].OK {
 		t.Errorf("Checks[0] = %+v, want a failing binaries check", report.Checks[0])
@@ -206,7 +224,7 @@ func TestRun_InvalidCatalog_SkipsCatalogDependentChecks(t *testing.T) {
 	for _, c := range report.Checks {
 		names = append(names, string(c.Name))
 	}
-	want := "binaries,meld (optional),catalog,environment,repo layout,cluster access,repo revisions,tenant file"
+	want := "binaries,meld (optional),catalog,environment,repo layout,cluster access,vault access,repo revisions,tenant file"
 	if strings.Join(names, ",") != want {
 		t.Errorf("checks = %s, want %s", strings.Join(names, ","), want)
 	}
@@ -570,5 +588,164 @@ func TestMissingSeedPrepares(t *testing.T) {
 	got := missingSeedPrepares(&old)
 	if len(got) != 1 || !strings.Contains(got[0], `"virtualizer"`) || !strings.Contains(got[0], "prepare-virtualizer") {
 		t.Errorf("missingSeedPrepares = %v, want one line naming virtualizer and prepare-virtualizer", got)
+	}
+}
+
+// legacyPgCluster is a live object of the fixture catalog's only type.
+func legacyPgCluster() *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{}}
+	u.SetAPIVersion("postgres.stratio.com/v1")
+	u.SetKind("PgCluster")
+	u.SetNamespace("stratio-datastores")
+	u.SetName("pg")
+	return u
+}
+
+// pgPasswords is the Vault folder prepare-litellm would read for
+// legacyPgCluster, were it the fixture type's step.
+const pgPasswords = "userland/passwords/pg.stratio-datastores"
+
+// vaultCheck runs doctor with srv as the cluster's Vault, the fixture
+// catalog's only type using prepare (none when empty) and, when legacy,
+// a live instance of it, and returns its Vault check, the commands it ran
+// in Vault and the narration.
+func vaultCheck(t *testing.T, srv *vaulttest.Server, prepare string, legacy bool, mutate func(*Options)) (Check, [][]string, string) {
+	t.Helper()
+	base := fixtureBase(t, "eosdev", "stratio")
+	opts := baseOptions()
+	opts.NewExecer = execerFactory(srv)
+	if legacy {
+		opts.NewClient = fakeClientFactory(legacyPgCluster())
+	}
+	var out bytes.Buffer
+	opts.Log = log.New(&out, false)
+	setConfig(t, &opts, base, "eosdev", "stratio", "", "")
+	if prepare != "" {
+		body, err := os.ReadFile(opts.ConfigFlag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(opts.ConfigFlag, append(body, []byte("    prepare: "+prepare+"\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	for _, c := range Run(context.Background(), opts).Checks {
+		if c.Name == CheckVault {
+			return c, srv.Commands(), out.String()
+		}
+	}
+	return Check{}, srv.Commands(), out.String()
+}
+
+// For a legacy app whose prepare step needs Vault, the check makes exactly
+// the reads the step's plan starts with — the mount, then the names in the
+// app's passwords folder and its legacy/ backups — and nothing else: no
+// value read, nothing written. It is required, and says what the step
+// would find.
+func TestCheckVault_ReadsTheStepsPaths(t *testing.T) {
+	srv := vaulttest.New()
+	srv.Entries[pgPasswords+"/master_api_key"] = map[string]string{"pass": "secret-value"}
+	srv.Entries[pgPasswords+"/legacy/db_salt_key"] = map[string]string{"pass": "secret-value"}
+	c, cmds, out := vaultCheck(t, srv, "prepare-litellm", true, nil)
+	want := "keos-core/vault-0; " + pgPasswords + " (userland/ kv v1, prepare-litellm): 1 legacy password(s) to move, 1 already moved (backup under legacy/), 1 not in Vault (keos_key_secret)"
+	if !c.OK || c.Optional || c.Detail != want {
+		t.Errorf("vault check = %+v, want a required pass with detail %q", c, want)
+	}
+	wantCmds := [][]string{
+		{"secrets", "list", "-format=json"},
+		{"list", "-format=json", pgPasswords},
+		{"list", "-format=json", pgPasswords + "/legacy"},
+	}
+	if !reflect.DeepEqual(cmds, wantCmds) {
+		t.Errorf("ran %q in Vault, want only %q", cmds, wantCmds)
+	}
+	if strings.Contains(out, vaulttest.Token) || strings.Contains(out, "secret-value") {
+		t.Errorf("narration leaks a secret:\n%s", out)
+	}
+}
+
+// With nothing on the cluster that a Vault-reaching step will handle, the
+// check is skipped without touching Vault.
+func TestCheckVault_SkippedWithoutALegacyApp(t *testing.T) {
+	for _, tt := range []struct {
+		name, prepare, want string
+		legacy              bool
+	}{
+		{name: "no step needs Vault", legacy: true, want: "skipped: no catalog type's prepare step needs Vault"},
+		{name: "no legacy app", prepare: "prepare-litellm", want: "skipped: no legacy app on the cluster for prepare-litellm, nothing to read in Vault"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := vaulttest.New()
+			srv.Token = "unusable"
+			c, cmds, _ := vaultCheck(t, srv, tt.prepare, tt.legacy, nil)
+			if !c.OK || !c.Optional || c.Detail != tt.want {
+				t.Errorf("vault check = %+v, want an optional pass %q", c, tt.want)
+			}
+			if len(cmds) != 0 {
+				t.Errorf("ran %q in Vault, want nothing", cmds)
+			}
+		})
+	}
+}
+
+// Each way the step's reads can fail fails the check, naming the cause and
+// the app that needs Vault.
+func TestCheckVault_Failures(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		setup   func(*vaulttest.Server) func(*Options)
+		wantErr string
+	}{
+		{
+			name: "rejected token",
+			setup: func(srv *vaulttest.Server) func(*Options) {
+				srv.Token = "rotated"
+				return nil
+			},
+			wantErr: "permission denied",
+		},
+		{
+			name: "kv v2",
+			setup: func(srv *vaulttest.Server) func(*Options) {
+				srv.Mounts["userland/"] = vault.MountInfo{Type: "kv", Version: "2"}
+				return nil
+			},
+			wantErr: "not kv v1",
+		},
+		{
+			name: "no exec",
+			setup: func(*vaulttest.Server) func(*Options) {
+				return func(o *Options) {
+					o.NewExecer = func(*genericclioptions.ConfigFlags) (kubeclient.Execer, error) {
+						return nil, errors.New("exec forbidden")
+					}
+				}
+			},
+			wantErr: "exec forbidden",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := vaulttest.New()
+			c, _, _ := vaultCheck(t, srv, "prepare-litellm", true, tt.setup(srv))
+			if c.OK || c.Optional || !strings.Contains(c.Detail, tt.wantErr) || !strings.Contains(c.Detail, "needed by prepare-litellm for stratio-datastores/pg") {
+				t.Errorf("vault check = %+v, want a required failure containing %q and naming the app", c, tt.wantErr)
+			}
+		})
+	}
+}
+
+// Without cluster access there is no Vault check at all.
+func TestCheckVault_SkippedWithoutCluster(t *testing.T) {
+	srv := vaulttest.New()
+	c, cmds, _ := vaultCheck(t, srv, "prepare-litellm", true, func(o *Options) {
+		o.NewClient = func(*genericclioptions.ConfigFlags) (client.Client, error) {
+			return nil, errors.New("connection refused")
+		}
+	})
+	if c.Name != "" || len(cmds) != 0 {
+		t.Errorf("vault check ran without cluster access: %+v, %q", c, cmds)
 	}
 }

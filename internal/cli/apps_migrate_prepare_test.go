@@ -20,6 +20,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
+	"github.com/Stratio/flux-stratio/internal/vault/vaulttest"
 )
 
 var (
@@ -82,7 +83,8 @@ type prepareRun struct {
 }
 
 // runPrepare runs ensurePrepared for app against objs, answering prompts
-// from stdin. execer is nil unless the step under test has a Query.
+// from stdin. execer is nil unless the step under test execs in a pod (a
+// Query, or Vault).
 func runPrepare(t *testing.T, app config.App, stdin io.Reader, dryRun, yes bool, deleteErr error, execer kubeclient.Execer, objs ...client.Object) (*prepareRun, error) {
 	t.Helper()
 	return runPrepareWithBackup(t, app, stdin, dryRun, yes, deleteErr, nil, execer, objs...)
@@ -470,3 +472,68 @@ func TestSkipIfDeclined(t *testing.T) {
 // flat collapses every run of whitespace, so a sentence the layout wrapped
 // onto several lines or a table row padded into columns can be searched for.
 func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// litellmApp is `apps migrate litellm` on a legacy cluster.
+var litellmApp = config.App{
+	ID: "litellm", Name: "LiteLLM genai-litellm", Prepare: "prepare-litellm",
+	Live: []config.ObjectRef{{GVK: gvkDeployment, Namespace: "stratio-genai", Name: "genai-litellm"}},
+}
+
+// TestEnsurePrepared_LitellmMovesTheVaultPasswords: an automated step gets
+// the pod exec, so prepare-litellm plans its Vault moves next to the
+// Deployment delete; the dry run lists them and writes nothing, --yes
+// runs them, and no value is ever printed.
+func TestEnsurePrepared_LitellmMovesTheVaultPasswords(t *testing.T) {
+	const base = "userland/passwords/genai-litellm.stratio-genai"
+	salt := strings.Repeat("s", 32)
+	newServer := func() *vaulttest.Server {
+		srv := vaulttest.New()
+		srv.Entries[base+"/db_salt_key"] = map[string]string{"pass": salt}
+		srv.Entries[base+"/keos_key_secret"] = map[string]string{"pass": strings.Repeat("k", 32)}
+		srv.Entries[base+"/master_api_key"] = map[string]string{"pass": "sk-" + strings.Repeat("m", 10)}
+		return srv
+	}
+	deployment := func() *unstructured.Unstructured {
+		u := cctDeployment("genai-litellm", "genai-litellm", map[string]string{"cct.stratio.com/application_id": "genai-litellm.stratio-genai"})
+		u.SetNamespace("stratio-genai")
+		return u
+	}
+	objs := func() []client.Object {
+		return append(vaulttest.Objects(vaulttest.Token, "vault-0"), deployment())
+	}
+
+	srv := newServer()
+	r, err := runPrepare(t, litellmApp, noRead{t}, true, false, nil, srv.Exec, objs()...)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	e := flat(r.stderr.String())
+	for _, want := range []string{
+		"db-salt-key (from db_salt_key) copy VaultPassword userland/passwords/",
+		"legacy/db_salt_key back up VaultPassword userland/passwords/",
+		"genai-litellm delete Deployment stratio-genai",
+		"is a Vault entry in the NAMESPACE folder",
+	} {
+		if !strings.Contains(e, want) {
+			t.Errorf("dry run output lacks %q:\n%s", want, r.stderr.String())
+		}
+	}
+	if w := srv.Writes(); len(w) != 0 || r.muts.deletes != 0 {
+		t.Errorf("dry run wrote %q and deleted %d object(s), want nothing", w, r.muts.deletes)
+	}
+
+	srv = newServer()
+	r, err = runPrepare(t, litellmApp, noRead{t}, false, true, nil, srv.Exec, objs()...)
+	if err != nil {
+		t.Fatalf("--yes run: %v", err)
+	}
+	if got := srv.Entries[base+"/db-salt-key"]["pass"]; got != salt {
+		t.Error("db-salt-key doesn't hold the legacy salt after the run")
+	}
+	if len(srv.Writes()) != 6 || r.muts.deletes != 1 || r.backups != 1 {
+		t.Errorf("run wrote %d entr(y/ies), deleted %d object(s), took %d backup(s); want 6, 1, 1", len(srv.Writes()), r.muts.deletes, r.backups)
+	}
+	if strings.Contains(r.stderr.String()+r.stdout.String(), salt) {
+		t.Error("the legacy salt was printed")
+	}
+}

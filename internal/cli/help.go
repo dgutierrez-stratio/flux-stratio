@@ -76,6 +76,11 @@ const doctorLong = `Checks that flux-stratio is ready to run and says what to fi
                    kustomization paths exist
   cluster          reachable with your kubeconfig; the revision each repository
                    is checked out at against the one the cluster runs
+  vault            for each legacy app whose prepare step moves Vault passwords
+                   (litellm), the same read-only reads the step starts with:
+                   root token, vault CLI in the Vault pod, kv v1 mount, the
+                   app's passwords folder and its legacy/ backups (names only).
+                   Skipped when no such app is left on the cluster
   tenant file      <keos-fleet>/clusters/<cluster>/tenants/config/<tenant>.yaml exists
 
 It exits with an error when a required check fails. Warnings (an exclude path
@@ -260,7 +265,9 @@ Prepare steps change the live cluster (a backup is taken first). Today:
   dlc-entity        remove the legacy ingress and Deployment
   dg-agent          remove the legacy Deployment (new immutable selector)
   discovery         remove the legacy Deployment (new immutable selector)
-  litellm           remove the legacy Deployment (new immutable selector)
+  litellm           copy the legacy Vault passwords (db_salt_key, keos_key_secret,
+                    master_api_key) to the chart's hyphenated names, keeping the
+                    originals under legacy/; remove the legacy Deployment
   virtualizer       remove the legacy server, monitor and ui Deployments
   genai             rewrite stored component references (SQL; asks its own
                     confirmation, which --yes never answers)

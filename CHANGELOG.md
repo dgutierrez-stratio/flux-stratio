@@ -2,6 +2,27 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`prepare-litellm` keeps the legacy LiteLLM Vault passwords.** The chart's SecretsBundle declares `db-salt-key`,
+  `keos-key-secret` and `master-api-key` (the secrets operator rejects underscores) and deletes every entry it doesn't
+  declare, so a migrated release got fresh random values: the provider credentials LiteLLM stored encrypted with the
+  legacy salt stopped decrypting ("Did your master_key/salt key change recently?") and every key derived from the
+  legacy `keos_key_secret` (genai-api's, admin's) answered 401 `token_not_found_in_db`. Before deleting the legacy
+  Deployment, the step now copies each legacy value (`db_salt_key`, `keos_key_secret`, `master_api_key` in
+  `userland/passwords/<live name>.<ns>/`) to the chart's name, and keeps a verbatim copy of the original under
+  `legacy/` (the bundle never deletes subfolders). It never writes or deletes the originals. Everything is decided
+  read-only in the plan: a chart entry that already holds another value (moving would rotate a live secret) or a
+  legacy value of another length than the chart declares stops the step before any write; originals already gone
+  only warn; `userland/` must be kv v1. It is idempotent like the rest of `apps migrate`: a re-run plans only what
+  doesn't hold yet (a run interrupted after its backups is completed from them), each Vault write re-reads its target
+  and refuses one that changed since the plan (the chart applied while the prompt waited), and after the cutover (no
+  legacy Deployment, the release's SecretsBundle exists) it doesn't reach Vault at all. New package `internal/vault`
+  reaches Vault the operator's way (root token from `keos-core/vault-unseal-keys`, vault CLI by pod exec, token on
+  stdin, values redacted in any output, no delete), and automated prepare steps now get the pod exec.
+* **`doctor` checks Vault access** (`vault access`): for each legacy app whose prepare step moves Vault passwords
+  (LiteLLM), it makes the same read-only reads the step starts with (`prepare.InspectPasswords`: kv v1 mount, the
+  names in the app's passwords folder and its `legacy/` backups; no value), and says what the step would do. Required
+  when such an app is on the cluster; skipped, without touching Vault, when none is.
+
 * **`tenant import` stops warning about config fields that have a default or don't apply.** Two gaps in the schema
   scanner. (1) Only a quoted `| default "x"` counted as a default, so `| default false` (postgres `recoveryEnabled`,
   genai `governanceOpenSearchEnabled`) was reported as "no default" although the template has one: a bare

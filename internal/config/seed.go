@@ -299,14 +299,18 @@ func SeedCatalog() Catalog {
 			// LITELLM_NAME (the release name), but it no longer names the
 			// GitOps object.
 			//
-			// The Vault secrets are NOT carried over: the chart's SecretsBundle
-			// owns userland/passwords/<release>.<namespace>/ and deletes every
-			// key there it doesn't declare, and the secrets operator only
-			// accepts hyphenated names, so the legacy underscored master_api_key,
-			// db_salt_key and keos_key_secret can't be kept. The release gets
-			// fresh ones; rows LiteLLM encrypted with the legacy salt (stored
-			// models and credentials) must be cleaned and re-registered from the
-			// tenant entry's config.models (see Notes).
+			// The Vault passwords are carried over by prepare-litellm: the
+			// chart's SecretsBundle owns userland/passwords/<release>.<namespace>/
+			// and the secrets operator only accepts hyphenated names, so the
+			// legacy underscored master_api_key, db_salt_key and keos_key_secret
+			// would be replaced by fresh random ones — leaving the provider
+			// credentials LiteLLM encrypted with the legacy salt unreadable and
+			// every key derived from keos_key_secret (genai-api's) invalid. The
+			// step copies each legacy value to the chart's name before the chart
+			// is applied (the operator keeps a value of the declared length) and
+			// keeps the originals under legacy/, since the bundle deletes every
+			// entry it doesn't declare (see Notes for a release that was
+			// migrated before).
 			//
 			// Excluded: the networking/SSO URLs (the chart's Ingress is always
 			// at its release path, so legacy URLs would point the app at the
@@ -327,7 +331,7 @@ func SeedCatalog() Catalog {
 				"spec.values.liteLlm.environment.sso.oauth2ProxyLogoutNextUrl",
 				"spec.values.liteLlm.general.identity.approlename",
 			},
-			Notes: "prepare-litellm runs automatically before migrating: removes the legacy Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress stays. The tenant entry's name stays the legacy live name (genai-litellm): keos-use-cases substitutes it into LITELLM_NAME, which only sets the Helm release name (spec.releaseName), so the release keeps the legacy identity and database grants while the GitOps object (Kustomization/HelmRelease) stays the generic 'litellm', uniform with every other component. The patch keeps the legacy Postgres database and schema. The legacy Vault secrets can't be kept: the release gets fresh ones, so before cutover delete the rows the legacy salt encrypted (LiteLLM_ProxyModelTable, LiteLLM_CredentialsTable) and declare the models in the entry's config.models to re-register them. Needs the litellm chart whose GosecPolicy follows postgresDatabase, and keos-apps/keos-use-cases with releaseName decoupled from the GitOps object name (LITELLM_NAME only substitutes releaseName) The gosec groups (liteLlm.general.gosecIntegration.adminGroup/usersGroup) are the single source for the app, the chart's prerequisites job and keos-apps' post-requisites job (it reads them from the release's ConfigMap), so keeping the legacy values in the patch is enough; removing them moves the release to the chart's default groups, which start with no members.",
+			Notes: "prepare-litellm runs automatically before migrating: removes the legacy Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress stays. The tenant entry's name stays the legacy live name (genai-litellm): keos-use-cases substitutes it into LITELLM_NAME, which only sets the Helm release name (spec.releaseName), so the release keeps the legacy identity and database grants while the GitOps object (Kustomization/HelmRelease) stays the generic 'litellm', uniform with every other component. The patch keeps the legacy Postgres database and schema. prepare-litellm also keeps the legacy Vault passwords: before the chart is applied it copies db_salt_key, keos_key_secret and master_api_key (userland/passwords/genai-litellm.<ns>/) to the chart's db-salt-key, keos-key-secret and master-api-key, and keeps the originals under legacy/ there (the chart's SecretsBundle deletes the underscored ones once applied). Stored credentials keep decrypting and keys derived from keos_key_secret (genai-api's) stay valid. Run `flux stratio doctor` first: it checks Vault is reachable the same way. If the release was applied before the step ran, the legacy values are gone (the step only warns): delete the credential rows the legacy salt encrypted (LiteLLM_CredentialsTable) and the users/teams/keys registered before the migration, restart LiteLLM (it caches them), and re-run the post-requisites and genai prerequisites jobs. Needs the litellm chart whose GosecPolicy follows postgresDatabase, and keos-apps/keos-use-cases with releaseName decoupled from the GitOps object name (LITELLM_NAME only substitutes releaseName) The gosec groups (liteLlm.general.gosecIntegration.adminGroup/usersGroup) are the single source for the app, the chart's prerequisites job and keos-apps' post-requisites job (it reads them from the release's ConfigMap), so keeping the legacy values in the patch is enough; removing them moves the release to the chart's default groups, which start with no members.",
 		},
 		{
 			Type:      "rocket",

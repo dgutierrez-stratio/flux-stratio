@@ -443,7 +443,7 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 		return nil
 	}
 
-	popts := prepareOptions(app, tenant, c, nil, logger)
+	popts := prepareOptions(app, tenant, c, execer, logger)
 	ops, err := step.Plan(cmd.Context(), popts)
 	if err != nil {
 		return fmt.Errorf("planning prepare step %q: %w", step.Name, err)

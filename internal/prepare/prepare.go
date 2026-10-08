@@ -62,8 +62,9 @@ type Options struct {
 	// otherwise.
 	IsLegacy func(*unstructured.Unstructured) bool
 	Client   client.Client
-	// Execer runs a Query step's command in its target pod; nil unless a
-	// step with a Query is actually invoked.
+	// Execer runs a command in a pod: a Query step's statement, or the
+	// vault CLI for a step that NeedsVault. A step that needs it fails
+	// clearly when it is nil.
 	Execer kubeclient.Execer
 	Log    *log.Logger
 }
@@ -81,6 +82,11 @@ type Step struct {
 	// the chart then recreates under the same names, so the chart changing
 	// their (immutable) selector is no obstacle.
 	ReplacesWorkloads bool
+	// PasswordMoves are the legacy Vault passwords the step moves to the
+	// chart's names (planPasswordMoves, through package vault with
+	// Options.Execer); doctor reads the same Vault paths for every legacy
+	// instance of a type whose step has any (NeedsVault).
+	PasswordMoves []PasswordMove
 	// Plan lists, without changing anything, every operation needed for
 	// the precondition to hold; empty when it already does. Nil for a
 	// step that isn't Automated.
@@ -111,6 +117,9 @@ type DBQuery struct {
 	// SQL is the statement(s) to run; "<tenant>" stands for the tenant name.
 	SQL string
 }
+
+// NeedsVault reports whether the step reads and writes Vault.
+func (s Step) NeedsVault() bool { return len(s.PasswordMoves) > 0 }
 
 // InstructionsFor returns Instructions for tenant.
 func (s Step) InstructionsFor(tenant string) string {

@@ -34,6 +34,4 @@ var (
 	// dg-hdfs-agent and the other dg-agent flavors of the same chart.
 	stepDgAgent   = replaceLegacyDeployment("prepare-dg-agent", "the legacy governance agent Deployment")
 	stepDiscovery = replaceLegacyDeployment("prepare-discovery", "the legacy discovery Deployment")
-	// genai-litellm, whose legacy ingress (genai.<domain>) sits on another host than the chart's.
-	stepLitellm = replaceLegacyDeployment("prepare-litellm", "the legacy LiteLLM Deployment")
 )
