@@ -201,3 +201,63 @@ A short written answer (in this file under a new "Decision" heading, or to the u
   is exactly the kind of drift it looks for.
 - `CONTEXT.md` §9 row "Drops a live env var that has no `value`": why a blank live variable is `""`
   here and not missing.
+
+## Decision (2026-10-08): B1, blank default in the `dg-agent` chart
+
+Verified on a freshly reinstalled eosdev (100% legacy; image `dg-custom-agent_2.12:1.2.0`, not 1.1.1)
+and against `kubernetes-universe` branch-15.1 @ `f14a135`.
+
+### What the variable does
+
+- The agent's startup script (`/docker/lib/default/extract.sh:20-25` in the image) reads it in exactly
+  one place: if it is non-blank, it fetches an **extra** user/password from Vault at
+  `passwords/<EXTRACT_PATH>/<CUSTOM_STRATIO_CREDENTIALS>` and exports
+  `AGENT_DS_STRATIO_CREDENTIALS_{USER,PASSWORD}`. It's for user/password data sources. The HDFS
+  agent runs that code too (`STEP_EXTRACT=MD5` live and in the render).
+- Blank (live today): the step is skipped. The live log shows only the agent's own password, then
+  `HDFSSecretsManagementKRB … Downloading credentials from Vault path: userland/kerberos/dg-hdfs-agent…`:
+  Kerberos uses the keytab, not this variable.
+- `hdfs-external-secret` (the render before the fix): an internal HDFS never syncs that password
+  (`agent-without-credentials`, no `synchronizedPasswords`), so `getPass` (`/docker/kms_utils.sh:125-166`)
+  logs `ERROR << getpass - error 1 requesting … hdfs-external-secret … http_code: …` and returns 1.
+  Nothing checks that return code (no `set -e`, no trap), so startup goes on with the two variables
+  empty. **Not fatal, but wrong:** an ERROR on every start, a pointless Vault call, and a difference
+  from legacy.
+
+### Why it rendered that way
+
+- The 15.1 descriptor default is `""` (`agent-abstract-connectors-default.json:401-413`; the hdfs
+  internal/external descriptors only add the *example* `hdfs-secret`). `charts analyze --scaffold`
+  generates `''` for both `agent-dfs-hdfs-internal` and `-external`.
+- The chart had turned the example into a default twice: `values.yaml` (`hdfs-external-secret`) and
+  the template (`| default "hdfs-secret"`). `hdfs-config` comes last in the container's `envFrom`, so
+  its value overrides the `""` in `common-config`.
+
+### The fix (`Stratio/charts`, worktree `charts-align-15.1.0`, uncommitted)
+
+- `dg-agent/config/connectors/dg-agent_hdfs_env_vars.yaml`: `| default ""`.
+- `dg-agent/values.yaml` `agent.config.hdfs.customStratioCredentialsDefinition: ""`.
+- `CHANGELOG.md` line under 15.1.0 (covers hdfs and postgresql).
+
+External HDFS is unaffected: it already has to set `agent.secrets.synchronizedPasswords` explicitly,
+and it sets the name together with it (`helm-template-examples.md`). No `keos-apps` overlay deploys an
+external HDFS. Checked: `helm template` internal → `""` in both ConfigMaps; external with an explicit
+name → that name plus its `synchronizedPasswords` entry; `.github/workflows/vet.sh` passes for every
+chart; `charts validate` on the hdfs env file: 7 OK, 0 FAIL.
+
+**`flux-stratio`: no code change.** Once the chart renders `""`, the render matches live and the
+manual-review line goes away. Not re-checked with `apps diff` yet: on the fresh eosdev it stops
+earlier with `ConfigMap stratio-datastores/keos-runtime-info not found` (no tenant ResourceSets have
+reconciled yet). Re-run it once they have; then delete this file.
+
+### Same bug in `dg-postgresql-internal-agent` (fixed in the same change)
+
+Verified the same way: live blank, same image, `STEP_EXTRACT=MD5`, the log fetches only the agent's own
+password and then logs in with TLS certificates (`PostgreSQLSecretsManagementInternalTLS`). The
+descriptor default is `""` ("Only required if Datastore service security is MD5"). The render put
+`postgres-external-secret` in `postgresql-config` (last in `envFrom`), with no `synchronizedPasswords`.
+Fix: `dg-agent_postgresql_env_vars.yaml` `| default ""`, and
+`values.yaml` `agent.config.postgresql.customStratioCredentialsDefinition: ""`. Checked: render
+internal → `""`, external with an explicit name → that name; `charts analyze --scaffold` gives `''`
+for `agent-rdbms-postgresql-internal`/`-external`; `charts validate` 16 OK, 0 FAIL; `vet.sh` passes.
+No `keos-apps` overlay deploys it yet.
