@@ -3,6 +3,7 @@ package catalog
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -122,6 +123,19 @@ func TestLoad_RealTemplates(t *testing.T) {
 		if genaiDeps[i] != d {
 			t.Errorf("genai deps[%d] = %q, want %q (order matters: %v)", i, genaiDeps[i], d, genaiDeps)
 		}
+	}
+
+	// genai's llmModels: a dict whose keys are read off $llmModels.
+	var llmLeaves []string
+	for _, f := range genai.ExtraConfig {
+		if f.Key == "llmModels" {
+			for _, l := range f.Leaves {
+				llmLeaves = append(llmLeaves, l.Key)
+			}
+		}
+	}
+	if want := []string{"chat", "governance", "translate"}; !slices.Equal(llmLeaves, want) {
+		t.Errorf("genai llmModels leaves = %v, want %v", llmLeaves, want)
 	}
 
 	// Storage-conditional dependencies: virtualizer's hdfs/connectors are

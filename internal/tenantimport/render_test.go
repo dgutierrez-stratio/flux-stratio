@@ -122,3 +122,15 @@ func TestRender_TypeIncludedWhenSet(t *testing.T) {
 		t.Errorf("output missing type: hdfs; got:\n%s", out)
 	}
 }
+
+func TestRender_ScaffoldedNestedConfigIsABlock(t *testing.T) {
+	components := Components{"genai": {{Name: "genai", Deps: map[string]string{}}}}
+	enrich(loadFixtureCatalog(t), components, map[string]map[string]bool{"genai": {"llmModels": true}}, func(string, ...any) {})
+	out, err := Render("stratio", "S", components)
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if want := "        - config:\n            llmModels:\n              chat: \"\"\n              governance: \"\"\n              translate: \"\"\n          name: genai\n"; !strings.Contains(string(out), want) {
+		t.Errorf("output lacks the llmModels block %q; got:\n%s", want, out)
+	}
+}

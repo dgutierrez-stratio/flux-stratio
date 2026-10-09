@@ -458,8 +458,12 @@ being tested in a feature package first.
   `if eq $storageType "<t>"` (before its else) carries `StorageTypes` and is skipped for other types. Anything
   else with no default is reported as a warning, and so is a container field the catalog type lists in
   `requiredConfig` (genai's `llmModels`, litellm's `models`); `fieldPlan` (`internal/tenantimport/fields.go`) is the
-  one place that decides. Scaffolding a nested sub-config's shape is still open: see
-  `docs/TASK-tenant-import-nested-config-scaffolding.md`. Known quirk, unchanged: a dependency read in the `else` of
+  one place that decides. A dict field assigned to a variable (`$llmModels := get $componentConfig "llmModels"`)
+  carries `Leaves`: the keys read off that variable (`get $llmModels "chat"`), one level deep (`extractLeaves`). A
+  required dict with leaves is `fieldScaffold`: written with its leaves at their template defaults (`""` for
+  llmModels) and warned about; on a re-run `Complete` never edits inside the block but warns about each leaf still
+  missing or empty (`tenantfile.EmptyConfigLeaves`). A required list (litellm `models`: passed through `toJson`, its
+  item shape not in the template) is only warned about. Known quirk, unchanged: a dependency read in the `else` of
   a storage-type branch is still marked as conditional on that branch's type (`extractSchema`'s `StorageTypes` for
   dependencies ignores `else`), so e.g. rocket's `connectors` is skipped for an entry of unknown type.
 - `Doc.Bytes()` re-encodes the node tree (yaml.v3 re-indents sequences); a `Doc` edited through the

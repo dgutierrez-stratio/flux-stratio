@@ -1,6 +1,10 @@
 package tenantimport
 
-import "testing"
+import (
+	"fmt"
+	"reflect"
+	"testing"
+)
 
 func TestEnrich_ResolvesDependencyToDiscoveredName(t *testing.T) {
 	cat := loadFixtureCatalog(t)
@@ -104,5 +108,31 @@ func TestEnrich_MultipleInstancesDefaultsAndWarns(t *testing.T) {
 	}
 	if !warned {
 		t.Error("expected a warning about the ambiguous multi-instance dependency")
+	}
+}
+
+func TestEnrich_RequiredNestedConfigIsScaffolded(t *testing.T) {
+	var warnings []string
+	warn := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
+	components := Components{"genai": {{Name: "genai", Deps: map[string]string{}}}}
+	enrich(loadFixtureCatalog(t), components, map[string]map[string]bool{"genai": {"llmModels": true}}, warn)
+
+	want := map[string]any{"chat": "", "governance": "", "translate": ""}
+	if got := components.find("genai", "genai").ExtraConfig["llmModels"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("ExtraConfig[llmModels] = %#v, want %#v", got, want)
+	}
+	if !contains(warnings, `config "llmModels" is required: added with its keys chat, governance, translate empty`) {
+		t.Errorf("warnings = %v, want one naming llmModels' keys", warnings)
+	}
+}
+
+func TestEnrich_OptionalNestedConfigIsLeftOut(t *testing.T) {
+	var warnings []string
+	warn := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
+	components := Components{"genai": {{Name: "genai", Deps: map[string]string{}}}}
+	enrich(loadFixtureCatalog(t), components, nil, warn)
+
+	if _, ok := components.find("genai", "genai").ExtraConfig["llmModels"]; ok || len(warnings) > 0 {
+		t.Errorf("ExtraConfig = %v, warnings = %v, want llmModels neither written nor reported", components.find("genai", "genai").ExtraConfig, warnings)
 	}
 }

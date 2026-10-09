@@ -125,8 +125,10 @@ hand (fields, comments, patches): use it only on a file you want replaced.
 given.
 
 Fields a template reads that have no default and can't be derived from the
-cluster (genai's llmModels, litellm's models, ...) are never dropped
-silently: each is reported as a warning to set by hand.
+cluster (litellm's models, ...) are never dropped silently: each is reported
+as a warning to set by hand. A required block whose keys the template reads
+(genai's llmModels) is written with those keys empty (chat, governance,
+translate), and every run warns about each one still empty.
 
 Afterwards the resulting file is validated (also with --dry-run, on the
 proposed result): that it is a ResourceSetInputProvider with the label the

@@ -2,6 +2,13 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`tenant import` scaffolds genai's `llmModels` block.** The schema scanner now records the keys a template reads
+  off a nested config variable (`$llmModels := get $componentConfig "llmModels"`, then `get $llmModels "chat"`), one
+  level deep. A required block with such keys is written with them empty (`chat`, `governance`, `translate`) instead
+  of being left out, with a warning to fill them in; a re-run never edits inside the block but keeps warning about
+  each key still missing or empty. Optional blocks (`agent`, `backup`) are unchanged, and litellm's required `models`
+  list is still only warned about: its item shape isn't in the template.
+
 * **`prepare-litellm` keeps the legacy LiteLLM Vault passwords.** The chart's SecretsBundle declares `db-salt-key`,
   `keos-key-secret` and `master-api-key` (the secrets operator rejects underscores) and deletes every entry it doesn't
   declare, so a migrated release got fresh random values: the provider credentials LiteLLM stored encrypted with the

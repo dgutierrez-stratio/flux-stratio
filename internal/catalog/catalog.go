@@ -47,6 +47,11 @@ type ExtraConfigField struct {
 	// scalar to scaffold); the field is not warned about unless the
 	// component's catalog type lists it as required.
 	Container string
+	// Leaves, on a dict field the template assigns to a variable, are the
+	// keys it reads off that variable (`$llmModels := get $componentConfig
+	// "llmModels"`, then `get $llmModels "chat"`), each with its own
+	// default. One level deep: a leaf has no Leaves.
+	Leaves []ExtraConfigField
 	// StorageTypes lists the storage types under which every read of the
 	// field sits inside an `if eq $storageType "<type>"` branch (the part
 	// before its else). Empty means the field is read for any type.

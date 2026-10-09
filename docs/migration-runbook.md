@@ -65,8 +65,9 @@ review it before committing:
   logged to stderr explaining why — search the file for empty `name: ""` dependency entries and
   fill them in.
 - A field a component template reads that has no default and can't be derived from the cluster
-  (genai's `llmModels`, litellm's `models`, ...) is not scaffolded; a warning names it so you set it
-  by hand. Virtualizer's `uiEnabled` is scaffolded: `true` when its monitor or ui runs on the
+  (litellm's `models`, ...) is not scaffolded; a warning names it so you set it by hand. A required
+  block whose keys the template reads (genai's `llmModels`) is scaffolded with those keys empty
+  (`chat`, `governance`, `translate`), and a warning names each one until you fill it in. Virtualizer's `uiEnabled` is scaffolded: `true` when its monitor or ui runs on the
   cluster, `false` otherwise.
 - Without `--output` the skeleton goes to stdout.
 

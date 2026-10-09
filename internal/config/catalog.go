@@ -80,7 +80,8 @@ type ComponentType struct {
 	// RequiredConfig names config fields (read from the tenant entry by the
 	// component's ResourceSet) the component cannot run without, though the
 	// template defaults them to an empty dict or list: `tenant import`
-	// warns to set each by hand when the entry lacks it. Without this, a
+	// warns to set each by hand when the entry lacks it, and writes a dict
+	// whose keys the template reads with those keys empty. Without this, a
 	// field the template defaults to an empty container is optional and is
 	// neither scaffolded nor warned about. Scalar fields are not listed here:
 	// one with no default is always warned about.

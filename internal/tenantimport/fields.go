@@ -1,6 +1,9 @@
 package tenantimport
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/Stratio/flux-stratio/internal/catalog"
 	"github.com/Stratio/flux-stratio/internal/config"
 )
@@ -18,6 +21,9 @@ const (
 	// fieldWarn: the field has no usable default, or is required: the
 	// operator sets it by hand.
 	fieldWarn
+	// fieldScaffold: a required dict whose keys the template reads (genai's
+	// llmModels): write it with those keys, empty, and warn to fill them in.
+	fieldScaffold
 )
 
 // fieldPlan decides what to do with field for an entry of storageType.
@@ -26,6 +32,8 @@ func fieldPlan(field catalog.ExtraConfigField, storageType string, required map[
 	switch {
 	case !field.AppliesTo(storageType):
 		return fieldSkip
+	case required[field.Key] && field.Container == "dict" && len(field.Leaves) > 0:
+		return fieldScaffold
 	case required[field.Key]:
 		return fieldWarn
 	case field.HasDefault:
@@ -34,6 +42,35 @@ func fieldPlan(field catalog.ExtraConfigField, storageType string, required map[
 		return fieldSkip // `| default dict` / `| default list`: optional
 	}
 	return fieldWarn
+}
+
+// scaffoldValue is the mapping a fieldScaffold field is written as: each key
+// the template reads, with the template's default for it, else "".
+func scaffoldValue(field catalog.ExtraConfigField) map[string]any {
+	out := make(map[string]any, len(field.Leaves))
+	for _, leaf := range field.Leaves {
+		if leaf.HasDefault {
+			out[leaf.Key] = defaultValue(leaf)
+		} else {
+			out[leaf.Key] = ""
+		}
+	}
+	return out
+}
+
+// leafKeys lists a field's leaf keys, in template order.
+func leafKeys(field catalog.ExtraConfigField) []string {
+	keys := make([]string, 0, len(field.Leaves))
+	for _, leaf := range field.Leaves {
+		keys = append(keys, leaf.Key)
+	}
+	return keys
+}
+
+// scaffoldWarning is the warning for a fieldScaffold field just written.
+func scaffoldWarning(label string, field catalog.ExtraConfigField) string {
+	return fmt.Sprintf("%s: config %q is required: added with its keys %s empty; set them by hand",
+		label, field.Key, strings.Join(leafKeys(field), ", "))
 }
 
 // requiredConfig reads every type's requiredConfig from cfg, keyed by the

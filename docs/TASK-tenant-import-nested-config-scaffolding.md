@@ -6,6 +6,16 @@
 > **Update 2:** the regex's blind spot for a bare default (`| default dict`, `| default false`) is fixed: a bare scalar is now a typed
 > default, and `dict`/`list` marks an optional sub-config (silent) unless the catalog type lists the field in `requiredConfig`
 > (seeded: genai `llmModels`, litellm `models`), which keeps the warning. Still open: the *shape* of a required nested block (`chat`/`governance`/`translate`).
+>
+> **Update 3:** points 1, 2 and 4 landed. `ExtraConfigField.Leaves` (`extractLeaves`, reusing `agentAssignRe`) holds
+> the keys read off a nested variable; a required dict with leaves is scaffolded with them at their template default
+> (`llmModels: {chat: "", governance: "", translate: ""}`) and warned about (`fieldScaffold`), and a re-run warns per
+> key still missing or empty without editing inside the block. Measured scope, every
+> `$x := get $componentConfig "…"` in keos-use-cases: genai `llmModels` (required: scaffolded); opensearch `backup`
+> and postgres/opensearch `agent` (optional: unchanged); litellm `models` (required list, item shape only in the
+> keos-apps postrequisites job's jq, not in the template: warned about only, not described in catalog.yaml either).
+> Follow-ups: `tenantcheck` doesn't flag empty required keys; leaves could be read from a live legacy genai's
+> `LLM_MODEL_*` env vars instead of left empty.
 
 ## Summary
 

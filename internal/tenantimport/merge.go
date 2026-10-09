@@ -179,14 +179,28 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 		}
 	}
 	for _, field := range schema.ExtraConfig {
-		if _, ok := derived[field.Key]; ok || tenantfile.ConfigValue(e.Node, field.Key) != nil {
+		if _, ok := derived[field.Key]; ok {
 			continue
 		}
-		switch fieldPlan(field, storageType, required) {
+		plan := fieldPlan(field, storageType, required)
+		if tenantfile.ConfigValue(e.Node, field.Key) != nil {
+			// The file's value wins; only a scaffolded block is looked into,
+			// so its placeholders keep being reported until filled in.
+			if plan == fieldScaffold {
+				for _, leaf := range tenantfile.EmptyConfigLeaves(e.Node, field.Key, leafKeys(field)) {
+					r.Warnings = append(r.Warnings, fmt.Sprintf("%s: config.%s.%s is empty; set it by hand", label, field.Key, leaf))
+				}
+			}
+			continue
+		}
+		switch plan {
 		case fieldWarn:
 			r.Warnings = append(r.Warnings, fmt.Sprintf("%s: config %q has no default; set it by hand", label, field.Key))
 		case fieldDefault:
 			addField(field.Key, defaultValue(field))
+		case fieldScaffold:
+			addField(field.Key, scaffoldValue(field))
+			r.Warnings = append(r.Warnings, scaffoldWarning(label, field))
 		}
 	}
 
@@ -300,8 +314,13 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[strin
 				byKey[key] = append(byKey[key], s.Name)
 				r.Added = append(r.Added, label+": new entry")
 				for _, field := range cat.Schemas[key].ExtraConfig {
-					if _, set := s.ExtraConfig[field.Key]; !set && fieldPlan(field, s.Type, required[key]) == fieldWarn {
-						r.Warnings = append(r.Warnings, fmt.Sprintf("%s: config %q has no default; set it by hand", label, field.Key))
+					switch fieldPlan(field, s.Type, required[key]) {
+					case fieldWarn:
+						if _, set := s.ExtraConfig[field.Key]; !set {
+							r.Warnings = append(r.Warnings, fmt.Sprintf("%s: config %q has no default; set it by hand", label, field.Key))
+						}
+					case fieldScaffold:
+						r.Warnings = append(r.Warnings, scaffoldWarning(label, field))
 					}
 				}
 				for dep, name := range s.Deps {
@@ -342,8 +361,20 @@ func entryConfig(e *Entry) map[string]any {
 }
 
 func fmtValue(v any) string {
-	if s, ok := v.(string); ok {
-		return fmt.Sprintf("%q", s)
+	switch v := v.(type) {
+	case string:
+		return fmt.Sprintf("%q", v)
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, k+": "+fmtValue(v[k]))
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
 	}
 	return fmt.Sprint(v)
 }

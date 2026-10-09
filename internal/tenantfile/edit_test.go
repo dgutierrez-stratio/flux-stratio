@@ -3,6 +3,7 @@ package tenantfile
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -215,5 +216,24 @@ func TestAddToDependency_FlowAndMissingDependencyAreErrors(t *testing.T) {
 	}
 	if err := d.AddToDependency(entry, "nope", []Field{{"enabled", true}}); err == nil {
 		t.Error("an undeclared dependency was edited, want an error")
+	}
+}
+
+func TestEmptyConfigLeaves(t *testing.T) {
+	leaves := []string{"chat", "governance", "translate"}
+	for name, tc := range map[string]struct {
+		config string
+		want   []string
+	}{
+		"absent":       {"", leaves},
+		"not a map":    {"        config:\n          llmModels: x\n", leaves},
+		"empty values": {"        config:\n          llmModels:\n            chat: \"\"\n            governance: ~\n            translate:\n", leaves},
+		"partly set":   {"        config:\n          llmModels: {chat: a, translate: false}\n", []string{"governance"}},
+		"all set":      {"        config:\n          llmModels:\n            chat: a\n            governance: b\n            translate: c\n", nil},
+	} {
+		d := docFrom(t, "spec:\n  defaultValues:\n    components:\n      genai:\n      - name: g\n"+tc.config)
+		if got := EmptyConfigLeaves(entryNamed(t, d, "g"), "llmModels", leaves); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: EmptyConfigLeaves = %v, want %v", name, got, tc.want)
+		}
 	}
 }

@@ -17,7 +17,8 @@ import (
 // it in by hand. A config field with no default is never dropped silently:
 // it is warned about — except one the template defaults to an empty dict or
 // list (optional unless the catalog lists it as required) and one only read
-// for another storage type.
+// for another storage type. A required dict whose keys the template reads
+// is written with those keys, empty, and warned about too.
 func enrich(cat *catalog.Catalog, components Components, required map[string]map[string]bool, warn func(string, ...any)) {
 	for key, entries := range components {
 		schema, ok := cat.Schemas[key]
@@ -76,6 +77,9 @@ func enrichEntry(schema catalog.Schema, entry *Entry, components Components, req
 			warn("%s: config %q has no default; set it by hand", entry.Name, field.Key)
 		case fieldDefault:
 			entry.ExtraConfig[field.Key] = defaultValue(field)
+		case fieldScaffold:
+			entry.ExtraConfig[field.Key] = scaffoldValue(field)
+			warn("%s", scaffoldWarning(entry.Name, field))
 		}
 	}
 }

@@ -373,3 +373,45 @@ func TestExtractSchema_ExtraConfigStorageTypeBranches(t *testing.T) {
 		t.Errorf("elseOnly = %+v, want unconditional (read in the else of the branch)", f)
 	}
 }
+
+func TestExtractSchema_NestedConfigLeaves(t *testing.T) {
+	block := `
+    <<- $dependencies := get $componentConfig "dependencies" | default dict >>
+    <<- $storageType := get $componentConfig "type" | default "s3" >>
+    <<- $llmModels := get $componentConfig "llmModels" | default dict >>
+    <<- $backupConfig := get $componentConfig "backup" | default dict >>
+    <<- $backupEnabled := get $backupConfig "enabled" | default false >>
+    <<- $backupType := get $backupConfig "type" | default "s3" >>
+          CLASS: << get $backupConfig "storageClassName" | quote >>
+          LLM_MODEL_CHAT: "<< get $llmModels "chat" | default "" >>"
+          LLM_MODEL_GOVERNANCE: "<< get $llmModels "governance" | default "" >>"
+          LLM_MODEL_TRANSLATE: "<< get $llmModels "translate" | default "" >>"
+          AGAIN: "<< get $llmModels "chat" | default "" >>"
+          OTHER: << get $other "x" >>
+          INDICES: << get $componentConfig "indices" | default list | toJson >>
+`
+	byKey := map[string]ExtraConfigField{}
+	for _, f := range extractSchema("foo", block).ExtraConfig {
+		byKey[f.Key] = f
+	}
+	for key, want := range map[string][]ExtraConfigField{
+		"llmModels": {
+			{Key: "chat", HasDefault: true},
+			{Key: "governance", HasDefault: true},
+			{Key: "translate", HasDefault: true},
+		},
+		"backup": {
+			{Key: "enabled", HasDefault: true, Default: "false", Bare: true},
+			{Key: "type", HasDefault: true, Default: "s3"},
+			{Key: "storageClassName"},
+		},
+		"indices": nil, // a list: no leaves
+	} {
+		if got := byKey[key].Leaves; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s.Leaves = %+v, want %+v", key, got, want)
+		}
+	}
+	if _, ok := byKey["x"]; ok {
+		t.Error(`a read off a variable not assigned from $componentConfig is not a field`)
+	}
+}

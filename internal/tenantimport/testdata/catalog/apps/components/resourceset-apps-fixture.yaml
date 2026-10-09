@@ -125,3 +125,21 @@ spec:
     KAFKA_EXPOSED: << get $componentConfig "kafkaClusterExposed" | default "false" >>
     KAFKA_TOPICS: << get $componentConfig "topics" | default list | toJson >>
     <<- end >>
+    <<- $genai := get $components "genai" | default list >>
+    <<- range $component := $genai >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    <<- $llmModels := get $componentConfig "llmModels" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: components/genai/app/overlays/default/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+      postBuild:
+        substitute:
+          LLM_MODEL_CHAT: "<< get $llmModels "chat" | default "" >>"
+          LLM_MODEL_GOVERNANCE: "<< get $llmModels "governance" | default "" >>"
+          LLM_MODEL_TRANSLATE: "<< get $llmModels "translate" | default "" >>"
+    <<- end >>

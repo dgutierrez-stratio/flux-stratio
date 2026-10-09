@@ -8,14 +8,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// defaultTail is the optional `| default` following a config read: a
+// quoted string (group 2) or a bare token (group 3: false, true, a number,
+// dict or list; anything else is not taken for a default). Group 1 is the
+// read's key.
+const defaultTail = `(?:\s*\|\s*default\s+(?:"([^"]*)"|(false|true|-?\d+(?:\.\d+)?|dict|list)\b))?`
+
 var (
 	depRe         = regexp.MustCompile(`\$(\w+Dependency)\s*:=\s*get\s+\$dependencies\s+"([^"]+)"`)
 	depVarTokenRe = regexp.MustCompile(`\$(\w+Dependency)\b`)
 	storageIfRe   = regexp.MustCompile(`(?s)<<-?\s*if\s+eq\s+\$storageType\s+"([^"]+)"\s*>>(.*?)<<-?\s*end\s*>>`)
-	// extraConfigRe finds a read of a config field and its `| default`: a
-	// quoted string (group 2) or a bare token (group 3: false, true, a
-	// number, dict or list; anything else is not taken for a default).
-	extraConfigRe = regexp.MustCompile(`get\s+\$componentConfig\s+"([^"]+)"(?:\s*\|\s*default\s+(?:"([^"]*)"|(false|true|-?\d+(?:\.\d+)?|dict|list)\b))?`)
+	// extraConfigRe finds a read of a config field and its `| default`
+	// (see defaultTail).
+	extraConfigRe = regexp.MustCompile(`get\s+\$componentConfig\s+"([^"]+)"` + defaultTail)
 
 	// storageElseRe splits a storage-type branch at its `else`.
 	storageElseRe = regexp.MustCompile(`<<-?\s*else\s*>>`)
@@ -39,7 +44,8 @@ var (
 	// sub-config shape currently in use (see the package doc). Any
 	// Kustomization in the same block whose patches come from that
 	// variable is this component's own nested sub-resource, not a
-	// dependsOn cross-reference.
+	// dependsOn cross-reference. extractLeaves also reads it, for the keys
+	// the template reads off the variable (genai's llmModels).
 	agentAssignRe = regexp.MustCompile(`\$(\w+)\s*:=\s*get\s+\$componentConfig\s+"(\w+)"`)
 
 	nameDefaultRe  = regexp.MustCompile(`^<<\s*get\s+\$component\s+"name"\s*>>(-[\w-]+)?$`)
@@ -111,18 +117,7 @@ func extractSchema(key, block string) Schema {
 			continue
 		}
 		seenExtra[fieldKey] = true
-		field := ExtraConfigField{Key: fieldKey}
-		switch {
-		case idx[4] >= 0: // a quoted default, possibly ""
-			field.HasDefault, field.Default = true, block[idx[4]:idx[5]]
-		case idx[6] >= 0:
-			bare := block[idx[6]:idx[7]]
-			if bare == "dict" || bare == "list" {
-				field.Container = bare
-			} else {
-				field.HasDefault, field.Default, field.Bare = true, bare, true
-			}
-		}
+		field := fieldFromMatch(block, idx)
 		if n := totalReads[fieldKey]; n > 0 {
 			conditioned := 0
 			for _, c := range condReads[fieldKey] {
@@ -157,9 +152,56 @@ func extractSchema(key, block string) Schema {
 		}
 	}
 
+	extractLeaves(block, s.ExtraConfig)
+
 	s.Kustomizations, s.ChartName = extractKustomizations(block)
 	s.SourcePaths = extractSourcePaths(block)
 	return s
+}
+
+// fieldFromMatch builds the field one extraConfigRe (or leaf regex) match
+// describes: its key and its `| default`, if any (see defaultTail).
+func fieldFromMatch(block string, idx []int) ExtraConfigField {
+	field := ExtraConfigField{Key: block[idx[2]:idx[3]]}
+	switch {
+	case idx[4] >= 0: // a quoted default, possibly ""
+		field.HasDefault, field.Default = true, block[idx[4]:idx[5]]
+	case idx[6] >= 0:
+		bare := block[idx[6]:idx[7]]
+		if bare == "dict" || bare == "list" {
+			field.Container = bare
+		} else {
+			field.HasDefault, field.Default, field.Bare = true, bare, true
+		}
+	}
+	return field
+}
+
+// extractLeaves fills the Leaves of every dict field assigned to a variable
+// (`$llmModels := get $componentConfig "llmModels" | default dict`) with
+// the keys the block reads off that variable (`get $llmModels "chat" |
+// default ""`), in first-read order. One level deep: a leaf's own reads
+// are not followed.
+func extractLeaves(block string, fields []ExtraConfigField) {
+	for _, m := range agentAssignRe.FindAllStringSubmatch(block, -1) {
+		variable, key := m[1], m[2]
+		for i := range fields {
+			f := &fields[i]
+			if f.Key != key || f.Container != "dict" || f.Leaves != nil {
+				continue
+			}
+			leafRe := regexp.MustCompile(`get\s+\$` + regexp.QuoteMeta(variable) + `\s+"([^"]+)"` + defaultTail)
+			seen := map[string]bool{}
+			for _, idx := range leafRe.FindAllStringSubmatchIndex(block, -1) {
+				leaf := fieldFromMatch(block, idx)
+				if seen[leaf.Key] {
+					continue
+				}
+				seen[leaf.Key] = true
+				f.Leaves = append(f.Leaves, leaf)
+			}
+		}
+	}
 }
 
 // extractKustomizations splits block into per-document segments (on YAML

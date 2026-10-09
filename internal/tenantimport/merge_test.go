@@ -245,6 +245,27 @@ func TestComplete_UndeclaredLiveComponentIsAdded(t *testing.T) {
 	}
 }
 
+func TestComplete_UndeclaredLiveComponentGetsItsRequiredNestedConfigScaffolded(t *testing.T) {
+	required := &config.Catalog{Types: []config.ComponentType{{Type: "genai", Component: "genai", RequiredConfig: []string{"llmModels"}}}}
+	// As Scan leaves it: enriched, its own warnings discarded.
+	scanned := Components{"genai": {{Name: "genai", Deps: map[string]string{}}}}
+	enrich(loadFixtureCatalog(t), scanned, requiredConfig(required), func(string, ...any) {})
+
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{Config: required})
+	if !strings.Contains(got, "      genai:\n      - name: genai\n        config:\n          llmModels:\n            chat: \"\"\n            governance: \"\"\n            translate: \"\"\n") {
+		t.Errorf("genai not added with its llmModels block:\n%s", got)
+	}
+	n := 0
+	for _, w := range r.Warnings {
+		if strings.Contains(w, `components.genai[genai]: config "llmModels" is required: added with its keys chat, governance, translate empty`) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("Warnings = %v, want the scaffold reported once", r.Warnings)
+	}
+}
+
 func TestComplete_UndeclaredLiveComponentUnderAKeyThatHasAnotherEntryWarns(t *testing.T) {
 	scanned := Components{"postgres": {{Name: "psql-live", Deps: map[string]string{}}}}
 	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
@@ -304,6 +325,58 @@ spec:
 	}
 	if strings.Contains(got, "topics") {
 		t.Errorf("a placeholder was invented for topics:\n%s", got)
+	}
+}
+
+func TestComplete_RequiredNestedConfigIsScaffoldedThenReportedUntilFilled(t *testing.T) {
+	const head = `apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+spec:
+  defaultValues:
+    components:
+      genai:
+      - name: genai
+`
+	required := &config.Catalog{Types: []config.ComponentType{{Type: "genai", Component: "genai", RequiredConfig: []string{"llmModels"}}}}
+	opts := CompleteOptions{Config: required}
+
+	// Absent: the block is added with its keys empty, and reported.
+	r, got := complete(t, reload(t, []byte(head)), Components{}, Live{}, opts)
+	if !strings.Contains(got, "        config:\n          llmModels:\n            chat: \"\"\n            governance: \"\"\n            translate: \"\"\n") {
+		t.Errorf("llmModels was not scaffolded as a block:\n%s", got)
+	}
+	if !contains(r.Added, `config.llmModels: {chat: "", governance: "", translate: ""}`) {
+		t.Errorf("Added = %v, want the llmModels block", r.Added)
+	}
+	if !contains(r.Warnings, `config "llmModels" is required: added with its keys chat, governance, translate empty`) {
+		t.Errorf("Warnings = %v, want the scaffold reported", r.Warnings)
+	}
+
+	// Run again on the result: nothing added, the empty keys still reported.
+	r, again := complete(t, reload(t, []byte(got)), Components{}, Live{}, opts)
+	if again != got || len(r.Added) > 0 {
+		t.Errorf("second run changed the file (Added = %v):\n%s", r.Added, again)
+	}
+	for _, leaf := range []string{"chat", "governance", "translate"} {
+		if !contains(r.Warnings, "config.llmModels."+leaf+" is empty") {
+			t.Errorf("Warnings = %v, want the empty %s reported", r.Warnings, leaf)
+		}
+	}
+
+	// Partly filled by hand: only the empty and missing keys are reported.
+	partial := head + "        config:\n          llmModels:\n            chat: gpt-4o\n            governance: \"\"\n"
+	r, out := complete(t, reload(t, []byte(partial)), Components{}, Live{}, opts)
+	if strings.Contains(out, "translate") || contains(r.Warnings, "llmModels.chat") ||
+		!contains(r.Warnings, "llmModels.governance is empty") || !contains(r.Warnings, "llmModels.translate is empty") {
+		t.Errorf("Warnings = %v, want governance and translate reported and nothing added inside llmModels:\n%s", r.Warnings, out)
+	}
+
+	// Filled: nothing to say.
+	filled := head + "        config:\n          llmModels:\n            chat: a\n            governance: b\n            translate: c\n"
+	if r, _ := complete(t, reload(t, []byte(filled)), Components{}, Live{}, opts); contains(r.Warnings, "llmModels") {
+		t.Errorf("Warnings = %v, want none for a filled llmModels", r.Warnings)
 	}
 }
 

@@ -78,6 +78,23 @@ func ConfigValue(entry *yaml.Node, key string) *yaml.Node {
 	return mapGet(mapGet(entry, "config"), key)
 }
 
+// EmptyConfigLeaves returns the keys of entry.config.<key> that are absent,
+// null or "" (all of them when <key> is not a mapping), in leaves' order.
+func EmptyConfigLeaves(entry *yaml.Node, key string, leaves []string) []string {
+	block := ConfigValue(entry, key)
+	var empty []string
+	for _, leaf := range leaves {
+		var n *yaml.Node
+		if block != nil && block.Kind == yaml.MappingNode {
+			n = mapGet(block, leaf)
+		}
+		if n == nil || n.Tag == "!!null" || (n.Kind == yaml.ScalarNode && n.Value == "") {
+			empty = append(empty, leaf)
+		}
+	}
+	return empty
+}
+
 // HasDependency reports whether entry.config.dependencies declares depKey,
 // whatever its name (even an empty one: the operator's value wins).
 func HasDependency(entry *yaml.Node, depKey string) bool {
