@@ -79,7 +79,8 @@ func CommentedOut(d *Doc, componentKey string) bool {
 	return found
 }
 
-func (d *Doc) components() (*yaml.Node, error) {
+// defaultValues returns the spec.defaultValues node.
+func (d *Doc) defaultValues() (*yaml.Node, error) {
 	root := documentRoot(d.root)
 	spec := mapGet(root, "spec")
 	if spec == nil {
@@ -88,6 +89,14 @@ func (d *Doc) components() (*yaml.Node, error) {
 	defaultValues := mapGet(spec, "defaultValues")
 	if defaultValues == nil {
 		return nil, fmt.Errorf("tenant file has no spec.defaultValues")
+	}
+	return defaultValues, nil
+}
+
+func (d *Doc) components() (*yaml.Node, error) {
+	defaultValues, err := d.defaultValues()
+	if err != nil {
+		return nil, err
 	}
 	components := mapGet(defaultValues, "components")
 	if components == nil {

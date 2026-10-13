@@ -27,6 +27,18 @@ type Doc struct {
 	// and AppendEntry; Bytes returns source with them applied, instead of
 	// re-encoding the node tree.
 	edits []textEdit
+	// rewrites replace whole lines of source (1-based line -> its new text,
+	// without the line ending): the one case where an edit changes a line
+	// instead of adding lines, turning `components: []` into `components:`.
+	rewrites map[int]string
+	// newKeys are the components.<key>: blocks AppendEntry adds for keys the
+	// file doesn't declare, kept apart from edits so every entry of a key
+	// lands under one "<key>:" line, after every other addition at the same
+	// place. See pendingEdits.
+	newKeys []*newKeyBlock
+	// componentsAdded is set once AppendEntry has recorded the
+	// `components:` line of a file that had none.
+	componentsAdded bool
 }
 
 // Load reads and parses the tenant file at path.
@@ -48,8 +60,8 @@ func Load(path string) (*Doc, error) {
 // those lines instead: nothing is re-encoded, so every byte the operator
 // wrote survives.
 func (d *Doc) Bytes() ([]byte, error) {
-	if len(d.edits) > 0 {
-		return applyEdits(d.source, append([]textEdit(nil), d.edits...)), nil
+	if d.edited() {
+		return d.Text(), nil
 	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
@@ -68,7 +80,12 @@ func (d *Doc) Bytes() ([]byte, error) {
 // none. Unlike Bytes it never re-encodes, so it is what a command that
 // only adds (tenant import) shows and compares.
 func (d *Doc) Text() []byte {
-	return applyEdits(d.source, append([]textEdit(nil), d.edits...))
+	return applyEdits(d.source, d.pendingEdits(), d.rewrites)
+}
+
+// edited reports whether any textual addition or rewrite is recorded.
+func (d *Doc) edited() bool {
+	return len(d.edits) > 0 || len(d.rewrites) > 0 || len(d.newKeys) > 0
 }
 
 // Save writes the document to path via a temp file in the same directory
@@ -130,14 +147,14 @@ func (d *Doc) Save(path string) error {
 		return fmt.Errorf("renaming %s into place at %s: %w", tmpPath, path, err)
 	}
 	d.source = data
-	if len(d.edits) > 0 {
+	if d.edited() {
 		// The node tree describes the old text; read the new one back so
 		// further additions find their lines.
 		var root yaml.Node
 		if err := yaml.Unmarshal(data, &root); err != nil {
 			return fmt.Errorf("re-reading %s after writing it: %w", path, err)
 		}
-		d.root, d.edits = &root, nil
+		d.root, d.edits, d.rewrites, d.newKeys, d.componentsAdded = &root, nil, nil, nil, false
 	}
 	return nil
 }

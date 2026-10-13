@@ -2,6 +2,16 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`tenant import` completes a tenant file whose `components` is empty.** A file declaring `components: []` (or `{}`, or
+  a bare `components:`, with or without a trailing comment) failed with `spec.defaultValues.components is not a block
+  mapping with entries`, and one with no `components` key at all with `tenant file has no spec.defaultValues.components`.
+  The empty value is now rewritten to a bare `components:` (the one line `tenant import` ever changes) and the scanned
+  entries are added under it in the same style as a freshly rendered file; a missing key is added at the end of
+  `spec.defaultValues`. A value spread over several lines, or a non-empty flow mapping, still asks to be edited by hand.
+  Two related bugs fixed on the way: several new entries under the same component key in one run produced a duplicate
+  `<key>:` line (invalid YAML), and an addition to an existing entry could land under a new key block recorded before
+  it; and a file without a trailing newline got a blank line before every addition at its last line.
+
 * **`tenant import` scaffolds genai's `llmModels` block.** The schema scanner now records the keys a template reads
   off a nested config variable (`$llmModels := get $componentConfig "llmModels"`, then `get $llmModels "chat"`), one
   level deep. A required block with such keys is written with them empty (`chat`, `governance`, `translate`) instead

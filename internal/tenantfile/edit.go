@@ -2,6 +2,7 @@ package tenantfile
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -17,9 +18,11 @@ import (
 // records an insertion; Bytes then returns the original text plus them.
 //
 // Insertions are pure additions of a key, a dependency or an entry: what is
-// already there — value, position, comments — is never touched. The node
-// tree does not see them, so each entry (or the top level) is edited by one
-// call per run.
+// already there — value, position, comments — is never touched. The one
+// exception is an empty `components: []` (or `{}`), whose line is rewritten
+// to a bare `components:` so entries can follow it. The node tree does not
+// see the additions, so each entry (or the top level) is edited by one call
+// per run.
 
 // textEdit is lines inserted after line `after` (1-based; 0 is the top of
 // the file). Edits at the same line keep the order they were recorded in.
@@ -51,13 +54,14 @@ type DependencyRef struct {
 // ActiveEntries returns every uncommented components entry that has a name,
 // in file order. A commented-out block is not an entry: see CommentedOut.
 func (d *Doc) ActiveEntries() ([]ComponentEntry, error) {
-	components, err := d.components()
+	defaults, err := d.defaultValues()
 	if err != nil {
 		return nil, err
 	}
+	components := mapGet(defaults, "components")
 	var out []ComponentEntry
-	if components.Kind != yaml.MappingNode {
-		return nil, nil
+	if components == nil || components.Kind != yaml.MappingNode {
+		return nil, nil // no components key, or an empty one: no entry yet
 	}
 	for i := 0; i+1 < len(components.Content); i += 2 {
 		seq := components.Content[i+1]
@@ -237,41 +241,154 @@ func (d *Doc) AddTopLevel(fields []Field) error {
 // the given config (omitted when empty), creating the key's sequence when
 // the file does not declare it. It never touches an existing entry: the
 // caller checks the name is not declared first.
+//
+// A file whose components is empty (`[]`, `{}` or a bare key) or missing
+// gets the block created: the empty value is rewritten to a bare
+// `components:` (a trailing comment stays), a missing key is added at the
+// end of spec.defaultValues. The entries of a key the file doesn't declare
+// are collected per key (see newKeyBlock), so several of them share one
+// "<key>:" line however the calls interleave.
 func (d *Doc) AppendEntry(componentKey, name string, config map[string]any) error {
-	components, err := d.components()
+	defaults, err := d.defaultValues()
 	if err != nil {
 		return err
 	}
-	if components.Kind != yaml.MappingNode || components.Style&yaml.FlowStyle != 0 || len(components.Content) == 0 {
-		return fmt.Errorf("spec.defaultValues.components is not a block mapping with entries")
-	}
-	keyIndent := components.Content[0].Column - 1
+	componentsKey, components := mapPair(defaults, "components")
 
-	var item strings.Builder
-	dash := func(pad int) {
-		item.WriteString(indent(pad) + "- name: " + scalar(name) + "\n")
-		if len(config) > 0 {
-			item.WriteString(indent(pad+2) + "config:\n")
-			item.WriteString(mappingText(config, pad+4))
+	var keyIndent, after int // indentation of the component keys; line their new blocks follow
+	switch {
+	case components == nil:
+		if defaults.Kind != yaml.MappingNode || defaults.Style&yaml.FlowStyle != 0 || len(defaults.Content) == 0 {
+			return fmt.Errorf("spec.defaultValues is not a block mapping")
 		}
+		after = lastLine(defaults)
+		keyIndent = defaults.Content[0].Column - 1 + 2
+		if !d.componentsAdded {
+			d.insert(after, indent(keyIndent-2)+"components:\n")
+			d.componentsAdded = true
+		}
+	case isEmptyValue(components):
+		if err := d.openEmptyComponents(componentsKey); err != nil {
+			return err
+		}
+		after = componentsKey.Line
+		keyIndent = componentsKey.Column - 1 + 2
+	case components.Kind != yaml.MappingNode || components.Style&yaml.FlowStyle != 0 || len(components.Content) == 0:
+		return fmt.Errorf("spec.defaultValues.components (line %d) is not a block mapping; edit it by hand", componentsKey.Line)
+	default:
+		after = lastLine(components)
+		keyIndent = components.Content[0].Column - 1
 	}
 
+	dash := keyIndent + 2
+	if components != nil {
+		dash = d.dashIndent(components, keyIndent)
+	}
 	keyNode, seq := mapPair(components, componentKey)
 	if seq == nil {
-		var b strings.Builder
-		b.WriteString(indent(keyIndent) + componentKey + ":\n")
-		item.Reset()
-		dash(d.dashIndent(components, keyIndent))
-		b.WriteString(item.String())
-		d.insert(lastLine(components), b.String())
+		d.newKeyBlock(componentKey, keyIndent, after).items.WriteString(entryText(name, config, dash))
 		return nil
 	}
 	if seq.Kind != yaml.SequenceNode || seq.Style&yaml.FlowStyle != 0 || len(seq.Content) == 0 {
 		return fmt.Errorf("components.%s (line %d) is not a block sequence with entries", componentKey, keyNode.Line)
 	}
-	dash(d.dashPad(seq.Content[0]))
-	d.insert(lastLine(seq), item.String())
+	d.insert(lastLine(seq), entryText(name, config, d.dashPad(seq.Content[0])))
 	return nil
+}
+
+// entryText is one "- name: ..." item (with its config, when there is
+// one) whose dash is at pad.
+func entryText(name string, config map[string]any, pad int) string {
+	var item strings.Builder
+	item.WriteString(indent(pad) + "- name: " + scalar(name) + "\n")
+	if len(config) > 0 {
+		item.WriteString(indent(pad+2) + "config:\n")
+		item.WriteString(mappingText(config, pad+4))
+	}
+	return item.String()
+}
+
+// isEmptyValue reports whether n is a value with nothing in it: a bare or
+// null scalar, or an empty flow sequence or mapping.
+func isEmptyValue(n *yaml.Node) bool {
+	switch n.Kind {
+	case yaml.SequenceNode, yaml.MappingNode:
+		return len(n.Content) == 0
+	case yaml.ScalarNode:
+		return n.Tag == "!!null"
+	}
+	return false
+}
+
+// emptyValueRe matches what follows a "key" on a line whose value is empty
+// ([] , {}, null, ~ or nothing), plus its trailing comment.
+var emptyValueRe = regexp.MustCompile(`^\s*(?:\[\s*\]|\{\s*\}|null|Null|NULL|~)?\s*(#.*)?$`)
+
+// openEmptyComponents records the rewrite of the line holding an empty
+// components value to a bare `components:`, keeping its trailing comment.
+// A value that spans lines, or a quoted key, can't be rewritten textually.
+func (d *Doc) openEmptyComponents(key *yaml.Node) error {
+	lines := strings.Split(string(d.source), "\n")
+	if key.Line < 1 || key.Line > len(lines) {
+		return fmt.Errorf("components (line %d) is not in the file text; edit it by hand", key.Line)
+	}
+	line := lines[key.Line-1]
+	ending := ""
+	if strings.HasSuffix(line, "\r") {
+		line, ending = strings.TrimSuffix(line, "\r"), "\r"
+	}
+	colon := key.Column - 1 + len(key.Value)
+	if colon >= len(line) || line[colon] != ':' {
+		return fmt.Errorf("components (line %d) is not a plain `components:` key; edit it by hand", key.Line)
+	}
+	m := emptyValueRe.FindStringSubmatch(line[colon+1:])
+	if m == nil {
+		return fmt.Errorf("components (line %d) is an empty value spread over several lines; make it `components:` by hand", key.Line)
+	}
+	rewritten := line[:colon+1]
+	if m[1] != "" {
+		rewritten += " " + strings.TrimRight(m[1], " ")
+	}
+	if rewritten != line {
+		if d.rewrites == nil {
+			d.rewrites = map[int]string{}
+		}
+		d.rewrites[key.Line] = rewritten + ending
+	}
+	return nil
+}
+
+// newKeyBlock is the "<key>:" block AppendEntry adds for a component key
+// the file doesn't declare: its line, then every entry appended under it.
+// It is emitted after every other insertion at the same line, so an entry
+// added to the preceding block (AddToEntry) stays above it.
+type newKeyBlock struct {
+	key   string
+	pad   int // indentation of the key
+	after int // the line the block follows
+	items strings.Builder
+}
+
+// newKeyBlock returns the block for key, creating it on first use.
+func (d *Doc) newKeyBlock(key string, pad, after int) *newKeyBlock {
+	for _, b := range d.newKeys {
+		if b.key == key {
+			return b
+		}
+	}
+	b := &newKeyBlock{key: key, pad: pad, after: after}
+	d.newKeys = append(d.newKeys, b)
+	return b
+}
+
+// pendingEdits is every recorded insertion: the ones made directly, then
+// the new key blocks, in the order their keys were first appended.
+func (d *Doc) pendingEdits() []textEdit {
+	edits := append([]textEdit(nil), d.edits...)
+	for _, b := range d.newKeys {
+		edits = append(edits, textEdit{after: b.after, text: indent(b.pad) + b.key + ":\n" + b.items.String()})
+	}
+	return edits
 }
 
 // dashIndent is the indentation of a sequence's "- " under a components key
@@ -306,26 +423,42 @@ func (d *Doc) insert(after int, text string) {
 	d.edits = append(d.edits, textEdit{after: after, text: text})
 }
 
-// applyEdits returns src with every recorded insertion in place.
-func applyEdits(src []byte, edits []textEdit) []byte {
+// applyEdits returns src with every recorded insertion in place, and the
+// lines in rewrites (1-based) replaced by their new text, keeping each
+// line's own ending.
+func applyEdits(src []byte, edits []textEdit, rewrites map[int]string) []byte {
 	lines := strings.SplitAfter(string(src), "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
 	sort.SliceStable(edits, func(i, j int) bool { return edits[i].after < edits[j].after })
 	var out strings.Builder
+	atLineStart := true // out is empty or ends with a newline
+	write := func(text string) {
+		if text != "" {
+			out.WriteString(text)
+			atLineStart = strings.HasSuffix(text, "\n")
+		}
+	}
 	next := 0
 	emit := func(upTo int) {
 		for ; next < upTo && next < len(lines); next++ {
-			out.WriteString(lines[next])
+			line := lines[next]
+			if text, ok := rewrites[next+1]; ok {
+				line = text
+				if strings.HasSuffix(lines[next], "\n") {
+					line += "\n"
+				}
+			}
+			write(line)
 		}
 	}
 	for _, e := range edits {
 		emit(e.after)
-		if next > 0 && !strings.HasSuffix(lines[next-1], "\n") {
-			out.WriteString("\n") // the file's last line had no newline
+		if !atLineStart {
+			write("\n") // the file's last line had no newline
 		}
-		out.WriteString(e.text)
+		write(e.text)
 	}
 	emit(len(lines))
 	return []byte(out.String())
