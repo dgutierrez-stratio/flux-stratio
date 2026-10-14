@@ -153,6 +153,7 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	review := chartReview{
 		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly, Native: result.Native,
 		SpecDiffs: result.SpecDiffs, Carried: result.CarriedResources, Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
+		Prepare: app.Prepare,
 	}
 	review.Extra = slices.Concat(
 		fluxManagedSection(app, result.FluxManagedBy),
@@ -283,6 +284,9 @@ type chartReview struct {
 	Excluded []diff.ExcludedDiff
 	// Source names the live side: "live cluster" or "backup".
 	Source string
+	// Prepare names the app's prepare step ("" for none): what a selector
+	// the legacy workload can't be updated across is told to do depends on it.
+	Prepare string
 	// Extra are findings that aren't about the comparison itself (Flux
 	// already manages the live object, the tenant size, the dependencies the
 	// patch needs ...), laid out with the rest.

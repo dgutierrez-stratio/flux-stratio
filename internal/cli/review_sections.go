@@ -8,6 +8,7 @@ import (
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/diff"
 	"github.com/Stratio/flux-stratio/internal/log"
+	"github.com/Stratio/flux-stratio/internal/prepare"
 	"github.com/Stratio/flux-stratio/internal/tenantfile"
 )
 
@@ -235,11 +236,14 @@ func orUnset(v string) string {
 // specSections splits the workload-setting differences by severity and kind:
 // an immutable selector or a variable asking for more memory than its
 // container's limit needs action, any other risk a review, and the rest are
-// notes. Each is one table.
+// notes (a legacy workload that keeps running next to the new one gets a
+// note of its own). Each is one table.
 func (r chartReview) specSections(st reviewStyle) []reviewSection {
-	var selectors, envLimits, risks, infos []diff.SpecDiff
+	var selectors, legacyRuns, envLimits, risks, infos []diff.SpecDiff
 	for _, d := range r.SpecDiffs {
 		switch {
+		case d.Field == diff.LegacyRunsField:
+			legacyRuns = append(legacyRuns, d)
 		case d.Severity == diff.SpecRisk && d.Field == diff.SelectorField:
 			selectors = append(selectors, d)
 		case d.Severity == diff.SpecRisk && strings.HasPrefix(d.Field, diff.EnvVsLimitField):
@@ -278,12 +282,23 @@ func (r chartReview) specSections(st reviewStyle) []reviewSection {
 	if len(selectors) > 0 {
 		rows := make([][]string, len(selectors))
 		for i, d := range selectors {
-			rows[i] = []string{d.Workload, orUnset(shortSelector(d.Rendered)), orUnset(shortSelector(d.Live))}
+			rows[i] = []string{legacyRef(d), orUnset(shortSelector(d.Rendered)), orUnset(shortSelector(d.Live))}
 		}
 		out = append(out, reviewSection{
 			Level: levelAction, Title: fmt.Sprintf("%d workload(s) can't be updated in place: their selector is immutable", len(selectors)),
-			Hint:   "Delete the legacy workload before Flux installs the release. Only an app with a prepare step does it for you.",
-			Header: []string{"WORKLOAD", "GITOPS SELECTOR", "LIVE SELECTOR"}, Rows: rows,
+			Hint:   selectorHint(r.Prepare),
+			Header: []string{"LEGACY NAMESPACE/NAME", "GITOPS SELECTOR", "LIVE SELECTOR"}, Rows: rows,
+		})
+	}
+	if len(legacyRuns) > 0 {
+		rows := make([][]string, len(legacyRuns))
+		for i, d := range legacyRuns {
+			rows[i] = []string{legacyRef(d), d.Live, d.Rendered}
+		}
+		out = append(out, reviewSection{
+			Level: levelNote, Title: fmt.Sprintf("%d legacy workload(s) keep running next to the new one", len(legacyRuns)),
+			Hint:   legacyRunsHint(r.Prepare),
+			Header: []string{"LEGACY NAMESPACE/NAME", "REPLICAS", "GITOPS WORKLOAD"}, Rows: rows,
 		})
 	}
 	if len(envLimits) > 0 {
@@ -312,6 +327,41 @@ func (r chartReview) specSections(st reviewStyle) []reviewSection {
 		})
 	}
 	return out
+}
+
+// legacyRef names the live workload of a selector or legacy-runs difference
+// as "<namespace>/<name>" (its kind, in diff.SpecDiff.LiveRef, is a
+// workload's — a Deployment but for a StatefulSet or DaemonSet): the legacy
+// object, whose name and namespace may not be the rendered one's.
+func legacyRef(d diff.SpecDiff) string {
+	if _, ref, ok := strings.Cut(d.LiveRef, " "); ok {
+		return ref
+	}
+	return d.Workload
+}
+
+// selectorHint says what to do about a legacy workload whose immutable
+// selector the chart changes, for an app whose prepare step is named (or
+// isn't). A step that deletes the workload makes this section go away (the
+// difference is then information), so what is left is no step, or a step that
+// does something else.
+func selectorHint(prepareName string) string {
+	step := prepare.Find(prepareName)
+	if step == nil {
+		return "No prepare step exists for this app: back up the workload (flux stratio apps backup) and delete it by hand before Flux installs the release."
+	}
+	return fmt.Sprintf("Prepare step %q doesn't delete it (%s): back it up (flux stratio apps backup) and delete it by hand before Flux installs the release.", step.Name, step.Description)
+}
+
+// legacyRunsHint says what becomes of a legacy workload that is not the one
+// the chart renders: nothing in the way of Flux, but it keeps running.
+func legacyRunsHint(prepareName string) string {
+	const base = "Another object than the one the chart creates, so nothing is in the way of the release; "
+	step := prepare.Find(prepareName)
+	if step == nil {
+		return base + "the legacy workload keeps running next to the new one until it is scaled down or removed by hand, once the new one is verified."
+	}
+	return base + fmt.Sprintf("prepare step %q (%s) deals with the legacy workload.", step.Name, step.Description)
 }
 
 // specWorkload names the workload (and container, when it isn't the same

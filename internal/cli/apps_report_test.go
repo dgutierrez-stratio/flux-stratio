@@ -233,13 +233,75 @@ func TestReportChartReview_SelectorNeedsAction(t *testing.T) {
 	})
 	for _, want := range []string{
 		"[ACTION] 1 workload(s) can't be updated in place: their selector is immutable",
-		"Delete the legacy workload before Flux installs the release",
+		"delete it by hand before Flux installs the release",
 		"component=dg-agent,instance=dg-hdfs-agent",
 		"cct.stratio.com/application_id=dg-hdfs-agent.stratio-datastores",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// The [ACTION] names the legacy object that blocks (not the rendered
+// workload's name) and what to do about it, by the app's prepare step.
+func TestReportChartReview_SelectorActionNamesTheLegacyObject(t *testing.T) {
+	selector := diff.SpecDiff{
+		Workload: "eureka-agent", Field: diff.SelectorField, Severity: diff.SpecRisk,
+		LiveRef:  "Deployment stratio-datastores/eureka-agent",
+		Rendered: "app.kubernetes.io/name=eureka-agent",
+		Live:     "cct.stratio.com/application_id=eureka-agent.stratio-datastores",
+	}
+	for name, tt := range map[string]struct {
+		prepare string
+		want    []string
+	}{
+		"no step":                       {"", []string{"No prepare step exists for this app", "delete it by hand before Flux installs the release", "stratio-datastores/eureka-agent"}},
+		"a step that doesn't delete it": {"prepare-datamarket-agent", []string{`Prepare step "prepare-datamarket-agent" doesn't delete it`, "delete it by hand"}},
+		"an unknown step is no one":     {"nope", []string{"No prepare step exists for this app"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := flat(reviewOutput(chartReview{SpecDiffs: []diff.SpecDiff{selector}, Prepare: tt.prepare, Source: "live cluster"}))
+			if !strings.Contains(out, "[ACTION] 1 workload(s) can't be updated in place") {
+				t.Errorf("no [ACTION]:\n%s", out)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "Only an app with a prepare step does it for you") {
+				t.Errorf("the old, false sentence is back:\n%s", out)
+			}
+		})
+	}
+}
+
+// A legacy workload that is another object than the one the chart renders is
+// a [NOTE], never an [ACTION]: it keeps running next to the new one.
+func TestReportChartReview_LegacyKeepsRunningIsANote(t *testing.T) {
+	note := diff.SpecDiff{
+		Workload: "psql-gosec-agent", Field: diff.LegacyRunsField, Severity: diff.SpecInfo,
+		LiveRef: "Deployment stratio-datastores/psql-agent", Live: "2", Rendered: "Deployment stratio-datastores/psql-gosec-agent",
+	}
+	review := chartReview{SpecDiffs: []diff.SpecDiff{note}, Source: "live cluster"}
+	out := flat(reviewOutput(review))
+	for _, want := range []string{
+		"[NOTE] 1 legacy workload(s) keep running next to the new one",
+		"stratio-datastores/psql-agent", "Deployment stratio-datastores/psql-gosec-agent",
+		"scaled down or removed by hand",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "[ACTION]") || strings.Contains(out, "other workload setting(s)") || review.hasWarnings() {
+		t.Errorf("a legacy workload that keeps running is no action, no other setting and no warning:\n%s", out)
+	}
+
+	review.Prepare = "prepare-datamarket-agent"
+	if out := flat(reviewOutput(review)); !strings.Contains(out, `prepare step "prepare-datamarket-agent"`) || strings.Contains(out, "by hand") {
+		t.Errorf("an app with a step is told which one deals with it:\n%s", out)
 	}
 }
 

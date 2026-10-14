@@ -216,6 +216,7 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	review := chartReview{
 		Unmapped: planned.UnmappedDiffs, Missing: planned.MissingWorkloads, LiveOnly: planned.LiveOnly, Native: planned.Native,
 		SpecDiffs: planned.SpecDiffs, Carried: planned.CarriedResources, Excluded: planned.Excluded, Source: liveSource(resolvedBaseline),
+		Prepare: app.Prepare,
 	}
 	review.Extra = slices.Concat(
 		fluxManagedSection(app, planned.FluxManagedBy),

@@ -248,10 +248,10 @@ func SeedCatalog() Catalog {
 			// The rset names the Kustomization apps-<entry>.
 			//
 			// No siblings, no chart.uses/enabledBy (the ResourceSet gates nothing
-			// on it) and no prepare step: the chart's Deployment gets a new,
-			// immutable selector under the same name, so the legacy one has to
-			// go before the release is applied (see Notes). The exclusions are
-			// not reviewed yet, so none are set.
+			// on it) and no prepare step: the chart's Deployment is named
+			// "connectors", the legacy one "connectors-management", so nothing
+			// clashes and the legacy one keeps running next to the new one (see
+			// Notes). The exclusions are not reviewed yet, so none are set.
 			Type:          "connectors",
 			Name:          "Connectors",
 			Component:     "connectors",
@@ -261,7 +261,7 @@ func SeedCatalog() Catalog {
 			Object:        "connectors",
 			Kustomization: "apps-{{ .Entry }}",
 			Chart:         &Chart{Path: "connectors"},
-			Notes:         "No prepare step exists for connectors yet, and its patch exclusions have not been reviewed: before `apps migrate connectors`, review `apps diff connectors --view patch`, and remove the legacy Deployment by hand (the chart gives it a new, immutable selector under the same name).",
+			Notes:         "No prepare step, and its patch exclusions have not been reviewed: before `apps migrate connectors`, review `apps diff connectors --view patch`. The chart's Deployment (connectors) and the legacy one (connectors-management) have different names, so nothing blocks the release and the legacy one keeps running next to it — on purpose: the jar URLs of dg-hdfs-agent (customSSCCDriverJar) and eureka (bdlAgentAdditionalJars) still point at it, so it stays until they point at the new service.",
 		},
 		{
 			Type:      "datamarket-agent",

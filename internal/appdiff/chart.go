@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -80,7 +81,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		UnmappedDiffs:     result.UnmappedDiffs,
 		LiveOnly:          result.LiveOnly,
 		Native:            result.Native,
-		SpecDiffs:         specDiffs(opts, live, patched),
+		SpecDiffs:         specDiffs(opts, hrNamespace, live, patched),
 		CarriedResources:  result.ResourceEdits,
 		LiveSize:          liveSize(live),
 		Excluded:          result.Excluded,
@@ -252,15 +253,24 @@ func verifyPatch(ctx context.Context, opts Options, rendered *render.Result, ren
 // specDiffs are what still differs between each live workload and the
 // chart as the final patch renders it, and the env vars of those workloads
 // that ask for more memory than their container's limit.
-func specDiffs(opts Options, live []diff.LiveWorkloadEnv, patched []*unstructured.Unstructured) []diff.SpecDiff {
+//
+// A workload's selector is immutable, so a different one is an obstacle only
+// to a release meeting a live workload with the same kind, namespace and
+// name as the one it renders (the rendered namespace, or the release's,
+// hrNamespace, when the object has none). A pair that is another object —
+// the diff pairs the rendered "governance-datamarket-agent" with the legacy
+// "datamarket-agent" — never meets: it gets a note that the legacy workload
+// keeps running (diff.LegacyRunsField), not a selector difference.
+func specDiffs(opts Options, hrNamespace string, live []diff.LiveWorkloadEnv, patched []*unstructured.Unstructured) []diff.SpecDiff {
 	compared := withRendered(live, patched)
 	var names []string
+	var diffs []diff.SpecDiff
 	for _, lw := range compared {
 		if lw.Rendered != nil && lw.Live != nil {
 			names = append(names, lw.Rendered.GetName())
 		}
+		diffs = append(diffs, workloadSpecDiffs(lw, hrNamespace)...)
 	}
-	diffs := diff.CompareLiveSpecs(compared)
 	// A prepare step that deletes the legacy workloads leaves nothing for
 	// the new selector to be immutable against.
 	if step := prepare.Find(opts.App.Prepare); step != nil && step.ReplacesWorkloads {
@@ -271,6 +281,40 @@ func specDiffs(opts Options, live []diff.LiveWorkloadEnv, patched []*unstructure
 		}
 	}
 	return append(diffs, diff.CheckEnvAgainstLimits(patched, names, opts.App.MemoryEnv)...)
+}
+
+// workloadSpecDiffs compares one rendered workload with its live
+// counterpart: see specDiffs for what a different selector means.
+func workloadSpecDiffs(lw diff.LiveWorkloadEnv, hrNamespace string) []diff.SpecDiff {
+	diffs := diff.CompareWorkloadSpecs(lw.Rendered, lw.Live)
+	if lw.Rendered == nil || lw.Live == nil {
+		return diffs
+	}
+	renderedNS := lw.Rendered.GetNamespace()
+	if renderedNS == "" {
+		renderedNS = hrNamespace
+	}
+	liveRef := fmt.Sprintf("%s %s/%s", lw.Live.GetKind(), lw.Live.GetNamespace(), lw.Live.GetName())
+	if lw.Live.GetNamespace() == renderedNS && lw.Live.GetName() == lw.Rendered.GetName() {
+		for i := range diffs {
+			if diffs[i].Field == diff.SelectorField {
+				diffs[i].LiveRef = liveRef
+			}
+		}
+		return diffs
+	}
+	kept := diffs[:0]
+	for _, d := range diffs {
+		if d.Field != diff.SelectorField {
+			kept = append(kept, d)
+		}
+	}
+	replicas, _, _ := unstructured.NestedInt64(lw.Live.Object, "spec", "replicas")
+	return append(kept, diff.SpecDiff{
+		Workload: lw.Rendered.GetName(), Field: diff.LegacyRunsField, Severity: diff.SpecInfo, LiveRef: liveRef,
+		Rendered: fmt.Sprintf("%s %s/%s", lw.Rendered.GetKind(), renderedNS, lw.Rendered.GetName()),
+		Live:     strconv.FormatInt(replicas, 10),
+	})
 }
 
 // withRendered is live with each entry's rendered workload replaced by the

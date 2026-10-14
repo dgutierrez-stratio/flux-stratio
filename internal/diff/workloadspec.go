@@ -40,6 +40,10 @@ type SpecDiff struct {
 	// Rendered and Live are the two sides' values as written; "" is unset.
 	Rendered, Live string
 	Severity       SpecSeverity
+	// LiveRef names the live workload ("Deployment <namespace>/<name>") of a
+	// SelectorField or LegacyRunsField diff, which may not be the rendered
+	// workload's own name.
+	LiveRef string
 }
 
 // CompareWorkloadSpecs lists what differs between a rendered workload and
@@ -74,8 +78,18 @@ func CompareWorkloadSpecs(rendered, live *unstructured.Unstructured) []SpecDiff 
 }
 
 // SelectorField is the Field of a SpecDiff reporting a different
-// spec.selector.matchLabels.
+// spec.selector.matchLabels of two workloads with the same kind, namespace and
+// name (appdiff keeps it only for those: see LegacyRunsField).
 const SelectorField = "selector"
+
+// LegacyRunsField is the Field of a SpecInfo SpecDiff noting that the live
+// workload a rendered one is compared with is another object — another name
+// or namespace (a legacy "datamarket-agent" against the chart's
+// "governance-datamarket-agent") — so the two never meet: Helm installs the
+// chart's alongside, the legacy one keeps running, and no immutable selector
+// is in the way. Rendered is the chart's "Kind namespace/name", Live the
+// legacy workload's replicas.
+const LegacyRunsField = "legacy-workload"
 
 // compareSelector compares spec.selector.matchLabels, which a Deployment or
 // StatefulSet can never change once created: the legacy CCT workloads select
