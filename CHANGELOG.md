@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
   cause is an unquoted, empty `${VAR}`; it never stops `--yes`), and a map or list as a value, which the API server
   rejects, makes the diff fail naming the ConfigMap. The same read replaces `NestedStringMap` for the rendered
   selector and pod-template labels. On eosdev `apps migrate genai --dry-run` goes from 120 to 1 "lost" variable
-  (`genai-api/NOT_USED`) and the patch carries the `genaiUi.*` values. Context: `docs/TASK-10-diff-configmap-null-values.md`.
+  (`genai-api/NOT_USED`) and the patch carries the `genaiUi.*` values. Context: `docs/TASK-10-diff-configmap-null-values.md` (removed once done; recover it from git history, commit b879e75).
 * **`apps diff`/`apps migrate` say why a legacy variable isn't rendered, and stop calling probe variables lost.** The
   Command Center injected a descriptor's probe settings as `{LIVENESS,READINESS,STARTUP}_PROBE_*` environment
   variables, and a chart sets them on the container, so on eosdev rocket (9 variables) and both gosec agents (8 each)
@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
   note, not a warning, so it no longer stops `--yes`); one whose chart probe differs stays in the lost list and its WHY
   names the chart's value (`the chart sets readinessProbe.failureThreshold natively, to 1 (live 3)`). `NOT_USED`, a
   placeholder name shared by unrelated descriptor parameters, gets its own WHY. (`internal/diff/nativeprobe.go`,
-  `ChartDiffResult.Native`.) Context: `docs/TASK-11-chart-variables-vs-cct-descriptor.md`.
+  `ChartDiffResult.Native`.) Context: `docs/MIGRATION-HISTORY.md` section 4.
 * **`tenant import` scaffolds a legacy tenant file that validates.** On a cluster where the tenant's apps are still the
   CCT deployment, the import found only the components whose name equals a chart's or that have a custom resource, and
   the validation then failed (`apps-psql waits on stratio-datastores/apps-`, ...). Fixed at the source, in four parts:
