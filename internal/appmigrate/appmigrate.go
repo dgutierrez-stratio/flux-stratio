@@ -62,6 +62,7 @@ type Result struct {
 	// chart-mode diff couldn't carry into the patch — see appdiff.Result.
 	UnmappedDiffs    []diff.UnmappedDiff
 	LiveOnly         []diff.LiveOnlyVar
+	Native           []diff.LiveOnlyVar
 	MissingWorkloads []string
 	// SpecDiffs are the resources, image and replicas that differ — see
 	// appdiff.Result.
@@ -149,7 +150,7 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 		UpToDate: diffResult.UpToDate, ObsoletePatches: diffResult.ObsoletePatches, FluxManagedBy: diffResult.FluxManagedBy,
 		DroppedFromExisting: diffResult.DroppedFromExisting,
 		Before:              string(before), After: string(before),
-		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnly: diffResult.LiveOnly, MissingWorkloads: diffResult.MissingWorkloads,
+		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnly: diffResult.LiveOnly, Native: diffResult.Native, MissingWorkloads: diffResult.MissingWorkloads,
 		SpecDiffs: diffResult.SpecDiffs, CarriedResources: diffResult.CarriedResources, LiveSize: diffResult.LiveSize,
 		Excluded: diffResult.Excluded,
 	}

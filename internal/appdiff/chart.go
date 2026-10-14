@@ -75,6 +75,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		Items:             envComparisons(result.Workloads),
 		UnmappedDiffs:     result.UnmappedDiffs,
 		LiveOnly:          result.LiveOnly,
+		Native:            result.Native,
 		SpecDiffs:         specDiffs(opts, live, patched),
 		CarriedResources:  result.ResourceEdits,
 		LiveSize:          liveSize(live),

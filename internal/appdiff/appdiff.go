@@ -113,6 +113,9 @@ type Result struct {
 	// diff.ChartDiffResult for the first three.
 	UnmappedDiffs []diff.UnmappedDiff
 	LiveOnly      []diff.LiveOnlyVar
+	// Native are the live variables the chart carries natively, with the
+	// same value (see diff.ChartDiffResult.Native): reported, not lost.
+	Native []diff.LiveOnlyVar
 	// SpecDiffs are the resources, image and replicas that differ between
 	// each rendered workload and its live counterpart — what env-only
 	// diffing never sees, as the patched chart renders them: what Patch

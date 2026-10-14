@@ -56,6 +56,11 @@ type LiveOnlyVar struct {
 	// replaces whole) hiding a chart default env var of this name, when
 	// that is why the chart doesn't render it.
 	ShadowedBy string
+	// NativeField is the container field of the rendered workload that sets
+	// this variable's setting natively (a legacy probe variable the chart
+	// expresses as a probe: "readinessProbe.failureThreshold"), and
+	// NativeValue its rendered value. Both are empty for any other variable.
+	NativeField, NativeValue string
 }
 
 // ExcludedDiff is a live variable that differs from the chart's rendered
@@ -168,6 +173,11 @@ type ChartDiffResult struct {
 	// lost after migration, since nothing in the chart can carry them
 	// forward.
 	LiveOnly []LiveOnlyVar
+	// Native are the live variables the chart doesn't render as variables
+	// but whose setting its workload carries natively with the same value
+	// (a probe variable and the container's probe): nothing is lost, and
+	// they are kept out of LiveOnly.
+	Native []LiveOnlyVar
 	// Excluded are the differences Exclude kept out of the patch, sorted
 	// by workload and name: informational, nothing was left unpatched by
 	// mistake.
@@ -281,10 +291,16 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 			case !hasLive:
 				result.RenderedOnlyCount++
 			case !hasRendered:
-				result.LiveOnly = append(result.LiveOnly, LiveOnlyVar{
+				live := LiveOnlyVar{
 					Workload: workload, Name: name, Live: liveVal,
 					ShadowedBy: shadowedDefault(in.DefaultValues, in.Values, lw.Rendered, name),
-				})
+				}
+				live.NativeField, live.NativeValue = nativeProbe(workloads[workload], name)
+				if live.NativeField != "" && live.NativeValue == liveVal {
+					result.Native = append(result.Native, live)
+					break
+				}
+				result.LiveOnly = append(result.LiveOnly, live)
 			case isPlaceholder(liveVal) && !isPlaceholder(rv.value):
 				result.UnmappedDiffs = append(result.UnmappedDiffs, UnmappedDiff{
 					Workload: workload, Name: name, Rendered: rv.value, Live: liveVal, Reason: UnmappedLiveUnknown,

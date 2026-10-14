@@ -275,6 +275,28 @@ func TestReportChartReview_NamesTheListShadowingAChartDefault(t *testing.T) {
 	}
 }
 
+func TestReportChartReview_SaysWhichProbeVariablesTheChartCarriesNatively(t *testing.T) {
+	out := reviewOutput(chartReview{
+		Native: []diff.LiveOnlyVar{{Workload: "app", Name: "READINESS_PROBE_PERIOD_SECONDS", Live: "30", NativeField: "readinessProbe.periodSeconds", NativeValue: "30"}},
+		LiveOnly: []diff.LiveOnlyVar{
+			{Workload: "app", Name: "READINESS_PROBE_FAILURE_THRESHOLD", Live: "3", NativeField: "readinessProbe.failureThreshold", NativeValue: "1"},
+			{Workload: "app", Name: "NOT_USED", Live: ""},
+		},
+		Source: "live cluster",
+	})
+	for _, want := range []string{
+		"1 variable(s) in the live cluster carried natively by the chart",
+		"the chart sets readinessProbe.periodSeconds natively, to the same value",
+		"2 variable(s) in the live cluster aren't rendered by the chart",
+		"the chart sets readinessProbe.failureThreshold natively, to 1 (live 3): a real difference",
+		"a placeholder name the descriptor gives to several unrelated parameters",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestSizeSection(t *testing.T) {
 	fleet := t.TempDir()
 	path := tenantfile.Path(fleet, "eosdev", "stratio")

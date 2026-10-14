@@ -151,7 +151,7 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 	}
 
 	review := chartReview{
-		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly,
+		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly, Native: result.Native,
 		SpecDiffs: result.SpecDiffs, Carried: result.CarriedResources, Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
 	}
 	review.Extra = slices.Concat(
@@ -267,6 +267,10 @@ type chartReview struct {
 	Missing []string
 	// LiveOnly are the live variables the chart doesn't render.
 	LiveOnly []diff.LiveOnlyVar
+	// Native are the live variables the chart carries natively with the same
+	// value (a probe variable and the container probe): information, not a
+	// warning (see hasWarnings).
+	Native []diff.LiveOnlyVar
 	// SpecDiffs are the resources, image and replicas that still differ
 	// between the patched rendered workloads and the live ones: only the
 	// risky ones are warnings (see hasWarnings).

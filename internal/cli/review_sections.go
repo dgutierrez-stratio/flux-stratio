@@ -79,15 +79,26 @@ func (r chartReview) sections(st reviewStyle) []reviewSection {
 		whys := make([]string, len(r.LiveOnly))
 		for i, v := range r.LiveOnly {
 			rows[i] = []string{name(v.Workload, v.Name), quoted(v.Live)}
-			whys[i] = "not rendered by the chart"
-			if v.ShadowedBy != "" {
-				whys[i] = "the chart's default is hidden by the env list at " + v.ShadowedBy
-			}
+			whys[i] = liveOnlyWhy(v)
 		}
 		header, rows := table([]string{"NAME", "LIVE VALUE"}, rows, whys)
 		out = append(out, reviewSection{
 			Level: levelReview, Title: fmt.Sprintf("%d variable(s) in the %s aren't rendered by the chart", len(r.LiveOnly), r.Source),
 			Hint: "Their values are lost after migration.", Header: header, Rows: rows,
+		})
+	}
+
+	if len(r.Native) > 0 {
+		rows := make([][]string, len(r.Native))
+		whys := make([]string, len(r.Native))
+		for i, v := range r.Native {
+			rows[i] = []string{name(v.Workload, v.Name), quoted(v.Live)}
+			whys[i] = liveOnlyWhy(v)
+		}
+		header, rows := table([]string{"NAME", "LIVE VALUE"}, rows, whys)
+		out = append(out, reviewSection{
+			Level: levelNote, Title: fmt.Sprintf("%d variable(s) in the %s carried natively by the chart", len(r.Native), r.Source),
+			Hint: "The chart sets the same value on the container instead of as a variable: nothing is lost.", Header: header, Rows: rows,
 		})
 	}
 
@@ -121,11 +132,32 @@ func (r chartReview) singleWorkload() bool {
 	for _, v := range r.LiveOnly {
 		seen[v.Workload] = true
 	}
+	for _, v := range r.Native {
+		seen[v.Workload] = true
+	}
 	for _, e := range r.Excluded {
 		seen[e.Workload] = true
 	}
 	delete(seen, "")
 	return len(seen) <= 1
+}
+
+// liveOnlyWhy says why the chart doesn't render a live variable as a
+// variable, when the plugin can tell: a chart default hidden by a replaced env
+// list, the container probe that carries a legacy probe variable, or a
+// descriptor placeholder name that carries no setting.
+func liveOnlyWhy(v diff.LiveOnlyVar) string {
+	switch {
+	case v.ShadowedBy != "":
+		return "the chart's default is hidden by the env list at " + v.ShadowedBy
+	case v.NativeField != "" && v.NativeValue == v.Live:
+		return "the chart sets " + v.NativeField + " natively, to the same value"
+	case v.NativeField != "":
+		return "the chart sets " + v.NativeField + " natively, to " + quoted(v.NativeValue) + " (live " + quoted(v.Live) + "): a real difference"
+	case v.Name == "NOT_USED":
+		return "a placeholder name the descriptor gives to several unrelated parameters: it carries no setting"
+	}
+	return "not rendered by the chart"
 }
 
 // unmappedWhy says why a difference couldn't be written to the patch. For a
