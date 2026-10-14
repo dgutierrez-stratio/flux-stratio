@@ -32,6 +32,10 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 	if err != nil {
 		return nil, err
 	}
+	if errs := diff.RenderedConfigMapErrors(renderedDocs); len(errs) > 0 {
+		return nil, errs[0]
+	}
+	warnNullConfigMapKeys(opts, renderedDocs)
 
 	var live []diff.LiveWorkloadEnv
 	var missing []string
@@ -510,4 +514,20 @@ func liveSize(live []diff.LiveWorkloadEnv) string {
 		}
 	}
 	return ""
+}
+
+// warnNullConfigMapKeys says which rendered ConfigMap keys came out null.
+// They are read as "" (what the API server stores), but a null is almost
+// always a ${VAR} substitution left unquoted in the app's HelmRelease values
+// that was empty, which the chart then renders as `KEY:` with no value.
+func warnNullConfigMapKeys(opts Options, docs []*unstructured.Unstructured) {
+	nulls := diff.NullConfigMapKeys(docs)
+	names := make([]string, 0, len(nulls))
+	for name := range nulls {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		opts.Log.Warningf("rendered ConfigMap %s has null value(s) for %s; read as empty. Check the HelmRelease values behind them for an unquoted ${VAR} that came out empty", name, strings.Join(nulls[name], ", "))
+	}
 }

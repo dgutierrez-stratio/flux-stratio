@@ -42,7 +42,7 @@ func indexRendered(docs []*unstructured.Unstructured) renderedEnv {
 	for _, d := range docs {
 		switch {
 		case d.GetKind() == "ConfigMap":
-			data, _, _ := unstructured.NestedStringMap(d.Object, "data")
+			data, _, _ := stringMapAt(d.Object, "data")
 			r.configMaps[d.GetName()] = data
 			cmOrder = append(cmOrder, d.GetName())
 		case workloadKinds[d.GetKind()]:

@@ -130,7 +130,7 @@ func AttributeConfigMaps(docs []*unstructured.Unstructured, files []ChartFile, p
 		if d.GetKind() != "ConfigMap" {
 			continue
 		}
-		data, _, _ := unstructured.NestedStringMap(d.Object, "data")
+		data, _, _ := stringMapAt(d.Object, "data")
 		if len(data) == 0 {
 			continue
 		}

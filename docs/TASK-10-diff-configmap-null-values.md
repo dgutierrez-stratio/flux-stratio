@@ -1,6 +1,6 @@
 # TASK-10 — one null value in a rendered ConfigMap makes the diff read the whole ConfigMap as empty: genai's 119 `genai-ui` variables show as "lost" and the patch drops 13 real legacy values
 
-**Status: open. Analysed 2026-10-14 (read-only; root cause confirmed, a fix tested in a scratch build, awaiting the user's decision on the open points). No repo, cluster, Vault or tenant-file change made for this finding.**
+**Status: plugin fix implemented 2026-10-14 (see "Fix applied" at the end). The keos-apps hardening was deliberately not done. No cluster, Vault or tenant-file change.**
 Found in the eosdev legacy->GitOps app migration run of 2026-10-13 (finding H1, high, in the run's findings; see `TASK-00-eosdev-audit-index.md`,
 the index row is the orchestrator's to add). It blocks the `genai` migration.
 Tools to change: `flux-stratio` (this repo, branch `feat/application-migration`; the primary fix) and `keos-apps`
@@ -319,3 +319,30 @@ flux stratio apps migrate genai --dry-run -v --repo keos-fleet=$S/fleet --repo k
   "not rendered" noise); `TASK-05` ("no differences" is one-directional); `docs/TASK-keos-apps-env-list-overlays.md` (overlays and env lists).
 - Scratch fix and outputs: `/tmp/claude-1001/-stratio-gitops-flux-stratio/8951e99e-48a0-404d-9a81-f913f1865961/scratchpad/h1/` (`plugin/` = full copy of the repo with the change, `fix.diff`
   = the diff against the repo, `flux-stratio-fixed` = the built binary). Earlier scratch fix (debug-laden, superseded): `.../scratchpad/genai/plugin/`.
+
+## Fix applied (2026-10-14)
+
+Decisions of the user on the open questions: a null is a **warning only** (never stops `--yes`); a bool/number is stringified (the recommendation was
+kept); the keos-apps `${LLM_MODEL_*:-""}` hardening is **not** done in this task (plugin only; the new warning shows which optional-dependency names
+really render null, so keos-apps can be decided per chart afterwards); the eosdev `llmModels` values are not a plugin change and were not touched.
+
+Done in flux-stratio (uncommitted when this was written):
+- `internal/diff/stringmap.go` (new): `stringMapAt`, `nullKeys`, `NullConfigMapKeys`, and `RenderedConfigMapErrors` (new beyond the scratch build).
+- `unstructured.NestedStringMap` replaced by `stringMapAt` on the rendered side at `envvars.go:45`, `chartvalues.go:133`, `workloadspec.go:85` (not `:86`, the live
+  object), `inline.go:58,109`, `resourcepatch.go:122`. `render/substitute.go:30`, `prepare/step_datamarket_agent.go:87` and the `GetLabels` sites stay.
+- `internal/appdiff/chart.go`: `chartDiff` returns the first `RenderedConfigMapErrors` (`rendered ConfigMap X: ... (the API server rejects it, the chart would not install)`) and
+  `warnNullConfigMapKeys` logs one warning per ConfigMap.
+- Tests: `TestIndexRendered_NullConfigMapValue`, `TestStringMapAt`, `TestNullKeys`, `TestNullConfigMapKeys`, `TestRenderedConfigMapErrors`, the `AttributeConfigMaps` case
+  "a null value does not hide the ConfigMap", `TestVerifyMapped_NullKeyDoesNotDropMappedPath`, and in `internal/appdiff`
+  `TestDiff_ChartMode_WarnsAboutNullConfigMapValues`, `..._NoNullWarningWithoutNulls`, `..._FailsOnConfigMapValueTheAPIServerRejects`. The null tests fail with the old reads
+  restored (`workloadEnv = map[]`, `attributed to ""`, `Patch = nil`) and pass with the fix. `gofmt`, `go vet ./...` and `go test ./...` are clean.
+- `CHANGELOG.md` and `CONTEXT.md` updated.
+
+Verified against eosdev (read-only, scratch copy of keos-fleet with genai enabled, `--repo keos-fleet=...`), as in the acceptance criteria:
+`apps migrate genai --dry-run -v` prints the warning naming `GENAI_GOVERNANCE_CHAT_LITELLM_MODEL, GENAI_LITELLM_MODEL, TRANSLATE_LITELLM_MODEL`, lists **1** variable
+not rendered (`genai-api/NOT_USED`), 6 values excluded by the catalog, the patch carries the 15 `genaiUi.*`/model values (the 13 of the Evidence list plus
+`genaiLitellmModel` and `chainGovernanceLitellmModel`), `apps diff genai -v` shows 20 differing `genai-ui` variables (99 same), and the two
+immutable-selector `[ACTION]` items are unchanged. rocket, intelligence, governance-datamarket-agent and dlc-entity dry runs print no null warning. (rocket now
+lists its nine `*_PROBE_*` variables as carried natively, TASK-11 F4, and four as not rendered.) Not run: the 101/18 case with `llmModels` set, which needs another
+scratch tenant file (`fleet-models`); the logic is the same.
+

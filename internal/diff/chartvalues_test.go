@@ -85,6 +85,14 @@ func TestAttributeConfigMaps(t *testing.T) {
 			want:  "config/api_env_vars.yaml",
 		},
 		{
+			// ConfigMap data with a null value (a chart's `| quote` of a nil
+			// .Values path) still attributes: the API server stores it as "".
+			name:  "a null value does not hide the ConfigMap",
+			files: sibling,
+			data:  map[string]any{"VAULT_ROLE": "r", "LOG_LEVEL": nil, "API_PORT": "8080"},
+			want:  "config/api_env_vars.yaml",
+		},
+		{
 			name:  "subset of a file's keys is not a match",
 			files: sibling,
 			data:  map[string]any{"VAULT_ROLE": "r", "LOG_LEVEL": "INFO"},

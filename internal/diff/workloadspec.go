@@ -82,7 +82,7 @@ const SelectorField = "selector"
 // on cct.stratio.com/application_id, the chart's on app.kubernetes.io/*, so
 // Helm can't update the legacy workload in place — it has to be replaced.
 func compareSelector(rendered, live *unstructured.Unstructured) (SpecDiff, bool) {
-	r, rOK, _ := unstructured.NestedStringMap(rendered.Object, "spec", "selector", "matchLabels")
+	r, rOK, _ := stringMapAt(rendered.Object, "spec", "selector", "matchLabels")
 	l, lOK, _ := unstructured.NestedStringMap(live.Object, "spec", "selector", "matchLabels")
 	if !rOK || !lOK || reflect.DeepEqual(r, l) {
 		return SpecDiff{}, false

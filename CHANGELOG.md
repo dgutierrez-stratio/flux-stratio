@@ -2,6 +2,18 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **One null value in a rendered ConfigMap no longer makes `apps diff`/`apps migrate` read the whole ConfigMap as empty.**
+  The plugin read rendered ConfigMap `data` with `unstructured.NestedStringMap`, which errors at the first non-string
+  value and returns an empty map, and both call sites discarded the error. genai's HelmRelease renders
+  `genaiLitellmModel: null` (an empty `${LLM_MODEL_*}` substitution becomes a YAML null even when quoted), so
+  `genai-ui-config` came out with null keys and all 119 `genai-ui` variables were reported as "not rendered by the chart",
+  while the patch lacked 13 real legacy `genaiUi.*` values (`haProxyHost`, `serviceUrl`, the opensearch and discovery
+  settings, ...). Rendered data is now read the way the API server decodes it: a null is `""`, a bool or number is its
+  text (`internal/diff/stringmap.go`). A null is reported once per ConfigMap as a warning naming its keys (the usual
+  cause is an unquoted, empty `${VAR}`; it never stops `--yes`), and a map or list as a value, which the API server
+  rejects, makes the diff fail naming the ConfigMap. The same read replaces `NestedStringMap` for the rendered
+  selector and pod-template labels. On eosdev `apps migrate genai --dry-run` goes from 120 to 1 "lost" variable
+  (`genai-api/NOT_USED`) and the patch carries the `genaiUi.*` values. Context: `docs/TASK-10-diff-configmap-null-values.md`.
 * **`apps diff`/`apps migrate` say why a legacy variable isn't rendered, and stop calling probe variables lost.** The
   Command Center injected a descriptor's probe settings as `{LIVENESS,READINESS,STARTUP}_PROBE_*` environment
   variables, and a chart sets them on the container, so on eosdev rocket (9 variables) and both gosec agents (8 each)

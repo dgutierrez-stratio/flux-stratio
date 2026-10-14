@@ -248,7 +248,11 @@ convention, that repo is the reference:
   the chart file its rendered ConfigMap was built from (`ScanChartFiles` + `AttributeConfigMaps`,
   matching a ConfigMap to the file with exactly its keys). Sibling workloads' same-named variables
   (genai's `VAULT_ROLE`) never cross over; anything it can't attribute to one path goes to
-  `UnmappedDiffs` with a reason, never guessed. A live variable the chart doesn't render goes to
+  `UnmappedDiffs` with a reason, never guessed. Rendered ConfigMap `data` is read the way the API server decodes
+  it (`stringMapAt`: a null, which a chart renders for `{{ .Values.x | quote }}` of a nil path, is `""`; a bool or number
+  its text; a map or list is an error, `RenderedConfigMapErrors`) — never with `unstructured.NestedStringMap`, which
+  empties the whole map at the first null — and `appdiff` warns once per ConfigMap naming the null keys
+  (`NullConfigMapKeys`). A live variable the chart doesn't render goes to
   `LiveOnly` ("lost after migration"), except a legacy probe variable (`{LIVENESS,READINESS,STARTUP}_PROBE_{FAILURE_THRESHOLD,
   INITIAL_DELAY_SECONDS,PERIOD_SECONDS,SUCCESS_THRESHOLD,TIMEOUT_SECONDS}`, `nativeprobe.go`): the Command Center injected
   a descriptor's probe settings as env vars and a chart sets them on the container, so when the rendered workload's

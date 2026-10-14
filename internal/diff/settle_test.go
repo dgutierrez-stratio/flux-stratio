@@ -97,3 +97,23 @@ func TestVerifyMapped(t *testing.T) {
 		t.Errorf("Patch = %+v, want nil", result.Patch)
 	}
 }
+
+// A null in the patched render's ConfigMap (a nil .Values path piped through
+// quote) used to empty the whole ConfigMap, so VerifyMapped saw no rendered
+// value and took a perfectly good mapped path out of the patch.
+func TestVerifyMapped_NullKeyDoesNotDropMappedPath(t *testing.T) {
+	result := &ChartDiffResult{
+		Patch:  &PatchDoc{TargetKind: "HelmRelease", Patch: map[string]any{"spec": map[string]any{"values": map[string]any{"a": map[string]any{"level": "DEBUG"}}}}},
+		Mapped: []MappedVar{{Workload: "app", Name: "LEVEL", Rendered: "INFO", Live: "DEBUG", Path: "a.level"}},
+	}
+	patched := singleWorkload(map[string]any{"LEVEL": "DEBUG", "TRANSLATE_LITELLM_MODEL": nil})
+
+	VerifyMapped(result, patched)
+
+	if got, want := PatchValues(result.Patch), map[string]any{"a": map[string]any{"level": "DEBUG"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("patch values = %v, want the mapped path kept: %v", got, want)
+	}
+	if len(result.UnmappedDiffs) != 0 {
+		t.Errorf("UnmappedDiffs = %+v, want none", result.UnmappedDiffs)
+	}
+}

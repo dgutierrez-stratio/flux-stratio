@@ -55,7 +55,7 @@ func inlineSourceFor(values map[string]any, workload *unstructured.Unstructured,
 		}
 	}
 	if len(matches) > 1 && workload != nil {
-		labels, _, _ := unstructured.NestedStringMap(workload.Object, "spec", "template", "metadata", "labels")
+		labels, _, _ := stringMapAt(workload.Object, "spec", "template", "metadata", "labels")
 		for _, label := range controllerLabels {
 			if src, ok := matches[labels[label]]; ok {
 				return &src
@@ -106,7 +106,7 @@ func envSourceFor(values map[string]any, workload *unstructured.Unstructured) *i
 			ctrl = c
 		}
 	} else {
-		labels, _, _ := unstructured.NestedStringMap(workload.Object, "spec", "template", "metadata", "labels")
+		labels, _, _ := stringMapAt(workload.Object, "spec", "template", "metadata", "labels")
 		for _, label := range controllerLabels {
 			if _, ok := controllers[labels[label]]; ok {
 				ctrl = labels[label]

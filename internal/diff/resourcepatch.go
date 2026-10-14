@@ -119,7 +119,7 @@ func controllerKeyFor(values map[string]any, workload *unstructured.Unstructured
 	if len(candidates) == 1 {
 		return candidates[0]
 	}
-	labels, _, _ := unstructured.NestedStringMap(workload.Object, "spec", "template", "metadata", "labels")
+	labels, _, _ := stringMapAt(workload.Object, "spec", "template", "metadata", "labels")
 	for _, label := range controllerLabels {
 		for _, c := range candidates {
 			if labels[label] == c {

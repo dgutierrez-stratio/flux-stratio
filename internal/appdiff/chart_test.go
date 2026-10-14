@@ -334,3 +334,72 @@ func TestDiff_ChartMode_ValuesFromRefused(t *testing.T) {
 		t.Errorf("err = %v, want valuesFrom refused", err)
 	}
 }
+
+// chartDiffWithHelmOutput runs the chart-mode diff of the psql-gosec-agent
+// fixture with helm rendering out instead of helmTemplateOutputGosec, and
+// returns what it logged.
+func chartDiffWithHelmOutput(t *testing.T, out, extraChartLines string) (*Result, error, string) {
+	t.Helper()
+	base := fixtureBase(t)
+	if err := os.MkdirAll(filepath.Join(base, "keos-apps", "components", "gosec-agent", "app", "overlays", "postgres", "S"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := chartDiffOptions(t, base)
+	if extraChartLines != "" {
+		envFile := filepath.Join(base, "charts", "gosec-agent", "config", "env_vars.yaml")
+		f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(extraChartLines); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	opts.Runner = helmSim{&runner.Fake{Responses: map[string]runner.FakeResponse{
+		"flux-operator": {Stdout: []byte(rsetOutputHelmRelease)},
+		"flux":          {Stdout: []byte(kustomizationBuildOutputHelmRelease)},
+		"helm":          {Stdout: []byte(out)},
+	}}}
+	var logged strings.Builder
+	opts.Log = log.New(&logged, false)
+	opts.Client = fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(deploymentWithEnv(t, "psql-gosec-agent", "stratio-datastores", "DEBUG")).Build()
+	result, err := Diff(context.Background(), opts)
+	return result, err, logged.String()
+}
+
+// A null in a rendered ConfigMap is read as empty (what the API server
+// stores), keeps the ConfigMap's other keys comparable and is said once.
+func TestDiff_ChartMode_WarnsAboutNullConfigMapValues(t *testing.T) {
+	out := strings.Replace(helmTemplateOutputGosec, "  LOG_LEVEL: INFO\n", "  LOG_LEVEL: INFO\n  TRANSLATE_MODEL:\n", 1)
+	result, err, logged := chartDiffWithHelmOutput(t, out, "TRANSLATE_MODEL: {{ .Values.gosecAgent.general.translateModel | quote }}\n")
+	if err != nil {
+		t.Fatalf("Diff returned error: %v", err)
+	}
+	if n := strings.Count(logged, "rendered ConfigMap psql-gosec-agent-config has null value(s) for TRANSLATE_MODEL"); n != 1 {
+		t.Errorf("log has the null warning %d times, want once:\n%s", n, logged)
+	}
+	if result.Patch == nil {
+		t.Error("Patch = nil: the null emptied the ConfigMap, so LOG_LEVEL lost its mapped path")
+	}
+}
+
+func TestDiff_ChartMode_NoNullWarningWithoutNulls(t *testing.T) {
+	_, err, logged := chartDiffWithHelmOutput(t, helmTemplateOutputGosec, "")
+	if err != nil {
+		t.Fatalf("Diff returned error: %v", err)
+	}
+	if strings.Contains(logged, "null value(s)") {
+		t.Errorf("log = %q, want no null warning", logged)
+	}
+}
+
+// A map as a ConfigMap value is rejected by the API server: the chart would
+// not install, so the diff fails instead of comparing against it.
+func TestDiff_ChartMode_FailsOnConfigMapValueTheAPIServerRejects(t *testing.T) {
+	out := strings.Replace(helmTemplateOutputGosec, "  LOG_LEVEL: INFO\n", "  LOG_LEVEL:\n    nested: x\n", 1)
+	_, err, _ := chartDiffWithHelmOutput(t, out, "")
+	if err == nil || !strings.Contains(err.Error(), "rendered ConfigMap psql-gosec-agent-config") || !strings.Contains(err.Error(), "API server rejects it") {
+		t.Errorf("err = %v, want one naming the ConfigMap and the API server", err)
+	}
+}
