@@ -263,16 +263,23 @@ For each app it (1) compares desired state and live exactly like "apps diff",
 
 Prepare steps change the live cluster (a backup is taken first). Today:
   datamarket-agent  suspend and scale down the legacy agent
-  bdl-datarest      remove the legacy ingress that collides with the new one
+  bdl-datarest      remove the legacy ingress that collides with the new one, and
+                    the legacy Deployment (new immutable selector)
   dlc-entity        remove the legacy ingress and Deployment
   dg-agent          remove the legacy Deployment (new immutable selector)
   discovery         remove the legacy Deployment (new immutable selector)
+  eureka-agent      remove the legacy Deployment (new immutable selector)
+  intelligence      remove the legacy Deployment (new immutable selector)
+  rocket            remove the legacy Deployment and the four its server created
+                    (rocket-catalog, -debug, -externalservice, -validator)
   litellm           copy the legacy Vault passwords (db_salt_key, keos_key_secret,
                     master_api_key) to the chart's hyphenated names, keeping the
                     originals under legacy/; remove the legacy Deployment
   virtualizer       remove the legacy server, monitor and ui Deployments
-  genai             rewrite stored component references (SQL; asks its own
-                    confirmation, which --yes never answers)
+  genai             rewrite stored component references (SQL; copies the rows it
+                    changes to the backup first; asks its own confirmation,
+                    which --yes never answers), then remove the legacy genai-api,
+                    genai-ui and genai-developer-proxy Deployments
 Each step asks before it runs. Answer n to skip that step only: the migration
 goes on without it (the patch is still written), the step is listed at the end,
 and you can do it by hand or run "apps migrate <app>" later for just the step.

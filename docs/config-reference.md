@@ -193,12 +193,16 @@ here, run automatically by `apps migrate` for that instance once its patch is pl
 | Step | What it does | Automated? |
 |---|---|---|
 | `prepare-datamarket-agent` | Suspends the legacy `datamarket-agent` HelmRelease (if there is one and Flux doesn't manage it) and scales the app's legacy Deployment to 0 (kept, not deleted), waiting for the pods its selector matches to terminate | yes |
-| `prepare-datarest` | Deletes the app's legacy Ingress, which would collide with the GitOps-managed one | yes |
+| `prepare-datarest` | Deletes the app's legacy Ingress (its admin Ingress, same host, path and class as the chart's, so it would collide with the GitOps-managed one), then its legacy Deployment (the chart keeps the name but gives it a new immutable selector, so Flux must recreate it). The Service and everything else stay | yes |
 | `prepare-dlc` | Deletes the app's legacy Ingress and Deployment (the chart changed an immutable selector label, so Flux must recreate it) | yes |
 | `prepare-dg-agent` | Deletes the legacy governance agent Deployment (`dg-hdfs-agent` and the other dg-agent flavors): the chart gives it a new immutable selector under the same name, so Flux must recreate it | yes |
 | `prepare-discovery` | Deletes the legacy Discovery Deployment: the chart gives it a new immutable selector under the same name, so Flux must recreate it. Its legacy ingress (another host and path than the chart's) is left alone | yes |
+| `prepare-eureka-agent` | Deletes the legacy eureka agent Deployment (`eureka-agent`): the chart gives it a new immutable selector under the same name, so Flux must recreate it. Nothing else of the app is touched | yes |
+| `prepare-intelligence` | Deletes the legacy `intelligence` Deployment: the chart gives it a new immutable selector under the same name, so Flux must recreate it. Its legacy Ingress (`intelligence-rocket.<domain>`, another host than the chart's admin Ingress, and the only one that works today) and its Services stay | yes |
+| `prepare-rocket` | Deletes the legacy `rocket` Deployment (the chart gives it a new immutable selector under the same name) and, listed in the plan so a dry run shows exactly what goes, the Deployments its server created at runtime (`rocket-catalog`, `-debug`, `-externalservice`, `-validator`: no CCT label, owned by `rocket`), which the new server recreates. The children are derived only from the legacy `rocket` found in this run (owned by its UID), so after the cutover nothing is planned. `rocket-catalog-standalone` (a CCT app of its own), every Ingress and every Service stay | yes |
 | `prepare-litellm` | First moves the legacy LiteLLM Vault passwords to the names the chart's SecretsBundle declares, so the release keeps them: in `userland/passwords/<live name>.<live namespace>/` it copies the value of `db_salt_key`, `keos_key_secret` and `master_api_key` to `db-salt-key`, `keos-key-secret` and `master-api-key` (the operator rejects underscores), and keeps a verbatim copy of each original under `legacy/`. It never writes or deletes the originals; the chart's SecretsBundle removes them once applied (it deletes every entry it doesn't declare, but not subfolders). It refuses, writing nothing, when a chart entry already holds another value (the release has its own: moving would rotate a live secret), a legacy value isn't the length the chart declares or `userland/` isn't kv v1; it only warns when the originals are already gone. It is idempotent: a re-run plans only what doesn't hold yet (a run interrupted after its backups is completed from them), each write re-reads its target first and refuses one that changed since the plan, and once the chart has replaced the app (no legacy Deployment, the release's SecretsBundle exists) it doesn't reach Vault at all. Then it deletes the legacy LiteLLM Deployment (`genai-litellm`): the chart gives it a new immutable selector under the same name, so Flux must recreate it. Its legacy ingress (host `genai.<domain>`, not the chart's `admin.` host) is left alone. Reaches Vault like `doctor`'s `vault access` check (see below) | yes |
 | `prepare-virtualizer` | Deletes the legacy Deployments of the whole virtualizer family — the server and its `virtualizer-monitor` and `virtualizer-ui` siblings, found by the type's `match` and `chart.siblings` selectors, so it still finds the siblings after the server was migrated. The chart gives each a new immutable selector under the same name. Ingresses and Services are left alone | yes |
+| `prepare-genai` | A Postgres data rewrite (renaming a stored component reference) — no Kubernetes API can verify this happened, so `apps migrate` never claims to on its own — and then the removal of the legacy genai Deployments. It finds the tenant's PgCluster primary pod (labelled `pgcluster.stratio.com/pgcluster-name`/`-role`) and counts, with read-only `SELECT`s (also under `--dry-run`), the rows the SQL would still change; with none left and no legacy Deployment left, the step is satisfied and asks nothing. Otherwise it shows the SQL and that pod and asks before running anything. After that first yes (never answered by `--yes`) it takes the app's backup and copies the rows the SQL changes to `<backup>/prepare/genai-<tenant>-chain.sql` (and `-endpoint.sql` when `genai-gateway.<tenant>-genai.endpoint` exists), as a psql script that loads them back (`COPY ... FROM stdin`; to restore, delete the rewritten rows by primary key first); a failed or empty copy stops the step before any statement. Then it runs the SQL (`psql -v ON_ERROR_STOP=1 --single-transaction`, so a failed statement fails the step and rolls the rest back), shows the real output and asks again (never answered by `--yes` either). Last it deletes the legacy Deployments of the family (`genai-api`, `genai-ui`, `genai-developer-proxy`, found by the type's `match` and `chart.siblings` selectors, skipping Flux-managed ones): the chart gives each a new immutable selector under the same name. That question is the usual `[y/N]`, answered by `--yes`. The legacy Ingresses (`genai.<domain>`) and Services stay | runs itself, confirmed |
 
 A step that reaches Vault (`prepare-litellm`) does it the way an operator does by hand, through package
 `internal/vault`: the root token from Secret `keos-core/vault-unseal-keys` (key `vault-root`), the vault CLI run by
@@ -215,12 +219,24 @@ matches by a hardcoded object name, and it never touches the GitOps objects that
 on a re-run after cutover. `apps migrate` lists every operation and prints each target's live
 manifest before asking, and `--dry-run` stops there. Each operation is pinned to the planned
 object's UID, so an object replaced in the meantime makes it fail rather than act on the new one.
-| `prepare-genai` | A Postgres data rewrite (renaming a stored component reference) — no Kubernetes API can verify this happened, so `apps migrate` never claims to on its own. It finds the tenant's PgCluster primary pod (labelled `pgcluster.stratio.com/pgcluster-name`/`-role`), shows the SQL and that pod and asks before running it (`psql -v ON_ERROR_STOP=1 --single-transaction`, so a failed statement fails the step and rolls the rest back), then shows the real output and asks again — neither question answered by `--yes` | runs itself, confirmed |
 
 Every automated step re-checks live cluster state each run rather than trusting a persisted
-record — running `apps migrate` again once a precondition holds is a no-op for that step. A Query
-step (`prepare-genai` today) is likewise safe to re-run: its SQL is idempotent, so running it again
-after a declined confirmation, or on a retried `apps migrate`, changes nothing further.
+record — running `apps migrate` again once a precondition holds is a no-op for that step, and says
+so (`prepare step "…" already satisfied`, at the normal log level). A Query step (`prepare-genai`
+today) is likewise safe to re-run: its SQL is idempotent and the count of rows it would change is
+read first, so running it again after a declined confirmation, or on a retried `apps migrate`,
+changes nothing further.
+
+A step that deletes a legacy Deployment does it for an app the operator chose, one by one: nothing in
+the catalog deletes a legacy workload by default, and there is no flag for it. The Deployment is gone
+from the confirmed run until the tenant file's change is pushed and Flux reconciles, so run the step and
+push in one sitting. Restore it from the backup (`deployment.yaml`, or `Deployment.<name>.yaml`): strip
+`status`, `uid`, `resourceVersion`, `creationTimestamp`, `generation`, `managedFields` and the
+`deployment.kubernetes.io/revision` annotation, then `kubectl apply -f`. An app with no step (or one
+whose step doesn't delete it) whose chart changes the selector of a Deployment of the same name gets an
+`[ACTION]` naming that legacy object; a legacy workload with another name or namespace than the chart's
+(`psql-agent` next to `psql-gosec-agent`, `connectors-management` next to `connectors`) gets a `[NOTE]`
+that it keeps running next to the new one.
 
 A future component's own manual-data-rewrite prepare step doesn't need new exec plumbing — it
 declares a `prepare.DBQuery` (namespace, pod selector, container, command, SQL) in a new

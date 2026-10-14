@@ -265,7 +265,13 @@ convention, that repo is the reference:
   which kustomize's merge patch deletes — `MergePatch`, not `MergeValues`, applies a patch to
   render it), and `VerifyResources` takes back out any edit the patched render doesn't reproduce, as
   `VerifyMapped` does for env. `CheckEnvAgainstLimits` flags an `-Xmx`/`memoryEnv` value above the
-  patched container's memory limit. Image tags, replicas, probes and selectors are never patched.
+  patched container's memory limit. Image tags, replicas, probes and selectors are never patched. The workload's
+  selector (`spec.selector.matchLabels`, immutable) is a `SelectorField` `risk` `SpecDiff` only when the live workload has
+  the same kind, namespace and name as the rendered one (`appdiff.workloadSpecDiffs`: a Helm install fails only against
+  that); a pair that is another object (`datamarket-agent` against `governance-datamarket-agent`, `psql-agent`,
+  `connectors-management`) gets a `LegacyRunsField` `info` note instead (`[NOTE]` "keeps running next to the new one"),
+  and a clash's `[ACTION]` (`review_sections.go`, `selectorHint`) names the legacy `namespace/name` and says what to do
+  by the app's prepare step (none, or one that doesn't delete it; one with `ReplacesWorkloads` downgrades it to info).
   `CoerceValue` handles the
   octal-looking-string/float/`yes`-`null` typed-value edge cases the Python client got wrong.
 - **`internal/appdiff`** — orchestrates `internal/render` + `internal/diff` for `apps diff`'s
@@ -324,7 +330,13 @@ convention, that repo is the reference:
   sorts `--all` by the dependency edges already declared in the tenant file itself (DFS post-order,
   cycle-safe), not catalog order.
 - **`internal/prepare`** — the one-time preconditions (`prepare-datamarket-agent`,
-  `prepare-datarest`, `prepare-dlc`, `prepare-genai`, `prepare-virtualizer`). An automated step's `Plan` reads live state
+  `prepare-datarest`, `prepare-dlc`, `prepare-genai`, `prepare-virtualizer`, `prepare-dg-agent`,
+  `prepare-discovery`, `prepare-eureka-agent`, `prepare-intelligence`, `prepare-rocket`, `prepare-litellm`).
+  A step that deletes legacy workloads is **component-scoped and chosen app by app** (the cutover is the operator's
+  process, §2): it names its app, finds only that app's legacy objects and leaves the rest; there is no generic
+  "delete the legacy workload" step, flag or catalog default. `replaceLegacyDeployment` builds the one-Deployment ones
+  (dg-agent, discovery, eureka-agent, intelligence); `prepare-rocket` also lists the Deployments owned by the legacy
+  parent's UID (never every owned Deployment in the namespace). An automated step's `Plan` reads live state
   and returns `[]Operation`, each carrying the live object it acts on (empty = already satisfied).
   `ensurePrepared` (in `internal/cli/apps_migrate.go`, the only caller) runs after `apps migrate`
   has planned and confirmed the patch, which is then saved from that plan (`appmigrate.Result.Save`)
@@ -340,7 +352,11 @@ convention, that repo is the reference:
   id) and execs the SQL there via `kubeclient.Execer` (a thin `client-go/tools/remotecommand`
   wrapper — the Go equivalent of `kubectl exec`, avoiding a shell-out). It asks before running (the
   SQL and the pod shown) and again over the real captured output, neither skipped by `--yes`;
-  `--dry-run` only resolves the pod and shows the SQL, asking nothing. A future component's own manual DB rewrite reuses this shape
+  `--dry-run` resolves the pod, counts with read-only SELECTs (`Step.Pending`, from `DBQuery.Touches`) the rows the SQL
+  would change and shows the SQL, asking nothing. A Query step may also carry a `Plan` (genai's family Deployment
+  deletes, run after the SQL under the usual `[y/N]`); before the SQL `ensurePreparedQuery` takes the app's backup
+  (`backupFirst`, which returns the backup dir) and copies those rows to `<dir>/prepare/` (`Step.DumpRows`), and stops
+  if either fails. No row left and an empty plan is "already satisfied" (a `Successf`, for every step). A future component's own manual DB rewrite reuses this shape
   (a new `DBQuery` value) rather than one-off exec code. A step with `PasswordMoves` (`NeedsVault()`;
   `prepare-litellm`) gets the same `Execer` (every automated step does) for `internal/vault`. `InspectPasswords`
   (`vaultmove.go`) is its read-only start, shared with `doctor`: mount must be kv v1, then list the app's passwords

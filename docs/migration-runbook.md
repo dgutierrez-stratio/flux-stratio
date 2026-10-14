@@ -152,6 +152,17 @@ confirmed the patch, which was computed while the legacy objects were still live
 deletes them (`prepare-dlc`) never leaves the patch with nothing to read from. See
 [`config-reference.md`](config-reference.md#prepare) for what each step does.
 
+A step that deletes a legacy Deployment (`prepare-dlc`, `prepare-datarest`, `prepare-dg-agent`, `prepare-discovery`,
+`prepare-eureka-agent`, `prepare-intelligence`, `prepare-rocket`, `prepare-virtualizer`, `prepare-litellm`, and the
+last part of `prepare-genai`) leaves the app without that workload from the moment it runs until you push the tenant
+file's change and Flux reconciles (force it: `flux reconcile`), so run the step and push in one sitting. It takes the
+app's backup first (the `backed up … before its prepare step` line precedes the first operation; for `prepare-genai`
+also before the SQL, with the rows it changes in `<backup>/prepare/`), and to put a Deployment back you restore it from
+`deployment.yaml` (or `Deployment.<name>.yaml`) after stripping `status`, `uid`, `resourceVersion`,
+`creationTimestamp`, `generation`, `managedFields` and the `deployment.kubernetes.io/revision` annotation. Each step
+names the objects it deletes and the ones it leaves; none of them is a catalog-wide default. A re-run after the
+cutover says `already satisfied` and changes nothing.
+
 **Virtualizer** is three legacy Deployments (the server, `virtualizer-monitor`, `virtualizer-ui`) that the
 chart renders as one release, each under a new immutable selector. `tenant import` writes `uiEnabled: true`
 on the virtualizer entry while the monitor or ui run, which makes the chart render them; pushed before the
@@ -235,6 +246,15 @@ every sibling workload the catalog declares, so the recovered patch covers each 
 the main one.
 
 ### Reading the review sections
+
+An `[ACTION] N workload(s) can't be updated in place: their selector is immutable` names the legacy object
+(`namespace/name`) that blocks the release: the chart gives a Deployment of the same name and namespace another
+selector, which Kubernetes never lets change. Its hint says what to do by the app's prepare step: with none (or one that
+doesn't delete it) back the Deployment up (`apps backup`) and delete it by hand before Flux installs the release; with a
+step that deletes it the section is only informative. A `[NOTE] N legacy workload(s) keep running next to the new one`
+is another case altogether: the legacy workload has another name or namespace than the chart's (`psql-agent` and
+`psql-gosec-agent`, `connectors-management` and `connectors`, `datamarket-agent` and `governance-datamarket-agent`),
+nothing clashes, and it runs in duplicate until a prepare step or you scale it down.
 
 Everything a chart-mode diff leaves out of the patch is listed, and `-v` adds a WHY column saying why each
 variable is there. Two things are worth knowing when you read a `variable(s) ... aren't rendered by the chart`

@@ -2,6 +2,26 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **Prepare steps delete the legacy Deployment of the apps whose chart changes its immutable selector, and the `[ACTION]`
+  that announced it stops misfiring.** On eosdev `dg-datarest-pgi`, `eureka-agent`, `genai-api`, `genai-ui`, `rocket` and
+  `intelligence` each printed `[ACTION] 1 workload(s) can't be updated in place` and the operator deleted the Deployment
+  by hand (a step existed for two of them, which left it). Chosen app by app (never a catalog-wide default or flag):
+  * `prepare-eureka-agent` and `prepare-intelligence` delete the one legacy Deployment (intelligence keeps its legacy
+    Ingress); `prepare-rocket` deletes `rocket` and, listed in the plan, the four Deployments its server created
+    (derived only from the legacy parent found in this run, so a re-run after the cutover plans nothing;
+    `rocket-catalog-standalone`, Ingresses and Services stay); `prepare-datarest` now also deletes the Deployment after
+    the Ingress.
+  * `prepare-genai` now takes a backup before its SQL (a Query step never got one: `ensurePreparedQuery` was not handed
+    `backupFirst`), copies the rows the SQL changes to `<backup>/prepare/genai-<tenant>-{chain,endpoint}.sql` and stops
+    before any statement if that fails, then deletes the legacy `genai-api`/`genai-ui`/`genai-developer-proxy`
+    Deployments. A read-only `SELECT`, also under `--dry-run`, counts the rows left to rewrite so a re-run asks nothing.
+  * The selector `[ACTION]` fires only for a live workload with the same kind, namespace and name as the rendered one: it
+    was also printed for `governance-datamarket-agent`, the two gosec agents and `connectors`, where the legacy workload
+    has another name or namespace and nothing clashes. Those get a `[NOTE]` that the legacy workload keeps running next to
+    the new one; a real clash names the legacy `namespace/name` and says what to do by the app's step. The `connectors`
+    catalog notes claimed a same-name clash that doesn't exist.
+  * "already satisfied" is now printed at the normal log level.
+  Context: `docs/TASK-15-prepare-steps-for-immutable-selector-apps.md`.
 * **One null value in a rendered ConfigMap no longer makes `apps diff`/`apps migrate` read the whole ConfigMap as empty.**
   The plugin read rendered ConfigMap `data` with `unstructured.NestedStringMap`, which errors at the first non-string
   value and returns an empty map, and both call sites discarded the error. genai's HelmRelease renders

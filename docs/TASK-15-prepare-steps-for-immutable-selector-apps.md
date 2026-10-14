@@ -1,6 +1,6 @@
 # TASK-15 — an app whose chart changes the Deployment selector has no prepare step, so the operator deletes the legacy workload by hand; and the `[ACTION]` that announces it is wrong for three of the apps it fires on
 
-**Status: open (plugin work). Analysed 2026-10-14 (read-only; per-app proposal and open decisions below, nothing is implemented until the user picks apps). No cluster change made for this finding.**
+**Status: implemented 2026-10-14 on `feat/application-migration` (decisions recorded under "Decisions" below; verification against a cluster still to do). Analysed the same day. No cluster change made for this finding.**
 
 > The other TASK files this one cites (TASK-00 to TASK-12 and the un-numbered `TASK-*.md`) were retired on 2026-10-14. Their content is summarised in `docs/MIGRATION-HISTORY.md` and the files remain in git history.
 
@@ -222,13 +222,16 @@ flux stratio apps migrate connectors --dry-run        # false [ACTION]: connecto
 # the log evidence: <scratchpad>/logs/W2, W5, W6, W7 (*-migrate.log, legacy-*.yaml)
 ```
 
-## Open questions for the user
+## Decisions (user, 2026-10-14) and what was implemented
 
-1. Which of these do you want as a step: `dg-datarest-pgi` (extend), `eureka-agent`, `genai` (extend), `rocket`, `intelligence`? One answer per app; nothing is implemented without it.
-2. `prepare-genai`: SQL before the Deployment deletes (recommended) or after? Is one read-only `SELECT` in `--dry-run` acceptable, to report "already satisfied"?
-3. `prepare-rocket`: list the four owned children explicitly in the plan (recommended, so the dry-run is exact) or rely on garbage collection as on eosdev?
-4. Gosec agents: keep scale-to-0 manual with the corrected note, or request `prepare-gosec-agent` (TASK-02 item 4)?
-5. Promote the "already satisfied" line from `Debugf` to a normal message?
+1. Steps for **all five**: `dg-datarest-pgi` (extend `prepare-datarest`: Ingress then Deployment), `eureka-agent` (`prepare-eureka-agent`), `genai` (extend `prepare-genai`), `rocket` (`prepare-rocket`), `intelligence` (`prepare-intelligence`).
+2. `prepare-genai`: backup, then SQL, then the Deployment deletes (SQL first); one read-only `SELECT` also under `--dry-run`. Done. Deviation from the proposal: the data backup uses `psql ... COPY (SELECT ...) TO STDOUT` (written as a `COPY ... FROM stdin` script) instead of `pg_dump`, so it needs only the `psql` the SQL already uses; the `chain` primary key was not checked, so the restore recipe says "delete the rewritten rows by primary key, then load the file".
+3. `prepare-rocket`: the four children are listed explicitly in the plan, derived from the legacy parent's UID found in this run. Done.
+4. Gosec agents: stay manual; only the corrected message (a `[NOTE]` that the legacy agent keeps running). `prepare-gosec-agent` stays TASK-02 item 4.
+5. "already satisfied" promoted from `Debugf` to `Successf`, for every step.
+
+Not done, on purpose: no generic step, flag or catalog default; no `apps restore`; the objects the workload backup doesn't capture (Ingresses, rocket's four children) still wait for TASK-01 defect A's `<backup>/prepare/` capture (the genai data rows are the first thing written there).
+To verify on a cluster (not done): `flux stratio apps migrate <app> --dry-run` for each of the five, and a real run on the tenant file that is the user's test bed.
 
 ## Related
 
