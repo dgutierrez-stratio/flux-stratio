@@ -1,0 +1,31 @@
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: apps-ambiguous
+  namespace: flux-system
+spec:
+  resourcesTemplate: |
+    <<- $components := get inputs "components" | default dict >>
+    <<- $fooLogical := get $components "fooLogical" | default list >>
+    <<- range $component := $fooLogical >>
+    <<- $componentConfig := get $component "config" | default dict >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: ./components/shared-chart/app/overlays/logical/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+    <<- end >>
+    <<- $fooPhysical := get $components "fooPhysical" | default list >>
+    <<- range $component := $fooPhysical >>
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>
+    spec:
+      path: ./components/shared-chart/app/overlays/physical/<< $componentSize >>
+      patches: << get $component "patches" | default list | toJson >>
+    <<- end >>
