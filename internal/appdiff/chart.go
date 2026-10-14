@@ -309,7 +309,11 @@ func workloadSpecDiffs(lw diff.LiveWorkloadEnv, hrNamespace string) []diff.SpecD
 			kept = append(kept, d)
 		}
 	}
-	replicas, _, _ := unstructured.NestedInt64(lw.Live.Object, "spec", "replicas")
+	// An unset spec.replicas is Kubernetes' default of one pod, not none.
+	replicas, found, _ := unstructured.NestedInt64(lw.Live.Object, "spec", "replicas")
+	if !found {
+		replicas = 1
+	}
 	return append(kept, diff.SpecDiff{
 		Workload: lw.Rendered.GetName(), Field: diff.LegacyRunsField, Severity: diff.SpecInfo, LiveRef: liveRef,
 		Rendered: fmt.Sprintf("%s %s/%s", lw.Rendered.GetKind(), renderedNS, lw.Rendered.GetName()),

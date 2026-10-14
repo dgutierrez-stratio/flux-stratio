@@ -648,7 +648,7 @@ func backupRows(ctx context.Context, logger *log.Logger, step prepare.Step, popt
 		return nil
 	}
 	target := filepath.Join(dir, "prepare")
-	if err := os.MkdirAll(target, 0o755); err != nil {
+	if err := os.MkdirAll(target, 0o700); err != nil {
 		return fmt.Errorf("backing up the rows prepare step %q changes: %w", step.Name, err)
 	}
 	for _, d := range copies {

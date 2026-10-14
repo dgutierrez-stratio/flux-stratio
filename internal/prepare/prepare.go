@@ -225,7 +225,7 @@ func (s Step) rowsOf(ctx context.Context, opts Options, tenant string, pod *core
 			return 0, nil
 		}
 	}
-	out, err := s.read(ctx, opts, tenant, pod, fmt.Sprintf("SELECT count(*) FROM %s WHERE %s;", t.Table, t.Where))
+	out, err := s.read(ctx, opts, tenant, pod, fmt.Sprintf("SELECT count(*) FROM %s WHERE (%s);", t.Table, t.Where))
 	if err != nil {
 		return 0, err
 	}
@@ -264,7 +264,7 @@ func (s Step) DumpRows(ctx context.Context, opts Options, tenant string, pod *co
 		if n == 0 {
 			continue
 		}
-		copied, err := s.read(ctx, opts, tenant, pod, fmt.Sprintf("COPY (SELECT * FROM %s WHERE %s) TO STDOUT;", t.Table, t.Where))
+		copied, err := s.read(ctx, opts, tenant, pod, fmt.Sprintf("COPY (SELECT * FROM %s WHERE (%s)) TO STDOUT;", t.Table, t.Where))
 		if err != nil {
 			return nil, err
 		}
