@@ -54,7 +54,7 @@ flux stratio doctor                            # preflight: binaries (+ optional
                                                  # app it will handle; skipped when there is none), tenant file
 
 flux stratio config init --base --cluster --tenant [--charts] [--dir] [--force]
-                                                 # write catalog.yaml (19 seeded component types) + environment.yaml
+                                                 # write catalog.yaml (20 seeded component types) + environment.yaml
 
 flux stratio tenant import [--size] [--output] [--force] [--dry-run]
                                                  # scan the live cluster → tenant RSIP skeleton
@@ -248,7 +248,12 @@ convention, that repo is the reference:
   the chart file its rendered ConfigMap was built from (`ScanChartFiles` + `AttributeConfigMaps`,
   matching a ConfigMap to the file with exactly its keys). Sibling workloads' same-named variables
   (genai's `VAULT_ROLE`) never cross over; anything it can't attribute to one path goes to
-  `UnmappedDiffs` with a reason, never guessed. Chart-mode also compares what env vars never show
+  `UnmappedDiffs` with a reason, never guessed. A live variable the chart doesn't render goes to
+  `LiveOnly` ("lost after migration"), except a legacy probe variable (`{LIVENESS,READINESS,STARTUP}_PROBE_{FAILURE_THRESHOLD,
+  INITIAL_DELAY_SECONDS,PERIOD_SECONDS,SUCCESS_THRESHOLD,TIMEOUT_SECONDS}`, `nativeprobe.go`): the Command Center injected
+  a descriptor's probe settings as env vars and a chart sets them on the container, so when the rendered workload's
+  probe field has the live value the variable goes to `Native` (reported as a note, not a warning), and when it differs it
+  stays in `LiveOnly` with the native field and value in the WHY column. Chart-mode also compares what env vars never show
   (`workloadspec.go`, `resourcepatch.go`): `CompareWorkloadSpecs` lists each paired container's
   resource requests/limits (as quantities), image and the workload's replicas (`SpecDiff`, severity
   `risk`/`info`), `resourceEdits` carries the live resources into the patch through
@@ -348,12 +353,15 @@ convention, that repo is the reference:
   (so it is testable with `runner.Fake`), failing on an `apps-*` tenant Kustomization some other one waits on that nothing
   renders. Errors/Warnings/Notes; a missing `flux-operator` is a Note, never a pass. Called by `internal/cli/tenant.go`
   after every `tenant import`.
-- **`internal/tenantimport`** — `tenant import`'s live-cluster scan (CRD instances → Deployments →
-  HelmReleases, three passes feeding one `Components` map), fixpoint-expanding mandatory
+- **`internal/tenantimport`** — `tenant import`'s live-cluster scan (CRD instances → live workloads classified by
+  the component catalog through `internal/components` — `classifiedscan.go`, entry names from each type's `entry`
+  template, `configFromEnv` read off the legacy workload's env — → HelmReleases, three passes feeding one `Components`
+  map), fixpoint-expanding mandatory
   dependencies, then rendering a tenant-file skeleton (`Run`, Create mode); `Scan` is the same pipeline
   returning the `Components` + `Live` (config values derived from live siblings via `chart.enabledBy`; each entry also carries
   `DepEnabled`/`DepUnknown`, from `chart.uses` evaluated over its live HelmRelease values in `uses.go`: the source of a dependency's
-  `enabled: true`, written on Create by `Entry.depConfig` and on Complete by `completeUses`/`AddToDependency`),
+  `enabled: true`, written on Create by `Entry.depConfig` and on Complete by `completeUses`/`AddToDependency`; with no
+  HelmRelease, `assumeLiveUses` takes a dependency whose component runs on the cluster as used — `DepAssumed`),
   and `Complete` (`merge.go`) adds to an existing file only what it lacks — through `internal/tenantfile`'s
   textual `AddToEntry`/`AddTopLevel`/`AppendEntry` (insertions into the file's text, positions read off
   the yaml.Node tree; `Doc.Text()`), never a yaml.v3 re-encode, which would re-indent the file's

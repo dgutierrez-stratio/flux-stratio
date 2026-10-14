@@ -84,7 +84,7 @@ func TestScanEnabledBy(t *testing.T) {
 func TestScan_CreateDerivesUIEnabledAndCompleteAddsNoSkeleton(t *testing.T) {
 	cat := loadFixtureCatalog(t)
 	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
-		deployment("virtualizer", "stratio-apps"),
+		cctDeployment("virtualizer", "stratio-apps", "virtualizer", "default"),
 		deployment("virtualizer-monitor", "stratio-apps"),
 	).Build()
 	opts := Options{TenantName: "stratio", Catalog: cat, Config: seedConfig(), Client: c, Log: log.New(io.Discard, false)}

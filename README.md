@@ -156,7 +156,7 @@ Persistent flags on every command: `--config`, `--env-config`, `--base`, `--repo
 `--kube-context`, `-v`/`--verbose`.
 
 `config init` requires `--base` (or a `--repo` for every repository), `--cluster` and `--tenant` on the command line, since by
-definition there's no environment file yet to read them from. It writes a 19-type component
+definition there's no environment file yet to read them from. It writes a 20-type component
 catalog covering the application set the legacy Python migration client shipped, with every
 selector derived from real captured legacy objects — and refuses to overwrite either file without
 `--force`. Review the catalog, then edit it by hand from then on: it's the same for every
@@ -164,7 +164,9 @@ environment, so one reviewed copy can be shared across a team.
 
 `tenant import` is named to avoid confusion with flux-keos's own `tenant create`, which scaffolds a
 brand-new tenant from a template; this command instead reads a live, not-yet-migrated cluster and
-imports what it finds there. With no `--output` it prints the skeleton to stdout; with an `--output`
+imports what it finds there: the legacy apps are recognised through the component catalog, from what CCT stamped on them,
+and named in the tenant file as the GitOps component is called (`connectors-management` is `connectors`, a datamarket agent
+`governance-datamarket-agent`). With no `--output` it prints the skeleton to stdout; with an `--output`
 that doesn't exist it writes it. With an `--output` that exists it *completes* the file: it adds what
 is missing (config fields the templates read, dependencies, the storage type, top-level fields) and
 nothing else — no removal, reordering, uncommenting or overwriting, so the added lines are the whole

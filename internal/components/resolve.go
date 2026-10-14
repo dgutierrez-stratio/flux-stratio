@@ -481,6 +481,11 @@ func undeclaredReason(doc *tenantfile.Doc, componentKey string) string {
 
 // toApp combines inst's type and resolved entry into a config.App,
 // rendering its Object and Kustomization names.
+// App renders the instance's GitOps coordinates (object, Kustomization,
+// ResourceSet, ...) as Resolve does, for a caller with no tenant file to
+// check them against.
+func (i Instance) App(tenant string) (config.App, error) { return toApp(i, tenant) }
+
 func toApp(inst Instance, tenant string) (config.App, error) {
 	t := inst.Type
 	primary := inst.Primary()

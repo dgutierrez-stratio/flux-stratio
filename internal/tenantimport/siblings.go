@@ -21,6 +21,10 @@ type Live struct {
 	Values Derived
 	// Siblings lists, per component key, the sibling workloads running.
 	Siblings map[string][]string
+	// Warnings are what the scan itself had to say (a legacy app left out for
+	// want of a GitOps equivalent). Create logs them as it goes; Complete, whose
+	// scan is quiet, adds them to its report.
+	Warnings []string
 }
 
 // scanEnabledBy derives, for every chart type declaring Chart.EnabledBy,

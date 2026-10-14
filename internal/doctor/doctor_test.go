@@ -591,6 +591,25 @@ func TestMissingSeedPrepares(t *testing.T) {
 	}
 }
 
+func TestMissingSeedTypes(t *testing.T) {
+	cat := config.SeedCatalog()
+	if got := missingSeedTypes(&cat); len(got) != 0 {
+		t.Errorf("the seed itself reports %v", got)
+	}
+	old := config.SeedCatalog()
+	var kept []config.ComponentType
+	for _, ty := range old.Types {
+		if ty.Type != "connectors" {
+			kept = append(kept, ty)
+		}
+	}
+	old.Types = kept
+	got := missingSeedTypes(&old)
+	if len(got) != 1 || !strings.Contains(got[0], `"connectors"`) || !strings.Contains(got[0], "config init --force") {
+		t.Errorf("missingSeedTypes = %v, want one line naming connectors and how to re-seed", got)
+	}
+}
+
 // legacyPgCluster is a live object of the fixture catalog's only type.
 func legacyPgCluster() *unstructured.Unstructured {
 	u := &unstructured.Unstructured{Object: map[string]any{}}

@@ -17,10 +17,11 @@ type Options struct {
 	// Size is the default component size (S, M or L); defaults to S.
 	Size    string
 	Catalog *catalog.Catalog
-	// Config is the migration catalog, read for Chart.EnabledBy to derive
-	// config fields from the live siblings (virtualizer's uiEnabled) and
-	// Chart.Uses to derive dependencies' `enabled` from the live
-	// HelmRelease values. Nil derives nothing.
+	// Config is the migration catalog: it classifies the live workloads into
+	// components (nil uses the seed's), and is read for Chart.EnabledBy to
+	// derive config fields from the live siblings (virtualizer's uiEnabled) and
+	// Chart.Uses to derive dependencies' `enabled` from the live HelmRelease
+	// values. Nil derives nothing of the latter two.
 	Config *config.Catalog
 	Client client.Client
 	Log    *log.Logger
@@ -42,17 +43,24 @@ func Scan(ctx context.Context, opts Options, expandSkeleton bool) (Components, L
 	if err != nil {
 		return nil, Live{}, fmt.Errorf("scanning custom resources: %w", err)
 	}
-	if err := scanDeployments(ctx, opts.Client, opts.Catalog, opts.TenantName, components); err != nil {
-		return nil, Live{}, fmt.Errorf("scanning deployments: %w", err)
+	var scanWarnings []string
+	classifyWarn := func(format string, a ...any) {
+		warn(format, a...)
+		scanWarnings = append(scanWarnings, fmt.Sprintf(format, a...))
+	}
+	if err := scanClassified(ctx, opts.Client, opts.classifyConfig(), opts.Catalog, opts.TenantName, components, classifyWarn); err != nil {
+		return nil, Live{}, fmt.Errorf("scanning workloads: %w", err)
 	}
 	if err := scanHelmReleases(ctx, opts.Client, opts.Catalog, opts.TenantName, components); err != nil {
 		return nil, Live{}, fmt.Errorf("scanning helmreleases: %w", err)
 	}
 	scanUses(opts, components)
+	assumeLiveUses(opts, components)
 	live, err := scanEnabledBy(ctx, opts.Client, opts.Config, opts.TenantName)
 	if err != nil {
 		return nil, Live{}, fmt.Errorf("scanning sibling workloads: %w", err)
 	}
+	live.Warnings = append(live.Warnings, scanWarnings...)
 	if expandSkeleton {
 		expandMandatoryComponents(opts.Catalog, components, warn)
 	}
@@ -68,6 +76,16 @@ func Scan(ctx context.Context, opts Options, expandSkeleton bool) (Components, L
 	}
 	enrich(opts.Catalog, components, requiredConfig(opts.Config), warn)
 	return components, live, nil
+}
+
+// classifyConfig is the catalog the live objects are classified against: the
+// configured one, or the seed's when none was given.
+func (o Options) classifyConfig() *config.Catalog {
+	if o.Config != nil {
+		return o.Config
+	}
+	seed := config.SeedCatalog()
+	return &seed
 }
 
 func (o Options) warn(format string, a ...any) {

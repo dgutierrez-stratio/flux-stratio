@@ -7,8 +7,8 @@ import (
 
 func TestSeedCatalog_Valid(t *testing.T) {
 	cat := SeedCatalog()
-	if len(cat.Types) != 19 {
-		t.Fatalf("len(Types) = %d, want 19", len(cat.Types))
+	if len(cat.Types) != 20 {
+		t.Fatalf("len(Types) = %d, want 20", len(cat.Types))
 	}
 	if err := cat.validate(); err != nil {
 		t.Fatalf("validate() = %v, want nil", err)
@@ -94,5 +94,75 @@ func TestCatalogValidate_RejectsABadMemoryEnvName(t *testing.T) {
 	cat.Types[0].MemoryEnv = []string{"OK_NAME", "has space"}
 	if err := cat.validate(); err == nil || !strings.Contains(err.Error(), `memoryEnv[1]: "has space" is not an env var name`) {
 		t.Errorf("validate = %v, want it to reject the second name", err)
+	}
+}
+
+// A legacy governance agent's env says which GitOps overlay it is and what
+// it points at; the seed declares it for dg-agent.
+func TestSeedCatalog_DgAgentDerivesItsConfigFromTheLegacyEnv(t *testing.T) {
+	typ := SeedCatalog().Find("dg-agent")
+	if typ == nil || len(typ.ConfigFromEnv) != 3 {
+		t.Fatalf("dg-agent configFromEnv = %+v, want type and the two governance dependencies", typ)
+	}
+	byKey := map[string]EnvConfig{}
+	for _, c := range typ.ConfigFromEnv {
+		byKey[c.Key] = c
+	}
+	if got, ok := byKey["type"].Apply("hdfs"); got != "hdfs" || !ok {
+		t.Errorf("type from HDFS = %q, %v", got, ok)
+	}
+	if _, ok := byKey["type"].Apply("POSTGRESQL"); ok {
+		t.Error("POSTGRESQL has no GitOps overlay but was accepted")
+	}
+	if got, _ := byKey["dependencies.governancePgbouncer.name"].Apply("pgbouncer-postgreskeos-governance.keos-core"); got != "pgbouncer-postgreskeos-governance" {
+		t.Errorf("governance pgbouncer = %q", got)
+	}
+}
+
+func TestEnvConfig_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    EnvConfig
+		want string // "" = valid
+	}{
+		{"type", EnvConfig{Key: "type", Env: "X", Values: map[string]string{"A": "a"}}, ""},
+		{"dependency", EnvConfig{Key: "dependencies.governancePostgres.name", Env: "X"}, ""},
+		{"pattern", EnvConfig{Key: "dependencies.d.name", Env: "X", Pattern: "^([^.]+)"}, ""},
+		{"config field", EnvConfig{Key: "postgresDatabase", Env: "X"}, ""},
+		{"not a key", EnvConfig{Key: "config.size", Env: "X"}, "must be"},
+		{"dependency without name", EnvConfig{Key: "dependencies.d", Env: "X"}, "must be"},
+		{"no env", EnvConfig{Key: "type"}, "not an env var name"},
+		{"both", EnvConfig{Key: "type", Env: "X", Values: map[string]string{"A": "a"}, Pattern: "(a)"}, "exclusive"},
+		{"no group", EnvConfig{Key: "type", Env: "X", Pattern: "a"}, "exactly one capture group"},
+		{"bad regexp", EnvConfig{Key: "type", Env: "X", Pattern: "("}, "pattern"},
+	} {
+		got := strings.Join(tc.c.validate("f"), "; ")
+		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: validate = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestEnvConfig_Apply(t *testing.T) {
+	values := EnvConfig{Key: "type", Env: "X", Values: map[string]string{"HDFS": "hdfs"}}
+	if got, ok := values.Apply(" hdfs "); got != "hdfs" || !ok {
+		t.Errorf("Apply = %q, %v, want a case- and space-insensitive match", got, ok)
+	}
+	pattern := EnvConfig{Key: "dependencies.d.name", Env: "X", Pattern: "^([a-z]+)-"}
+	if got, ok := pattern.Apply("ABC"); got != "" || !ok {
+		t.Errorf("a pattern that does not match = %q, %v, want nothing written but known", got, ok)
+	}
+	if (EnvConfig{Key: "dependencies.d.name"}).DependencyKey() != "d" || (EnvConfig{Key: "type"}).DependencyKey() != "" {
+		t.Error("DependencyKey")
+	}
+	if (EnvConfig{Key: "postgresDatabase"}).Field() != "postgresDatabase" || (EnvConfig{Key: "type"}).Field() != "" || (EnvConfig{Key: "dependencies.d.name"}).Field() != "" {
+		t.Error("Field")
+	}
+}
+
+func TestSeedCatalog_DatarestDerivesItsDatabaseFromTheLegacyEnv(t *testing.T) {
+	typ := SeedCatalog().Find("bdl-datarest")
+	if typ == nil || len(typ.ConfigFromEnv) != 1 || typ.ConfigFromEnv[0].Field() != "postgresDatabase" || typ.ConfigFromEnv[0].Env != "JDBC_DATABASE" {
+		t.Fatalf("bdl-datarest configFromEnv = %+v, want postgresDatabase from JDBC_DATABASE", typ)
 	}
 }

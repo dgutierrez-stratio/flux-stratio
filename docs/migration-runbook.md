@@ -55,7 +55,12 @@ flux stratio tenant import \
 ```
 
 This produces a *skeleton*: every component the scan could discover, with dependencies wired
-between them where the scan could resolve them. It's a starting point, not a finished tenant file —
+between them where the scan could resolve them. A legacy (CCT) app is recognised by what CCT stamped on it
+(`application_service`/`application_model`) through the component catalog, and written under the name the
+GitOps component has (`connectors-management` becomes `connectors`). A legacy governance agent with no GitOps
+overlay (the `POSTGRESQL` ones) is left out with a warning, and a component only GitOps has that something waits
+on (a Postgres' backup repository) is added with a warning, since applying it creates it. Run `doctor` first: it
+warns when `catalog.yaml` lacks a type the seed has, in which case that app is not recognised. It's a starting point, not a finished tenant file —
 review it before committing:
 
 - Fields the scan cannot know at all (secrets, model configuration, storage sizing beyond what's
@@ -69,6 +74,8 @@ review it before committing:
   block whose keys the template reads (genai's `llmModels`) is scaffolded with those keys empty
   (`chat`, `governance`, `translate`), and a warning names each one until you fill it in. Virtualizer's `uiEnabled` is scaffolded: `true` when its monitor or ui runs on the
   cluster, `false` otherwise.
+- A dependency whose component runs on the cluster is written `enabled: true` when the app has no
+  HelmRelease to say otherwise, and each such line says it was assumed: check the ones your app does not use.
 - Without `--output` the skeleton goes to stdout.
 
 ### Completing a tenant file you already have
@@ -226,6 +233,19 @@ get the "already managed by Flux" warning, or you know Flux reset the component 
 backup is what makes that recovery possible. For multi-workload charts (genai, virtualizer) it holds
 every sibling workload the catalog declares, so the recovered patch covers each of them, not just
 the main one.
+
+### Reading the review sections
+
+Everything a chart-mode diff leaves out of the patch is listed, and `-v` adds a WHY column saying why each
+variable is there. Two things are worth knowing when you read a `variable(s) ... aren't rendered by the chart`
+list, whose values are lost after migration:
+
+- A legacy `{LIVENESS,READINESS,STARTUP}_PROBE_*` variable is not a loss when the chart sets the same probe
+  on the container (the Command Center injected a descriptor's probe settings as environment variables). Those
+  are listed apart, as `carried natively by the chart`, and don't stop `--yes`. One whose chart probe has a
+  different value stays in the lost list, and its WHY names the chart's value: that difference is real and
+  the patch can't carry it (probes are never patched).
+- `NOT_USED` is a placeholder name the descriptor gives to several unrelated parameters; it carries no setting.
 
 ## 7. Migrate the rest
 

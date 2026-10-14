@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -18,6 +19,12 @@ import (
 	"github.com/Stratio/flux-stratio/internal/log"
 )
 
+// legacyConnectors is the CCT connectors-management Deployment, which the
+// import turns into the GitOps `connectors` entry.
+func legacyConnectors() *appsv1.Deployment {
+	return cctDeployment("connectors-management", "stratio-apps", "connectors-management", "connectors-management-service-default")
+}
+
 func TestRun_EndToEnd(t *testing.T) {
 	cat := loadFixtureCatalog(t)
 	// A realistic pre-migration snapshot: a PgCluster, a PGBouncer
@@ -27,7 +34,7 @@ func TestRun_EndToEnd(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
 		pgCluster("psql", "stratio-datastores"),
 		pgBouncer("pool-psql", "stratio-datastores", "psql"),
-		deployment("connectors", "stratio-apps"),
+		legacyConnectors(),
 	).Build()
 
 	out, err := Run(context.Background(), Options{
@@ -112,11 +119,11 @@ func keysOf(m map[string]any) []string {
 // treated as absent, the real postgres would be replaced by a placeholder
 // entry its dependents get wired to, in a file that looks valid.
 func TestRun_UnlistableKindFails(t *testing.T) {
-	for _, kind := range []string{"PgCluster", "HelmRelease"} {
+	for _, kind := range []string{"PgCluster", "HelmRelease", "Deployment"} {
 		t.Run(kind, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(mustScheme(t)).WithObjects(
 				pgCluster("psql", "stratio-datastores"),
-				deployment("connectors", "stratio-apps"),
+				legacyConnectors(),
 			).WithInterceptorFuncs(interceptor.Funcs{
 				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 					if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == kind {

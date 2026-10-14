@@ -57,12 +57,14 @@ func Complete(doc *tenantfile.Doc, scanned Components, live Live, cat *catalog.C
 	if err := completeTopLevel(doc, opts, &r); err != nil {
 		return r, err
 	}
+	r.Warnings = append(r.Warnings, live.Warnings...)
 
 	required := requiredConfig(opts.Config)
 	byKey := map[string][]string{} // component key -> active entry names, file order
 	for _, e := range entries {
 		byKey[e.Key] = append(byKey[e.Key], e.Name)
 	}
+	scaffoldGitOpsOnly(doc, entries, scanned, byKey, cat, required, opts.Config, &r)
 
 	for _, e := range entries {
 		schema, ok := cat.Schemas[e.Key]
@@ -74,7 +76,11 @@ func Complete(doc *tenantfile.Doc, scanned Components, live Live, cat *catalog.C
 		}
 	}
 
-	if err := completeUndeclared(doc, scanned, byKey, cat, required, &r); err != nil {
+	declared := make(map[string][]string, len(byKey))
+	for key, names := range byKey {
+		declared[key] = slices.Clone(names)
+	}
+	if err := completeUndeclared(doc, scanned, byKey, declared, cat, required, &r); err != nil {
 		return r, err
 	}
 
@@ -121,31 +127,157 @@ func completeTopLevel(doc *tenantfile.Doc, opts CompleteOptions, r *Report) erro
 	return doc.AddTopLevel(missing)
 }
 
+// scaffoldGitOpsOnly adds to scanned an entry for each component something
+// depends on that exists only in GitOps: nothing runs it on a legacy cluster
+// (no catalog type produces its component), yet a ResourceSet waits on it
+// unconditionally (postgres on its backup repository), so without an entry the
+// dependent would wait forever. A component the catalog can discover is never
+// scaffolded — the cluster says it is not there — nor one the file declares
+// or has commented out. The new entry is written by completeUndeclared like any
+// other, and warned about: it creates a resource that did not exist.
+//
+// It changes scanned in place so that every dependent resolves to it.
+func scaffoldGitOpsOnly(doc *tenantfile.Doc, entries []tenantfile.ComponentEntry, scanned Components, byKey map[string][]string, cat *catalog.Catalog, required map[string]map[string]bool, cfg *config.Catalog, r *Report) {
+	if cfg == nil {
+		seed := config.SeedCatalog()
+		cfg = &seed
+	}
+	type need struct{ by, key string }
+	var needs []need
+	collect := func(by, schemaKey, storageType string, declared func(string) bool) {
+		for _, dep := range cat.Schemas[schemaKey].Dependencies {
+			if (len(dep.StorageTypes) > 0 && !containsStr(dep.StorageTypes, storageType)) || declared(dep.Key) {
+				continue
+			}
+			needs = append(needs, need{by, dep.Key})
+		}
+	}
+	for _, e := range entries {
+		storageType := ""
+		if t := tenantfile.ConfigValue(e.Node, "type"); t != nil {
+			storageType = t.Value
+		}
+		collect(fmt.Sprintf("components.%s[%s]", e.Key, e.Name), e.Key, storageType,
+			func(dep string) bool { return tenantfile.HasDependency(e.Node, dep) })
+	}
+	keys := make([]string, 0, len(scanned))
+	for key := range scanned {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		for _, s := range scanned[key] {
+			collect(fmt.Sprintf("components.%s[%s]", key, s.Name), key, s.Type,
+				func(dep string) bool { return s.Deps[dep] != "" })
+		}
+	}
+
+	for _, n := range needs {
+		if _, known := cat.Schemas[n.key]; !known || len(resolveDep(n.key, "", scanned, byKey)) > 0 || catalogProduces(cfg, n.key) || tenantfile.CommentedOut(doc, n.key) {
+			continue
+		}
+		entry := &Entry{Name: camelToKebab(n.key), Deps: map[string]string{}}
+		enrichEntry(cat.Schemas[n.key], entry, scanned, required[n.key], func(string, ...any) {})
+		scanned[n.key] = append(scanned[n.key], entry)
+		r.Warnings = append(r.Warnings, fmt.Sprintf(
+			"components.%s[%s]: GitOps-only: no legacy app of it is recognized on the cluster (the catalog has no type for it: see `flux stratio doctor`), but %s depends on it; it is added so the release does not wait forever, and applying it creates it new — review it",
+			n.key, entry.Name, n.by))
+	}
+}
+
+// catalogProduces reports whether any catalog type's instances are entries
+// of component key: whether a legacy cluster could have it.
+func catalogProduces(cfg *config.Catalog, key string) bool {
+	for _, t := range cfg.Types {
+		if t.Component == key {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDep lists the names the dependency key can point at: what the scan
+// found live and what the file declares. Together they are every entry the
+// finished file has under that key (a scanned name the file lacks is
+// appended by completeUndeclared), so a dependency resolves the same whether
+// its dependent was already in the file or is being added. Names in both come
+// first, then the file's own in file order (what the operator declared is
+// their choice), then the rest of the scan's.
+func resolveDep(key, storageType string, scanned Components, byKey map[string][]string) []string {
+	live := scanned.names(key)
+	inScan := make(map[string]bool, len(live))
+	for _, n := range live {
+		inScan[n] = true
+	}
+	seen := map[string]bool{}
+	var both, fileOnly, scanOnly []string
+	for _, n := range byKey[key] {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		if inScan[n] {
+			both = append(both, n)
+		} else {
+			fileOnly = append(fileOnly, n)
+		}
+	}
+	for _, n := range live {
+		if !seen[n] {
+			seen[n] = true
+			scanOnly = append(scanOnly, n)
+		}
+	}
+	if len(both)+len(fileOnly) > 0 || len(scanOnly) < 2 {
+		return slices.Concat(both, fileOnly, scanOnly)
+	}
+	// Only the scan has candidates: choose among them as the scan would.
+	if name, ambiguous := pickDependency(scanned, key, storageType); len(ambiguous) == 0 {
+		return []string{name}
+	}
+	return scanOnly
+}
+
+// ambiguousDepWarning is the warning for a dependency several entries could
+// stand for; the first was used.
+func ambiguousDepWarning(label, key string, names []string, used string) string {
+	return fmt.Sprintf("%s: dependency %q has %d candidates (%s); used %q, review before use",
+		label, key, len(names), strings.Join(names, ", "), used)
+}
+
 func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, scanned Components, live Live, byKey map[string][]string, required map[string]bool, r *Report) error {
 	label := fmt.Sprintf("components.%s[%s]", e.Key, e.Name)
 	var fields []tenantfile.Field
 	var deps []tenantfile.DependencyRef
+	// What this entry's own AddToEntry writes; reported only once it has, so a
+	// failure leaves nothing of it in the report.
+	var written []string
 	addField := func(key string, value any) {
 		fields = append(fields, tenantfile.Field{Key: key, Value: value})
-		r.Added = append(r.Added, fmt.Sprintf("%s: config.%s: %s", label, key, fmtValue(value)))
+		written = append(written, fmt.Sprintf("%s: config.%s: %s", label, key, fmtValue(value)))
 	}
 
-	// Storage type: an existing one wins; otherwise inferred as in Create
-	// (any dependency declaring "hdfs" with an hdfs component live).
-	storageType := ""
-	if t := tenantfile.ConfigValue(e.Node, "type"); t != nil {
-		storageType = t.Value
-	} else if schemaHasStorageType(schema, "hdfs") && len(scanned["hdfs"]) > 0 {
-		storageType = "hdfs"
-		addField("type", "hdfs")
-	}
-
-	// What the entry's live HelmRelease says about the dependencies it uses.
-	// Not found by name (the file may call it something else): the one
-	// scanned entry of the key stands for the one the file declares.
+	// The scanned entry that stands for this one: what the cluster says about
+	// it (its live HelmRelease's dependencies in use, its legacy workload's
+	// storage type). Not found by name (the file may call it something else):
+	// the one scanned entry of the key stands for the one the file declares.
 	used := scanned.find(e.Key, e.Name)
 	if used == nil && len(scanned[e.Key]) == 1 && len(byKey[e.Key]) == 1 {
 		used = scanned[e.Key][0]
+	}
+
+	// Storage type: an existing one wins; otherwise what the scan found (the
+	// legacy workload's own, or inferred as in Create: any dependency declaring
+	// "hdfs" with an hdfs component live).
+	storageType := ""
+	if t := tenantfile.ConfigValue(e.Node, "type"); t != nil {
+		storageType = t.Value
+	} else if used != nil && used.Type != "" {
+		storageType = used.Type
+		addField("type", used.Type)
+	} else if schemaHasStorageType(schema, "hdfs") && len(scanned["hdfs"]) > 0 {
+		storageType = "hdfs"
+		addField("type", "hdfs")
 	}
 	if used != nil {
 		completeUses(doc, e, schema, storageType, used, label, r)
@@ -183,14 +315,24 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 			continue
 		}
 		plan := fieldPlan(field, storageType, required)
-		if tenantfile.ConfigValue(e.Node, field.Key) != nil {
+		fromEnv, hasEnv := used.fromEnv(field.Key)
+		if existing := tenantfile.ConfigValue(e.Node, field.Key); existing != nil {
 			// The file's value wins; only a scaffolded block is looked into,
 			// so its placeholders keep being reported until filled in.
+			if hasEnv && existing.Value != fromEnv {
+				r.Warnings = append(r.Warnings, fmt.Sprintf(
+					"%s: config.%s is %s but its legacy workload is configured with %q; left as is — the release would change it",
+					label, field.Key, existing.Value, fromEnv))
+			}
 			if plan == fieldScaffold {
 				for _, leaf := range tenantfile.EmptyConfigLeaves(e.Node, field.Key, leafKeys(field)) {
 					r.Warnings = append(r.Warnings, fmt.Sprintf("%s: config.%s.%s is empty; set it by hand", label, field.Key, leaf))
 				}
 			}
+			continue
+		}
+		if hasEnv {
+			addField(field.Key, fromEnv) // what the app runs with, not the template's default
 			continue
 		}
 		switch plan {
@@ -212,9 +354,9 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 		if tenantfile.HasDependency(e.Node, dep.Key) {
 			continue // declared, even with another or an empty name: the file wins
 		}
-		names := scanned.names(dep.Key)
-		if len(names) == 0 && len(byKey[dep.Key]) == 1 {
-			names = byKey[dep.Key] // not live yet, but the file declares exactly one
+		names := resolveDep(dep.Key, storageType, scanned, byKey)
+		if len(names) == 0 && used != nil && used.Deps[dep.Key] != "" {
+			names = []string{used.Deps[dep.Key]} // read off its legacy workload
 		}
 		switch len(names) {
 		case 0:
@@ -222,26 +364,26 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 			continue
 		case 1:
 		default:
-			r.Warnings = append(r.Warnings, fmt.Sprintf("%s: dependency %q has %d discovered instances; added %q, review before use", label, dep.Key, len(names), names[0]))
+			r.Warnings = append(r.Warnings, ambiguousDepWarning(label, dep.Key, names, names[0]))
 		}
 		ref := tenantfile.DependencyRef{Key: dep.Key, Name: names[0]}
 		added := fmt.Sprintf("%s: config.dependencies.%s.name: %s", label, dep.Key, names[0])
-		if used != nil && used.DepEnabled[dep.Key] != "" {
+		if reason := used.enabledReason(dep.Key); reason != "" {
 			ref.Enabled = true
-			added += fmt.Sprintf(", enabled: true (spec.values.%s is set in its HelmRelease)", used.DepEnabled[dep.Key])
+			added += fmt.Sprintf(", enabled: true (%s)", reason)
 		} else if used != nil && used.DepUnknown[dep.Key] {
 			r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep.Key))
 		}
 		deps = append(deps, ref)
-		r.Added = append(r.Added, added)
+		written = append(written, added)
 	}
 
 	if err := doc.AddToEntry(e.Node, fields, deps); err != nil {
-		// Nothing of this entry was written; take its additions back out of
-		// the report and say why.
-		r.Added = r.Added[:len(r.Added)-len(fields)-len(deps)]
+		// Nothing of this entry was written; say why.
 		r.Warnings = append(r.Warnings, fmt.Sprintf("%s: %v", label, err))
+		return nil
 	}
+	r.Added = append(r.Added, written...)
 	return nil
 }
 
@@ -260,14 +402,17 @@ func completeUses(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catal
 			continue
 		}
 		current := tenantfile.DependencyField(e.Node, dep.Key, "enabled")
-		switch evidence := used.DepEnabled[dep.Key]; {
-		case evidence != "" && current != nil:
-			if current.Value == "false" {
+		reason := used.enabledReason(dep.Key)
+		switch {
+		case reason != "" && current != nil:
+			// Only a HelmRelease value is worth contradicting the operator over;
+			// an assumption is not.
+			if current.Value == "false" && used.DepEnabled[dep.Key] != "" {
 				r.Warnings = append(r.Warnings, fmt.Sprintf(
-					"%s: config.dependencies.%s.enabled is false but spec.values.%s is set in its HelmRelease; left as is — the integration stays off",
-					label, dep.Key, evidence))
+					"%s: config.dependencies.%s.enabled is false but %s; left as is — the integration stays off",
+					label, dep.Key, reason))
 			}
-		case evidence != "":
+		case reason != "":
 			if tenantfile.DependencyNames(e.Node)[dep.Key] == "" {
 				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: dependency %q has no name; not enabled, fill it in by hand first", label, dep.Key))
 				continue
@@ -276,7 +421,7 @@ func completeUses(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catal
 				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: %v", label, err))
 				continue
 			}
-			r.Added = append(r.Added, fmt.Sprintf("%s: config.dependencies.%s.enabled: true (spec.values.%s is set in its HelmRelease)", label, dep.Key, evidence))
+			r.Added = append(r.Added, fmt.Sprintf("%s: config.dependencies.%s.enabled: true (%s)", label, dep.Key, reason))
 		case used.DepUnknown[dep.Key] && current == nil:
 			r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep.Key))
 		}
@@ -284,10 +429,11 @@ func completeUses(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catal
 }
 
 // completeUndeclared handles the components the scan found live that the
-// file has no active entry for, appended as new entries — except under a
+// file has no active entry for (byKey: its active entries, and those added so
+// far; declared: only the file's own), appended as new entries — except under a
 // commented-out block, which is the operator's own switch-on-one-at-a-time
 // and never gets a duplicate.
-func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[string][]string, cat *catalog.Catalog, required map[string]map[string]bool, r *Report) error {
+func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey, declared map[string][]string, cat *catalog.Catalog, required map[string]map[string]bool, r *Report) error {
 	keys := make([]string, 0, len(scanned))
 	for key := range scanned {
 		keys = append(keys, key)
@@ -303,12 +449,17 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[strin
 			case len(byKey[key]) == 0 && tenantfile.CommentedOut(doc, key):
 				// Covered by the summary line about commented-out blocks.
 			default:
-				if others := byKey[key]; len(others) > 0 {
+				// Only what the file declared: the entries added next to this one
+				// in this run are the cluster's several instances, not a rename.
+				if others := declared[key]; len(others) > 0 {
 					r.Warnings = append(r.Warnings, fmt.Sprintf(
 						"%s: added, but components.%s already declares %s; if that is this component under another name, remove the new entry",
 						label, key, strings.Join(others, ", ")))
 				}
-				if err := doc.AppendEntry(key, s.Name, entryConfig(s)); err != nil {
+				// What the scan could not resolve may be declared in the file (the
+				// operator added it, or it is appended in this very run).
+				deps := resolveUnresolved(s, label, scanned, byKey, r)
+				if err := doc.AppendEntry(key, s.Name, entryConfig(s, deps)); err != nil {
 					return err
 				}
 				byKey[key] = append(byKey[key], s.Name)
@@ -323,11 +474,6 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[strin
 						r.Warnings = append(r.Warnings, scaffoldWarning(label, field))
 					}
 				}
-				for dep, name := range s.Deps {
-					if name == "" {
-						r.Warnings = append(r.Warnings, fmt.Sprintf("%s: dependency %q could not be resolved; not added, fill it in by hand", label, dep))
-					}
-				}
 				for _, dep := range undecidedUses(s) {
 					r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep))
 				}
@@ -337,10 +483,43 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey map[strin
 	return nil
 }
 
+// resolveUnresolved returns the dependency names of a scanned entry about to
+// be appended: the scan's own, and for each it could not resolve the name
+// resolveDep finds in the file or among the other scanned entries. A
+// dependency that still has none is warned about and left out.
+func resolveUnresolved(s *Entry, label string, scanned Components, byKey map[string][]string, r *Report) map[string]string {
+	deps := make(map[string]string, len(s.Deps))
+	keys := make([]string, 0, len(s.Deps))
+	for k := range s.Deps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		deps[k] = s.Deps[k]
+		if deps[k] != "" {
+			if names := s.Ambiguous[k]; len(names) > 0 {
+				r.Warnings = append(r.Warnings, ambiguousDepWarning(label, k, names, deps[k]))
+			}
+			continue
+		}
+		switch names := resolveDep(k, s.Type, scanned, byKey); len(names) {
+		case 0:
+			r.Warnings = append(r.Warnings, fmt.Sprintf(
+				"%s: dependency %q could not be resolved; not added, fill it in by hand (nothing live or in the file under components.%s)", label, k, k))
+		case 1:
+			deps[k] = names[0]
+		default:
+			deps[k] = names[0]
+			r.Warnings = append(r.Warnings, ambiguousDepWarning(label, k, names, names[0]))
+		}
+	}
+	return deps
+}
+
 // entryConfig is the config block of a scanned entry, as renderEntries
-// writes it, minus the dependencies it could not resolve (an empty name
-// would only be broken YAML for the render).
-func entryConfig(e *Entry) map[string]any {
+// writes it, with the dependency names in deps and without the ones still
+// unresolved (an empty name would only be broken YAML for the render).
+func entryConfig(e *Entry, deps map[string]string) map[string]any {
 	config := map[string]any{}
 	if e.Type != "" {
 		config["type"] = e.Type
@@ -348,14 +527,14 @@ func entryConfig(e *Entry) map[string]any {
 	for k, v := range e.ExtraConfig {
 		config[k] = v
 	}
-	deps := map[string]any{}
-	for k, v := range e.Deps {
+	depConfigs := map[string]any{}
+	for k, v := range deps {
 		if v != "" {
-			deps[k] = e.depConfig(k, v)
+			depConfigs[k] = e.depConfig(k, v)
 		}
 	}
-	if len(deps) > 0 {
-		config["dependencies"] = deps
+	if len(depConfigs) > 0 {
+		config["dependencies"] = depConfigs
 	}
 	return config
 }

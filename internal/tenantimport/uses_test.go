@@ -79,6 +79,56 @@ func TestScanUses_EvidenceUnknownAndAbsent(t *testing.T) {
 	}
 }
 
+// A legacy app has no HelmRelease to decide from: a dependency whose
+// component runs on the cluster is taken as used, one that does not stays
+// undecided.
+func TestAssumeLiveUses_OnlyForDependenciesThatRunOnTheCluster(t *testing.T) {
+	cfg := usesCatalog(
+		config.Use{Dependency: "postgres", Values: []string{"pg.enabled"}},
+		config.Use{Dependency: "connectors", Values: []string{"conn.enabled"}},
+	)
+	legacy := &Entry{Name: "virtualizer"}
+	migrated := &Entry{Name: "migrated", HelmReleaseSpec: helmSpec(map[string]any{"pg": map[string]any{"enabled": false}})}
+	components := Components{
+		"virtualizer": {legacy, migrated},
+		"postgres":    {{Name: "psql"}},
+	}
+	opts := Options{Config: cfg}
+	scanUses(opts, components)
+	assumeLiveUses(opts, components)
+
+	if !legacy.DepAssumed["postgres"] || legacy.DepUnknown["postgres"] {
+		t.Errorf("postgres runs live: DepAssumed=%v DepUnknown=%v, want assumed and decided", legacy.DepAssumed, legacy.DepUnknown)
+	}
+	if legacy.DepAssumed["connectors"] || !legacy.DepUnknown["connectors"] {
+		t.Errorf("connectors is not live: DepAssumed=%v DepUnknown=%v, want it undecided", legacy.DepAssumed, legacy.DepUnknown)
+	}
+	if len(migrated.DepAssumed) != 0 {
+		t.Errorf("a HelmRelease already decided its dependencies, got DepAssumed=%v", migrated.DepAssumed)
+	}
+	if got := legacy.enabledReason("postgres"); !strings.Contains(got, "assumed") {
+		t.Errorf("enabledReason = %q, want the assumption said", got)
+	}
+}
+
+func TestComplete_AddsEnabledToALiveDependencyOnAssumptionAndKeepsAHandWrittenFalse(t *testing.T) {
+	assumed := Components{"virtualizer": {{Name: "virtualizer", DepAssumed: map[string]bool{"postgres": true}}}}
+	r, out := complete(t, reload(t, []byte(usesTenant)), assumed, Live{}, CompleteOptions{})
+	if !contains(r.Added, "config.dependencies.postgres.enabled: true (assumed: it runs on the cluster") {
+		t.Errorf("Added = %v, want postgres enabled on assumption", r.Added)
+	}
+	if !strings.Contains(out, "              name: psql\n              enabled: true\n") {
+		t.Errorf("enabled not written:\n%s", out)
+	}
+
+	// The operator's false beats an assumption, silently.
+	src := strings.Replace(usesTenant, "              name: psql\n", "              name: psql\n              enabled: false\n", 1)
+	r, out = complete(t, reload(t, []byte(src)), assumed, Live{}, CompleteOptions{})
+	if out != src || contains(r.Warnings, "enabled is false") {
+		t.Errorf("a hand-written false was touched or warned about: %v\n%s", r.Warnings, out)
+	}
+}
+
 func TestUsesRules_OldCatalogInheritsTheSeedsRules(t *testing.T) {
 	old := &config.Catalog{Types: []config.ComponentType{
 		{Type: "rocket", Component: "rocket", Chart: &config.Chart{Path: "rocket"}},

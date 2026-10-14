@@ -156,7 +156,20 @@ func SeedCatalog() Catalog {
 					{Key: annService, Operator: OpIn, Values: []string{"connectors-dfs", "connectors-rdbms"}},
 				}},
 			},
-			Chart:   &Chart{Path: "dg-agent"},
+			Chart: &Chart{Path: "dg-agent"},
+			// What a legacy agent was configured with says which GitOps flavor it
+			// is: the storage-type overlay (hdfs, s3) is the entry's config.type,
+			// and keos-apps has none for the other extractor types (the legacy
+			// POSTGRESQL agents), which `tenant import` therefore leaves out
+			// instead of deploying an S3 agent under their name. The governance
+			// pgbouncer is the host's first label; the governance PgCluster is
+			// named after the database it serves (postgreskeos, as in every
+			// reference tenant).
+			ConfigFromEnv: []EnvConfig{
+				{Key: "type", Env: "CUSTOM_SERVICE_EXTRACTOR_TYPE", Values: map[string]string{"HDFS": "hdfs", "S3": "s3"}},
+				{Key: "dependencies.governancePgbouncer.name", Env: "DATASTORE_HOST", Pattern: "^([^.]+)"},
+				{Key: "dependencies.governancePostgres.name", Env: "DATASTORE_DATABASE"},
+			},
 			Prepare: "prepare-dg-agent",
 			Notes:   "prepare-dg-agent runs automatically before migrating: removes the legacy agent Deployment (the chart gives it a new, immutable selector under the same name).",
 		},
@@ -180,12 +193,17 @@ func SeedCatalog() Catalog {
 			Rset:      rsetDatastores,
 			// The model pins the pginternal flavor, matching ValuesRoot; the
 			// chart's pgmd5/pgtls flavors would be their own types.
-			Match:     cctMatch(kindDeployment, "bdl", "datarest-pginternal"),
-			Chart:     &Chart{Path: "bdl-datarest", ValuesRoot: "datarestPgInternal"},
-			MemoryEnv: []string{"VR_POD_MEMORY_LIMIT"},
-			Prepare:   "prepare-datarest",
-			Notes:     "prepare-datarest runs automatically before migrating: removes the legacy ingress that would collide with the GitOps-managed one.",
-			Exclude:   []string{"spec.values.datarestPgInternal.general.identity.approlename"},
+			Match: cctMatch(kindDeployment, "bdl", "datarest-pginternal"),
+			Chart: &Chart{Path: "bdl-datarest", ValuesRoot: "datarestPgInternal"},
+			// The chart's pginternal flavor sets JDBC_DATABASE from the
+			// postgresDatabase config (dependencies.postgres.database), whose
+			// template default is another database: the legacy value is what the
+			// app is connected to.
+			ConfigFromEnv: []EnvConfig{{Key: "postgresDatabase", Env: "JDBC_DATABASE"}},
+			MemoryEnv:     []string{"VR_POD_MEMORY_LIMIT"},
+			Prepare:       "prepare-datarest",
+			Notes:         "prepare-datarest runs automatically before migrating: removes the legacy ingress that would collide with the GitOps-managed one.",
+			Exclude:       []string{"spec.values.datarestPgInternal.general.identity.approlename"},
 		},
 		{
 			Type:      "virtualizer",
@@ -219,6 +237,29 @@ func SeedCatalog() Catalog {
 			Prepare:   "prepare-discovery",
 			Notes:     "prepare-discovery runs automatically before migrating: removes the legacy Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress stays.",
 			Exclude:   []string{"spec.values.discovery.environment.approlename"},
+		},
+		{
+			// CCT deployed it as the connectors-management service; the GitOps
+			// component is "connectors" (keos-apps fixes the HelmRelease's name to
+			// it, and the other components' dependencies point at the entry of
+			// that name), so the entry drops the legacy "-management" suffix.
+			// The rset names the Kustomization apps-<entry>.
+			//
+			// No siblings, no chart.uses/enabledBy (the ResourceSet gates nothing
+			// on it) and no prepare step: the chart's Deployment gets a new,
+			// immutable selector under the same name, so the legacy one has to
+			// go before the release is applied (see Notes). The exclusions are
+			// not reviewed yet, so none are set.
+			Type:          "connectors",
+			Name:          "Connectors",
+			Component:     "connectors",
+			Rset:          rsetApps,
+			Match:         cctMatch(kindDeployment, "connectors-management", "connectors-management-service-default"),
+			Entry:         `{{ .Live.Name | trimSuffix "-management" }}`,
+			Object:        "connectors",
+			Kustomization: "apps-{{ .Entry }}",
+			Chart:         &Chart{Path: "connectors"},
+			Notes:         "No prepare step exists for connectors yet, and its patch exclusions have not been reviewed: before `apps migrate connectors`, review `apps diff connectors --view patch`, and remove the legacy Deployment by hand (the chart gives it a new, immutable selector under the same name).",
 		},
 		{
 			Type:      "datamarket-agent",

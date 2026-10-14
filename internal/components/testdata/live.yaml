@@ -242,6 +242,34 @@ metadata:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: connectors-management
+  namespace: stratio-apps
+  labels:
+    app.kubernetes.io/component: connectors-management
+    cct.stratio.com/application_id: connectors-management.stratio-apps
+  annotations:
+    cct.stratio.com/application_id: connectors-management.stratio-apps
+    cct.stratio.com/application_model: connectors-management-service-default
+    cct.stratio.com/application_name: connectors-management
+    cct.stratio.com/application_service: connectors-management
+    cct.stratio.com/application_tenant: stratio
+---
+# Its same-named Service carries the same CCT annotations: only the
+# Deployment is the component.
+apiVersion: v1
+kind: Service
+metadata:
+  name: connectors-management
+  namespace: stratio-apps
+  annotations:
+    cct.stratio.com/application_model: connectors-management-service-default
+    cct.stratio.com/application_name: connectors-management
+    cct.stratio.com/application_service: connectors-management
+    cct.stratio.com/application_tenant: stratio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: dg-hdfs-agent
   namespace: stratio-datastores
   labels:

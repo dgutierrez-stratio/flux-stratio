@@ -275,8 +275,8 @@ func TestResolveAll_WithoutTenantDocResolvesEverything(t *testing.T) {
 	if err != nil || len(unresolved) > 0 {
 		t.Fatalf("ResolveAll returned error %v, unresolved %v", err, unresolved)
 	}
-	if len(apps) != 20 {
-		t.Errorf("len(apps) = %d, want 20 (one per stratio-tenant instance)", len(apps))
+	if len(apps) != 21 {
+		t.Errorf("len(apps) = %d, want 21 (one per stratio-tenant instance)", len(apps))
 	}
 }
 
@@ -484,10 +484,10 @@ func TestResolve_SiblingNotesOnlyForTheResolvedType(t *testing.T) {
 func TestResolve_ManagedButUncataloguedChartExplained(t *testing.T) {
 	opts := baseOptions(t)
 	opts.Objects = append(opts.Objects,
-		managedDeployment("connectors", "stratio-apps", "connectors", "stratio"),
-		helmRelease("connectors", "stratio-apps", "connectors"))
-	_, err := Resolve(opts, "connectors")
-	if err == nil || !strings.Contains(err.Error(), "rendered by HelmRelease stratio-apps/connectors") {
+		managedDeployment("spark-history", "stratio-apps", "spark-history", "stratio"),
+		helmRelease("spark-history", "stratio-apps", "spark-history"))
+	_, err := Resolve(opts, "spark-history")
+	if err == nil || !strings.Contains(err.Error(), "rendered by HelmRelease stratio-apps/spark-history") {
 		t.Errorf("Resolve error = %v, want it to say the object is already Helm-managed", err)
 	}
 }

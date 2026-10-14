@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"text/template"
 
@@ -91,9 +92,38 @@ type ComponentType struct {
 	// diff` warns when the migrated container's memory limit is below one.
 	// A -Xmx<N>[kmg] in any env value is checked whatever its name.
 	MemoryEnv []string `yaml:"memoryEnv,omitempty"`
+	// ConfigFromEnv derives tenant-file config of an instance from the env of
+	// its legacy workload — what a legacy app was configured with says which
+	// GitOps flavor it is (a governance agent's storage type) and what it
+	// points at (its governance pgbouncer). `tenant import` writes them on the
+	// entry, so the ResourceSet renders the right overlay under the right name.
+	ConfigFromEnv []EnvConfig `yaml:"configFromEnv,omitempty"`
 	// Notes is a free-text hint shown to the operator, e.g. alongside a
 	// Prepare step that blocks migration.
 	Notes string `yaml:"notes,omitempty"`
+}
+
+// EnvConfig is one tenant-file config value read off an instance's primary
+// workload (a Deployment, StatefulSet or DaemonSet): a container env var set
+// to a literal value.
+type EnvConfig struct {
+	// Key is the entry config it fills: "type" (the storage type),
+	// "dependencies.<key>.name" (the name of that dependency), or the name of
+	// any other config field the component's ResourceSet reads
+	// (postgresDatabase).
+	Key string `yaml:"key"`
+	// Env is the name of the env var to read. Absent or empty on the workload:
+	// nothing is written.
+	Env string `yaml:"env"`
+	// Values maps the env var's value (any case) to the config value written.
+	// When set, a live value it does not list means the app has no GitOps
+	// equivalent: `tenant import` leaves it out and says so, rather than write
+	// an entry that would deploy something else under its name.
+	Values map[string]string `yaml:"values,omitempty"`
+	// Pattern is a regular expression with one capture group selecting the part
+	// of the value to write (the host's first label, "([^.]+)"). Exclusive with
+	// Values. A value it does not match writes nothing.
+	Pattern string `yaml:"pattern,omitempty"`
 }
 
 // Chart locates a chart-mode type's Helm chart source.
@@ -392,6 +422,12 @@ func (c Catalog) validate() error {
 			}
 		}
 
+		for j, c := range t.ConfigFromEnv {
+			for _, p := range c.validate(fmt.Sprintf("configFromEnv[%d]", j)) {
+				add("%s", p)
+			}
+		}
+
 		for j, name := range t.RequiredConfig {
 			if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " .") {
 				add("requiredConfig[%d]: %q is not a config field name", j, name)
@@ -436,6 +472,71 @@ func (c Catalog) validate() error {
 		msg += "\n  - " + p
 	}
 	return fmt.Errorf("%s", msg)
+}
+
+// envConfigKey is what an EnvConfig key may be: the storage type, one
+// dependency's name, or a plain config field name.
+var envConfigKey = regexp.MustCompile(`^(dependencies\.[A-Za-z0-9]+\.name|[A-Za-z][A-Za-z0-9]*)$`)
+
+// DependencyKey returns the dependency an EnvConfig key names
+// ("dependencies.governancePgbouncer.name" -> "governancePgbouncer"), or "" for
+// another key.
+func (c EnvConfig) DependencyKey() string {
+	if rest, ok := strings.CutPrefix(c.Key, "dependencies."); ok {
+		return strings.TrimSuffix(rest, ".name")
+	}
+	return ""
+}
+
+// Field returns the config field an EnvConfig key names ("postgresDatabase"),
+// or "" for the storage type and a dependency's name.
+func (c EnvConfig) Field() string {
+	if c.Key == "type" || c.DependencyKey() != "" {
+		return ""
+	}
+	return c.Key
+}
+
+// Apply returns the config value c derives from the env var's value, and
+// whether the value is one the catalog knows: ok is false only when Values is
+// set and does not list it. A Pattern that does not match yields "" with ok.
+func (c EnvConfig) Apply(value string) (derived string, ok bool) {
+	if len(c.Values) > 0 {
+		for live, config := range c.Values {
+			if strings.EqualFold(live, strings.TrimSpace(value)) {
+				return config, true
+			}
+		}
+		return "", false
+	}
+	if c.Pattern != "" {
+		if m := regexp.MustCompile(c.Pattern).FindStringSubmatch(value); len(m) == 2 {
+			return m[1], true
+		}
+		return "", true
+	}
+	return strings.TrimSpace(value), true
+}
+
+func (c EnvConfig) validate(field string) []string {
+	var problems []string
+	if !envConfigKey.MatchString(c.Key) {
+		problems = append(problems, fmt.Sprintf("%s.key: %q must be \"type\", \"dependencies.<key>.name\" or a config field name", field, c.Key))
+	}
+	if strings.TrimSpace(c.Env) == "" || strings.ContainsAny(c.Env, " =") {
+		problems = append(problems, fmt.Sprintf("%s.env: %q is not an env var name", field, c.Env))
+	}
+	if len(c.Values) > 0 && c.Pattern != "" {
+		problems = append(problems, field+": values and pattern are exclusive")
+	}
+	if c.Pattern != "" {
+		if re, err := regexp.Compile(c.Pattern); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.pattern: %v", field, err))
+		} else if re.NumSubexp() != 1 {
+			problems = append(problems, fmt.Sprintf("%s.pattern: %q needs exactly one capture group", field, c.Pattern))
+		}
+	}
+	return problems
 }
 
 // validate reports m's problems, each prefixed with field.

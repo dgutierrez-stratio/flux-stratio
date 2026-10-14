@@ -67,6 +67,32 @@ func scanUses(opts Options, components Components) {
 	}
 }
 
+// assumeLiveUses settles the dependencies scanUses left undecided for want of
+// a HelmRelease: one whose component runs on the cluster is taken as used
+// (`enabled: true`), since an app that has the dependency available and was
+// installed together with it almost always uses it, and the ResourceSets
+// gate on `enabled` — left off, the dependent would not even wait for it.
+// It is a weaker ground than a HelmRelease value, and said so. A dependency
+// with no live component stays undecided and is warned about. It runs before
+// the skeleton expansion, so a placeholder never counts as running.
+func assumeLiveUses(opts Options, components Components) {
+	for key, rules := range usesRules(opts.Config) {
+		for _, entry := range components[key] {
+			for _, rule := range rules {
+				if !entry.DepUnknown[rule.Dependency] || len(components[rule.Dependency]) == 0 {
+					continue
+				}
+				delete(entry.DepUnknown, rule.Dependency)
+				if entry.DepAssumed == nil {
+					entry.DepAssumed = map[string]bool{}
+				}
+				entry.DepAssumed[rule.Dependency] = true
+				opts.note("%s: dependency %q is assumed in use: it runs on the cluster and there is no HelmRelease to say otherwise", entry.Name, rule.Dependency)
+			}
+		}
+	}
+}
+
 // useEvidence returns the first of paths (dotted, under spec.values) that is
 // set to something other than null, false, zero or a string spelling of off
 // ("", "false", "0", "no", "off", any case), or "" when none is.

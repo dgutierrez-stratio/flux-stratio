@@ -229,7 +229,25 @@ func checkCatalog(opts Options) (*config.Catalog, Check) {
 	for _, msg := range missingSeedPrepares(cat) {
 		opts.Log.Warningf("%s", msg)
 	}
+	for _, msg := range missingSeedTypes(cat) {
+		opts.Log.Warningf("%s", msg)
+	}
 	return cat, Check{Name: CheckCatalog, OK: true, Detail: fmt.Sprintf("%d type(s)", len(cat.Types))}
+}
+
+// missingSeedTypes names the seed's types the catalog lacks: a catalog.yaml
+// seeded before a type existed (connectors) silently leaves that legacy app
+// unrecognized, so `tenant import` leaves its component out of the file and
+// the components that depend on it unresolved. A type removed on purpose
+// shows up here too; it is a warning, never an error.
+func missingSeedTypes(cat *config.Catalog) []string {
+	var out []string
+	for _, seed := range config.SeedCatalog().Types {
+		if cat.Find(seed.Type) == nil {
+			out = append(out, fmt.Sprintf("catalog has no type %q (component %q), the seed does: its legacy app is not recognized by `tenant import` or `apps`; re-run `flux stratio config init --force` to re-seed, or add the type", seed.Type, seed.Component))
+		}
+	}
+	return out
 }
 
 // missingSeedPrepares names the catalog types that declare no prepare step

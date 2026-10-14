@@ -16,7 +16,7 @@ var helmReleaseGVK = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Ve
 
 // scanHelmReleases is the secondary discovery pass: for every HelmRelease
 // in a tenant namespace, if its chart's instance is already discovered
-// (by scanDeployments) under the same name, this only enriches that
+// (by scanClassified or scanCRDs) under the same name, this only enriches that
 // entry's storage type and HelmReleaseSpec; if it isn't discovered at all
 // (a HelmRelease with no backing Deployment — unusual, but possible), a
 // new entry is added. A no-op, not an error, when the HelmRelease CRD
@@ -79,4 +79,12 @@ func inferStorageType(spec map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// chartOwner resolves a chart name to its owning component key, returning
+// "" if unknown or ambiguous — an ambiguous chart (e.g. "pgbackup", shared
+// by two component keys) can't be safely discovered this way and is
+// skipped rather than guessed at (see internal/catalog.ChartMapping).
+func chartOwner(cat *catalog.Catalog, chartName string) string {
+	return cat.Charts[chartName].Key
 }

@@ -277,6 +277,22 @@ func TestComplete_UndeclaredLiveComponentUnderAKeyThatHasAnotherEntryWarns(t *te
 	}
 }
 
+// Several instances of one component the cluster runs are not a rename of one
+// another: the possible-rename warning is for an entry the file declared.
+func TestComplete_SeveralLiveInstancesAreNotReportedAsRenames(t *testing.T) {
+	scanned := Components{"connectors": {
+		{Name: "connectors-a", Deps: map[string]string{}},
+		{Name: "connectors-b", Deps: map[string]string{}},
+	}}
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+	if !strings.Contains(got, "name: connectors-a") || !strings.Contains(got, "name: connectors-b") {
+		t.Errorf("both instances should be added:\n%s", got)
+	}
+	if contains(r.Warnings, "already declares") {
+		t.Errorf("Warnings = %v, want no rename warning", r.Warnings)
+	}
+}
+
 func TestComplete_DependencyResolvedFromScanOrReported(t *testing.T) {
 	scanned := Components{"virtualizer": {{Name: "virtualizer"}}, "pgbouncer": {{Name: "pool-psql"}}}
 	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
@@ -294,6 +310,167 @@ func TestComplete_DependencyResolvedFromScanOrReported(t *testing.T) {
 	deps, _ = entryConfigOf(t, got, "virtualizer", "virtualizer")["dependencies"].(map[string]any)
 	if pg, _ := deps["postgres"].(map[string]any); pg["name"] != "psql" {
 		t.Errorf("an existing dependency name was changed: %v\n%s", deps, got)
+	}
+}
+
+// A component the scan found but the file lacks is appended with the
+// dependencies the scan could not resolve; the file may declare them (the
+// operator added the target by hand), and the run must see that.
+func TestComplete_NewEntryDependencyResolvedFromTheFile(t *testing.T) {
+	// As Scan leaves a legacy pgbouncer whose postgres it could not resolve.
+	scanned := Components{"pgbouncer": {{Name: "pool-psql", Deps: map[string]string{"postgres": ""}}}}
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+
+	deps, _ := entryConfigOf(t, got, "pgbouncer", "pool-psql")["dependencies"].(map[string]any)
+	if pg, _ := deps["postgres"].(map[string]any); pg["name"] != "psql" {
+		t.Errorf("postgres not resolved from the file's psql: dependencies = %v\n%s", deps, got)
+	}
+	if contains(r.Warnings, `dependency "postgres" could not be resolved`) {
+		t.Errorf("Warnings = %v, want no unresolved postgres: the file declares it", r.Warnings)
+	}
+}
+
+// ...or appended in the same run.
+func TestComplete_NewEntryDependencyResolvedFromAnotherNewEntry(t *testing.T) {
+	const file = `apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+spec:
+  defaultValues:
+    tenantName: stratio
+    size: S
+    sopsSecretProvided: false
+    internalS3BucketName: ""
+    userEmail: ""
+    userId: ""
+    userName: ""
+    components: []
+`
+	scanned := Components{
+		"pgbouncer": {{Name: "pool-psql", Deps: map[string]string{"postgres": ""}}},
+		"postgres":  {{Name: "psql", Deps: map[string]string{}}},
+	}
+	_, got := complete(t, reload(t, []byte(file)), scanned, Live{}, CompleteOptions{})
+	deps, _ := entryConfigOf(t, got, "pgbouncer", "pool-psql")["dependencies"].(map[string]any)
+	if pg, _ := deps["postgres"].(map[string]any); pg["name"] != "psql" {
+		t.Errorf("postgres not resolved from the entry added next to it: dependencies = %v\n%s", deps, got)
+	}
+}
+
+func TestComplete_NewEntryDependencyStillUnresolvedIsReportedNotWritten(t *testing.T) {
+	scanned := Components{"pgbouncer": {{Name: "pool-psql", Deps: map[string]string{"postgres": ""}}}}
+	const file = `apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+spec:
+  defaultValues:
+    tenantName: stratio
+    size: S
+    sopsSecretProvided: false
+    internalS3BucketName: ""
+    userEmail: ""
+    userId: ""
+    userName: ""
+    components: []
+`
+	r, got := complete(t, reload(t, []byte(file)), scanned, Live{}, CompleteOptions{})
+	if !contains(r.Warnings, `components.pgbouncer[pool-psql]: dependency "postgres" could not be resolved`) {
+		t.Errorf("Warnings = %v, want the unresolved postgres reported once", r.Warnings)
+	}
+	if strings.Contains(got, `name: ""`) {
+		t.Errorf("an unresolved dependency was written as name: \"\":\n%s", got)
+	}
+}
+
+func TestComplete_SeveralCandidatesPreferTheFilesChoiceAndWarn(t *testing.T) {
+	// The scan finds two postgres; the file declares only psql, which is one of them.
+	scanned := Components{
+		"postgres":  {{Name: "other", Deps: map[string]string{}}, {Name: "psql", Deps: map[string]string{}}},
+		"pgbouncer": {{Name: "pool-psql", Deps: map[string]string{"postgres": ""}}},
+	}
+	r, got := complete(t, loadDoc(t, "eosdev.yaml"), scanned, Live{}, CompleteOptions{})
+	deps, _ := entryConfigOf(t, got, "pgbouncer", "pool-psql")["dependencies"].(map[string]any)
+	if pg, _ := deps["postgres"].(map[string]any); pg["name"] != "psql" {
+		t.Errorf("the entry both the scan and the file have was not preferred: %v", deps)
+	}
+	if !contains(r.Warnings, `dependency "postgres" has 2 candidates (psql, other); used "psql"`) {
+		t.Errorf("Warnings = %v, want the candidates listed", r.Warnings)
+	}
+}
+
+func TestResolveDep_Order(t *testing.T) {
+	scanned := Components{"k": {{Name: "c"}, {Name: "a"}, {Name: "d"}}}
+	byKey := map[string][]string{"k": {"b", "a", "a", "c"}}
+	got := resolveDep("k", "", scanned, byKey)
+	// in both lists (file order: a, c), then the file's alone (b), then the scan's alone (d)
+	want := []string{"a", "c", "b", "d"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("resolveDep = %v, want %v", got, want)
+	}
+	if got := resolveDep("none", "", scanned, byKey); len(got) != 0 {
+		t.Errorf("resolveDep for an unknown key = %v, want none", got)
+	}
+}
+
+const gitopsOnlyBase = `apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+spec:
+  defaultValues:
+    tenantName: stratio
+    size: S
+    sopsSecretProvided: false
+    internalS3BucketName: ""
+    userEmail: ""
+    userId: ""
+    userName: ""
+    components:
+      postgres:
+      - name: psql%s
+`
+
+// A component only GitOps has (no catalog type recognises it on a legacy
+// cluster) that something waits on unconditionally is added, with a warning,
+// and its dependent is pointed at it.
+func TestComplete_GitOpsOnlyDependencyIsScaffolded(t *testing.T) {
+	doc := reload(t, []byte(strings.Replace(gitopsOnlyBase, "%s", "", 1)))
+	r, got := complete(t, doc, Components{}, Live{}, CompleteOptions{})
+
+	if !strings.Contains(got, "      pgbackuprepository:\n      - name: pgbackuprepository") {
+		t.Errorf("the GitOps-only entry was not added:\n%s", got)
+	}
+	deps, _ := entryConfigOf(t, got, "postgres", "psql")["dependencies"].(map[string]any)
+	if pg, _ := deps["pgbackuprepository"].(map[string]any); pg["name"] != "pgbackuprepository" {
+		t.Errorf("postgres does not depend on it: %v\n%s", deps, got)
+	}
+	if !contains(r.Warnings, "components.pgbackuprepository[pgbackuprepository]: GitOps-only") || !contains(r.Warnings, "components.postgres[psql] depends on it") {
+		t.Errorf("Warnings = %v, want the GitOps-only entry explained", r.Warnings)
+	}
+
+	r2, second := complete(t, reload(t, []byte(got)), Components{}, Live{}, CompleteOptions{})
+	if !r2.Empty() || second != got {
+		t.Errorf("second run added %v, want nothing", r2.Added)
+	}
+}
+
+// What the catalog can discover is never invented: no virtualizer dependency
+// on connectors scaffolds one, since the cluster would have it if it ran.
+func TestComplete_GitOpsOnlyScaffoldSkipsWhatTheCatalogCanDiscover(t *testing.T) {
+	doc := reload(t, []byte(strings.Replace(gitopsOnlyBase, "      postgres:\n      - name: psql%s", "      virtualizer:\n      - name: virtualizer%s", 1)))
+	_, got := complete(t, doc, Components{}, Live{}, CompleteOptions{})
+	if strings.Contains(got, "      connectors:") {
+		t.Errorf("a connectors entry was invented:\n%s", got)
+	}
+}
+
+func TestComplete_GitOpsOnlyScaffoldRespectsACommentedOutBlock(t *testing.T) {
+	file := strings.Replace(gitopsOnlyBase, "%s", "", 1) + "      # pgbackuprepository:\n      # - name: pgbackuprepository\n"
+	r, got := complete(t, reload(t, []byte(file)), Components{}, Live{}, CompleteOptions{})
+	if strings.Contains(got, "\n      pgbackuprepository:") || contains(r.Warnings, "GitOps-only") {
+		t.Errorf("a commented-out block was scaffolded over:\n%s\n%v", got, r.Warnings)
 	}
 }
 

@@ -57,6 +57,7 @@ func TestClassify_SeededCatalogAgainstRealLegacyObjects(t *testing.T) {
 
 	want := []string{
 		"bdl-datarest stratio-datastores/dg-datarest-pgi -> dg-datarest-pgi",
+		"connectors stratio-apps/connectors-management -> connectors",
 		"datamarket-agent stratio-datastores/datamarket-agent -> governance-datamarket-agent",
 		"dg-agent stratio-datastores/dg-hdfs-agent -> dg-hdfs-agent",
 		"dg-agent stratio-datastores/dg-postgresql-internal-agent -> dg-postgresql-internal-agent",

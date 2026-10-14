@@ -2,6 +2,43 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`apps diff`/`apps migrate` say why a legacy variable isn't rendered, and stop calling probe variables lost.** The
+  Command Center injected a descriptor's probe settings as `{LIVENESS,READINESS,STARTUP}_PROBE_*` environment
+  variables, and a chart sets them on the container, so on eosdev rocket (9 variables) and both gosec agents (8 each)
+  were reported as "values are lost after migration" although the chart carries them. A probe variable whose rendered
+  workload has the same value in the matching probe field is now listed apart, as `carried natively by the chart` (a
+  note, not a warning, so it no longer stops `--yes`); one whose chart probe differs stays in the lost list and its WHY
+  names the chart's value (`the chart sets readinessProbe.failureThreshold natively, to 1 (live 3)`). `NOT_USED`, a
+  placeholder name shared by unrelated descriptor parameters, gets its own WHY. (`internal/diff/nativeprobe.go`,
+  `ChartDiffResult.Native`.) Context: `docs/TASK-11-chart-variables-vs-cct-descriptor.md`.
+* **`tenant import` scaffolds a legacy tenant file that validates.** On a cluster where the tenant's apps are still the
+  CCT deployment, the import found only the components whose name equals a chart's or that have a custom resource, and
+  the validation then failed (`apps-psql waits on stratio-datastores/apps-`, ...). Fixed at the source, in four parts:
+  * *Discovery goes through the component catalog.* The live workloads of the tenant's namespaces are classified by
+    what CCT stamped on them (`internal/components`, the classifier `apps` uses) and each becomes the entry its type's
+    `entry` template names, so `connectors-management` is `connectors`, `genai-litellm` stays `genai-litellm`,
+    a datamarket agent `governance-datamarket-agent`, and the three legacy governance agents are found. The
+    Deployment-name heuristic is gone, as is its namespace-suffix fallback. A new seeded type, `connectors`, covers
+    `connectors-management` (20 types); `doctor` now warns when `catalog.yaml` lacks a type the seed has.
+  * *`configFromEnv`* (new catalog field, seeded on `dg-agent` and `bdl-datarest`) derives entry config from a legacy workload's env: the
+    agent's `type` from `CUSTOM_SERVICE_EXTRACTOR_TYPE` (`HDFS`/`S3`; without it the ResourceSet would render the S3
+    overlay under `dg-hdfs-agent`) and its governance pgbouncer/postgres from `DATASTORE_HOST`/`DATASTORE_DATABASE`. An
+    agent whose value has no GitOps overlay (the legacy `POSTGRESQL` ones) is left out, with a warning, instead of
+    imported as something else; any config field the ResourceSet reads can be derived too (datarest's `postgresDatabase` from
+    `JDBC_DATABASE`, which the template defaulted to `governance` while the legacy app is connected to `data`), and an existing
+    value that differs from the legacy app's is kept with a warning. Among several instances of a dependency, the one of the dependent's storage type is chosen;
+    a guess is warned about with every candidate, also for new entries (it was silent).
+  * *Complete resolves dependencies against the file too.* A component added by the run used to be written without
+    the dependencies the scan could not resolve, even when the file declared the target (hand-added `connectors`,
+    `dgAgent`, ...), so the same `apps-` waits remained. Names now come from the scan and the file together. A
+    possible-rename warning no longer fires for several live instances added in one run, and a failed entry no longer
+    leaves its lines in the report.
+  * *`enabled` and GitOps-only components.* With no HelmRelease to read, a dependency whose component runs on the cluster
+    is written `enabled: true`, saying it was assumed (rocket's `virtualizer` decides whether its postrequisites are
+    rendered, which `apps-use-case-postrequisites-*` waits on); an operator's `false` is kept. A component only GitOps
+    has that something waits on unconditionally (postgres' `pgbackuprepository`) is added with a warning that applying
+    it creates it.
+
 * **`tenant import` completes a tenant file whose `components` is empty.** A file declaring `components: []` (or `{}`, or
   a bare `components:`, with or without a trailing comment) failed with `spec.defaultValues.components is not a block
   mapping with entries`, and one with no `components` key at all with `tenant file has no spec.defaultValues.components`.
