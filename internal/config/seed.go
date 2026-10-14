@@ -181,6 +181,8 @@ func SeedCatalog() Catalog {
 			Match:     cctMatch(kindDeployment, "bdl", "agent-bdl-default"),
 			Chart:     &Chart{Path: "eureka-agent"},
 			MemoryEnv: []string{"VR_POD_MEMORY_LIMIT"},
+			Prepare:   "prepare-eureka-agent",
+			Notes:     "prepare-eureka-agent runs automatically before migrating: removes the legacy eureka-agent Deployment (the chart gives it a new, immutable selector under the same name); nothing else of the app is touched.",
 			Exclude: []string{
 				"spec.values.eureka.general.externalConfiguration.governanceSettings",
 				"spec.values.eureka.general.identity",
@@ -202,7 +204,7 @@ func SeedCatalog() Catalog {
 			ConfigFromEnv: []EnvConfig{{Key: "postgresDatabase", Env: "JDBC_DATABASE"}},
 			MemoryEnv:     []string{"VR_POD_MEMORY_LIMIT"},
 			Prepare:       "prepare-datarest",
-			Notes:         "prepare-datarest runs automatically before migrating: removes the legacy ingress that would collide with the GitOps-managed one.",
+			Notes:         "prepare-datarest runs automatically before migrating: removes the legacy ingress that would collide with the GitOps-managed one, then the legacy Deployment (the chart keeps its name but gives it a new, immutable selector); the Service and everything else stay.",
 			Exclude:       []string{"spec.values.datarestPgInternal.general.identity.approlename"},
 		},
 		{
@@ -390,6 +392,8 @@ func SeedCatalog() Catalog {
 				{Dependency: "genai", Values: []string{"rocketCommon.general.genAI.genaiEnabled"}},
 				{Dependency: "virtualizer", Values: []string{"rocketCommon.general.catalog.virtualizerHost"}},
 			}},
+			Prepare: "prepare-rocket",
+			Notes:   "prepare-rocket runs automatically before migrating: removes the legacy rocket Deployment and the Deployments its server created (rocket-catalog, -debug, -externalservice and -validator, owned by it; the new server recreates them), the chart having changed rocket's immutable selector. rocket-catalog-standalone, the Ingresses and the Services stay.",
 			Exclude: []string{
 				"spec.values.rocketServer.settings.governanceIntegration.crossdataCatalogGovernanceUri",
 				"spec.values.rocketServer.settings.governanceIntegration.crossdataCatalogGovernancePost",
@@ -412,6 +416,8 @@ func SeedCatalog() Catalog {
 				{Dependency: "opensearch", Values: []string{"configuration.general.genaiSettings.genaiLayerConf.genaiAPIIntegration.genaiChainsConf.sqlChainConf.sqlChainOpensearchEnabled"}},
 				{Dependency: "litellm", Values: []string{"configuration.general.genaiSettings.genaiLayerConf.litellmIntegration.litellmUrl"}},
 			}},
+			Prepare: "prepare-intelligence",
+			Notes:   "prepare-intelligence runs automatically before migrating: removes the legacy intelligence Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress intelligence-rocket.<domain> stays (the chart's admin ingress has another host).",
 			Exclude: []string{
 				"spec.values.configuration.security.vault.multiuser.approlename",
 				"spec.values.configuration.general.genaiSettings.genaiLayerConf.genaiAPIIntegration.genaiChainsConf.genaiChainsGovernanceUrl",

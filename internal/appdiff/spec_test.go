@@ -248,7 +248,7 @@ func TestDiff_ChartMode_SelectorDifference(t *testing.T) {
 		want    diff.SpecSeverity
 	}{
 		"no prepare step":           {"", diff.SpecRisk},
-		"a step that only edits":    {"prepare-datarest", diff.SpecRisk},
+		"a step that only edits":    {"prepare-datamarket-agent", diff.SpecRisk},
 		"a step that deletes it":    {"prepare-dlc", diff.SpecInfo},
 		"an unknown step is no one": {"nope", diff.SpecRisk},
 	} {

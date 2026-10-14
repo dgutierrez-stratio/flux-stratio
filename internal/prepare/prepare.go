@@ -319,6 +319,9 @@ var Steps = []Step{
 	stepVirtualizer,
 	stepDgAgent,
 	stepDiscovery,
+	stepEurekaAgent,
+	stepIntelligence,
+	stepRocket,
 	stepLitellm,
 }
 
@@ -394,6 +397,16 @@ func planDeleteLegacy(ctx context.Context, opts Options, gvks ...schema.GroupVer
 		}
 	}
 	return ops, nil
+}
+
+// ownedBy reports whether one of obj's ownerReferences names uid.
+func ownedBy(obj *unstructured.Unstructured, uid types.UID) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.UID == uid {
+			return true
+		}
+	}
+	return false
 }
 
 // deleteOp deletes obj — only that very object (UID precondition), in

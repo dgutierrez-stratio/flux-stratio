@@ -188,6 +188,37 @@ func TestEnsurePrepared_ConfirmedRunsExactlyThePlan(t *testing.T) {
 	}
 }
 
+// TestEnsurePrepared_DatarestDeletesTheIngressAndTheDeployment: the legacy
+// Deployment goes with the Ingress, after the backup, and the plan names both
+// (a Service of the same app stays).
+func TestEnsurePrepared_DatarestDeletesTheIngressAndTheDeployment(t *testing.T) {
+	dep := &unstructured.Unstructured{Object: map[string]any{}}
+	dep.SetGroupVersionKind(gvkDeployment)
+	dep.SetNamespace("stratio-datastores")
+	dep.SetName("dg-datarest-pgi")
+	dep.SetUID("uid-dep")
+	dep.SetLabels(map[string]string{"cct.stratio.com/application_id": "dg-datarest-pgi.stratio-datastores"})
+
+	r, err := runPrepare(t, datarestApp, noRead{t}, true, false, nil, nil, legacyIngress(), dep)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	e := flat(r.stderr.String())
+	for _, row := range []string{"dg-datarest-pgi-admin.eosdev.int delete Ingress stratio-datastores", "dg-datarest-pgi delete Deployment stratio-datastores"} {
+		if !strings.Contains(e, row) {
+			t.Errorf("the plan lacks %q:\n%s", row, r.stderr.String())
+		}
+	}
+
+	r, err = runPrepare(t, datarestApp, noRead{t}, false, true, nil, nil, legacyIngress(), dep)
+	if err != nil {
+		t.Fatalf("real run: %v", err)
+	}
+	if r.muts.deletes != 2 || r.backups != 1 || r.ingressExists(t) {
+		t.Errorf("deletes = %d, backups = %d, ingress left = %v; want both objects deleted after one backup", r.muts.deletes, r.backups, r.ingressExists(t))
+	}
+}
+
 // TestEnsurePrepared_YesSkipsTheAutomatedPrompt: --yes answers the
 // automated step's confirmation, but the plan is still listed first.
 func TestEnsurePrepared_YesSkipsTheAutomatedPrompt(t *testing.T) {

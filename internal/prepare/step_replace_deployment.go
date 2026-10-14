@@ -34,4 +34,10 @@ var (
 	// dg-hdfs-agent and the other dg-agent flavors of the same chart.
 	stepDgAgent   = replaceLegacyDeployment("prepare-dg-agent", "the legacy governance agent Deployment")
 	stepDiscovery = replaceLegacyDeployment("prepare-discovery", "the legacy discovery Deployment")
+	// Both found by CCT app id (eureka-agent.stratio-datastores,
+	// intelligence.stratio-intelligence). intelligence's legacy Ingress
+	// (intelligence-rocket.<domain>) stays: the chart's admin Ingress has
+	// another host, and the legacy one is the only one that works today.
+	stepEurekaAgent  = replaceLegacyDeployment("prepare-eureka-agent", "the legacy eureka agent Deployment")
+	stepIntelligence = replaceLegacyDeployment("prepare-intelligence", "the legacy intelligence Deployment")
 )

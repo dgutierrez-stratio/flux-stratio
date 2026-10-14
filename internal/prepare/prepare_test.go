@@ -92,7 +92,7 @@ func applyAll(t *testing.T, c client.Client, ops []Operation) {
 }
 
 func TestFind(t *testing.T) {
-	for _, name := range []string{"prepare-datamarket-agent", "prepare-datarest", "prepare-dlc", "prepare-genai", "prepare-virtualizer", "prepare-dg-agent", "prepare-discovery", "prepare-litellm"} {
+	for _, name := range []string{"prepare-datamarket-agent", "prepare-datarest", "prepare-dlc", "prepare-genai", "prepare-virtualizer", "prepare-dg-agent", "prepare-discovery", "prepare-eureka-agent", "prepare-intelligence", "prepare-rocket", "prepare-litellm"} {
 		if Find(name) == nil {
 			t.Errorf("Find(%q) = nil, want a step", name)
 		}
@@ -111,6 +111,9 @@ func TestSteps_ExactlyOneShapePerStep(t *testing.T) {
 		"prepare-virtualizer":      "automated",
 		"prepare-dg-agent":         "automated",
 		"prepare-discovery":        "automated",
+		"prepare-eureka-agent":     "automated",
+		"prepare-intelligence":     "automated",
+		"prepare-rocket":           "automated",
 		"prepare-litellm":          "automated",
 	}
 	for name, wantShape := range want {
@@ -258,7 +261,7 @@ func TestWaitForNoPods_ListErrorFails(t *testing.T) {
 
 func TestOnlyTheStepsThatDeleteWorkloadsReplaceThem(t *testing.T) {
 	for _, s := range Steps {
-		if want := s.Name == "prepare-dlc" || s.Name == "prepare-genai" || s.Name == "prepare-virtualizer" || s.Name == "prepare-dg-agent" || s.Name == "prepare-discovery" || s.Name == "prepare-litellm"; s.ReplacesWorkloads != want {
+		if want := s.Name == "prepare-dlc" || s.Name == "prepare-genai" || s.Name == "prepare-virtualizer" || s.Name == "prepare-dg-agent" || s.Name == "prepare-discovery" || s.Name == "prepare-datarest" || s.Name == "prepare-eureka-agent" || s.Name == "prepare-intelligence" || s.Name == "prepare-rocket" || s.Name == "prepare-litellm"; s.ReplacesWorkloads != want {
 			t.Errorf("%s: ReplacesWorkloads = %v, want %v", s.Name, s.ReplacesWorkloads, want)
 		}
 	}
