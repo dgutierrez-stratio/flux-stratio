@@ -80,11 +80,12 @@ func prepareManualSection(step *prepare.Step, app config.App, tenant string, dry
 }
 
 // prepareQuerySection is a step that runs a statement in a live pod, shown
-// verbatim: it rewrites data, so it is never cut to fit a column.
-func prepareQuerySection(step *prepare.Step, app config.App, tenant, pod string, dryRun bool) reviewSection {
-	hint := fmt.Sprintf("Runs this against pod %s. It rewrites live data, so it asks before running and again after showing the real output; --yes answers neither. %s", pod, declineHint(app))
+// verbatim: it rewrites data, so it is never cut to fit a column. pending is
+// how many rows it would change; a run copies them to the backup first.
+func prepareQuerySection(step *prepare.Step, app config.App, tenant, pod string, pending int, dryRun bool) reviewSection {
+	hint := fmt.Sprintf("Runs this against pod %s, on %d row(s), after a backup of the app and a copy of those rows. It rewrites live data, so it asks before running and again after showing the real output; --yes answers neither. %s", pod, pending, declineHint(app))
 	if dryRun {
-		hint = fmt.Sprintf("Dry run: nothing is asked or run. Without --dry-run it runs this against pod %s, asking before and after (--yes answers neither).", pod)
+		hint = fmt.Sprintf("Dry run: nothing is asked or run (the %d row(s) were only counted). Without --dry-run it copies them to the backup, then runs this against pod %s, asking before and after (--yes answers neither).", pending, pod)
 	}
 	return reviewSection{
 		Level: levelAction, Title: prepareTitle(step), Hint: hint,

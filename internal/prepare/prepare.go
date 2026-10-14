@@ -34,6 +34,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,8 +89,9 @@ type Step struct {
 	// instance of a type whose step has any (NeedsVault).
 	PasswordMoves []PasswordMove
 	// Plan lists, without changing anything, every operation needed for
-	// the precondition to hold; empty when it already does. Nil for a
-	// step that isn't Automated.
+	// the precondition to hold; empty when it already does. Set for an
+	// Automated step, and for a Query step that also deletes objects once
+	// its query has run (prepare-genai's legacy Deployments); nil otherwise.
 	Plan func(ctx context.Context, opts Options) ([]Operation, error)
 	// Instructions tells the operator what to do by hand (non-automated,
 	// non-Query steps only); "<tenant>" stands for the tenant name.
@@ -98,7 +100,7 @@ type Step struct {
 	// verify (prepare-genai): RunQuery finds its target pod and execs it,
 	// and apps migrate shows the operator the real captured output before
 	// asking its own confirmation, never skipped by --yes. Mutually
-	// exclusive with Automated/Plan and Instructions.
+	// exclusive with Automated and Instructions; it may carry a Plan.
 	Query *DBQuery
 }
 
@@ -116,6 +118,33 @@ type DBQuery struct {
 	Command []string
 	// SQL is the statement(s) to run; "<tenant>" stands for the tenant name.
 	SQL string
+	// ReadCommand is exec'd, with a read-only statement piped to its stdin,
+	// to count and copy the Touches rows: it prints bare values (psql -tA).
+	ReadCommand []string
+	// Touches are the tables SQL changes rows of. Pending counts the rows
+	// still to change (none: the rewrite already happened, so there is
+	// nothing to run), and DumpRows copies them before SQL runs.
+	Touches []TouchedTable
+}
+
+// TouchedTable is a table (and the rows of it) a DBQuery's SQL changes.
+type TouchedTable struct {
+	// Table is the qualified, quoted table name ("<tenant>" stands for the
+	// tenant name); Where selects the rows SQL changes (SQL's own WHERE).
+	Table, Where string
+	// Optional is true for a table that may not exist (SQL guards for it
+	// too): it then counts for nothing and has nothing to copy.
+	Optional bool
+	// File names the copy DumpRows makes ("<tenant>" stands for the tenant).
+	File string
+}
+
+// DataBackup is one table's rows as DumpRows copied them: Content is a psql
+// script that loads them back.
+type DataBackup struct {
+	File    string
+	Rows    int
+	Content string
 }
 
 // NeedsVault reports whether the step reads and writes Vault.
@@ -126,38 +155,136 @@ func (s Step) InstructionsFor(tenant string) string {
 	return strings.ReplaceAll(s.Instructions, "<tenant>", tenant)
 }
 
-// RunQuery resolves Query's target pod in opts and, unless dryRun, execs
-// Command with SQL (tenant-substituted) piped to its stdin. It returns the
-// resolved pod even under dryRun or on an exec error, so the caller can
-// always show what it acted (or would act) on. Zero or more than one
+// targetPod resolves Query's target pod in opts. Zero or more than one
 // matching pod is a clear error rather than a guess.
-func (s Step) RunQuery(ctx context.Context, opts Options, tenant string, dryRun bool) (pod *corev1.Pod, stdout, stderr string, err error) {
+func (s Step) targetPod(ctx context.Context, opts Options, tenant string) (*corev1.Pod, error) {
 	q := s.Query
 	if q == nil {
-		return nil, "", "", fmt.Errorf("prepare step %q has no query", s.Name)
+		return nil, fmt.Errorf("prepare step %q has no query", s.Name)
 	}
 	namespace := q.Namespace(tenant)
 	var pods corev1.PodList
 	if err := opts.Client.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels(q.PodSelector)); err != nil {
-		return nil, "", "", fmt.Errorf("finding %s's target pod in %s: %w", s.Name, namespace, err)
+		return nil, fmt.Errorf("finding %s's target pod in %s: %w", s.Name, namespace, err)
 	}
 	switch len(pods.Items) {
 	case 1:
-		pod = &pods.Items[0]
+		return &pods.Items[0], nil
 	case 0:
-		return nil, "", "", fmt.Errorf("prepare step %q: no pod matching %v found in %s", s.Name, q.PodSelector, namespace)
+		return nil, fmt.Errorf("prepare step %q: no pod matching %v found in %s", s.Name, q.PodSelector, namespace)
 	default:
-		return nil, "", "", fmt.Errorf("prepare step %q: %d pods matching %v found in %s, expected exactly one", s.Name, len(pods.Items), q.PodSelector, namespace)
+		return nil, fmt.Errorf("prepare step %q: %d pods matching %v found in %s, expected exactly one", s.Name, len(pods.Items), q.PodSelector, namespace)
+	}
+}
+
+// RunQuery resolves Query's target pod in opts and, unless dryRun, execs
+// Command with SQL (tenant-substituted) piped to its stdin. It returns the
+// resolved pod even under dryRun or on an exec error, so the caller can
+// always show what it acted (or would act) on.
+func (s Step) RunQuery(ctx context.Context, opts Options, tenant string, dryRun bool) (pod *corev1.Pod, stdout, stderr string, err error) {
+	pod, err = s.targetPod(ctx, opts, tenant)
+	if err != nil {
+		return nil, "", "", err
 	}
 	if dryRun {
 		return pod, "", "", nil
 	}
-	sql := strings.ReplaceAll(q.SQL, "<tenant>", tenant)
-	stdout, stderr, err = opts.Execer.Exec(ctx, namespace, pod.Name, q.Container, q.Command, strings.NewReader(sql))
+	sql := strings.ReplaceAll(s.Query.SQL, "<tenant>", tenant)
+	stdout, stderr, err = opts.Execer.Exec(ctx, pod.Namespace, pod.Name, s.Query.Container, s.Query.Command, strings.NewReader(sql))
 	if err != nil {
-		return pod, stdout, stderr, fmt.Errorf("running prepare step %q against pod %s/%s: %w", s.Name, namespace, pod.Name, err)
+		return pod, stdout, stderr, fmt.Errorf("running prepare step %q against pod %s/%s: %w", s.Name, pod.Namespace, pod.Name, err)
 	}
 	return pod, stdout, stderr, nil
+}
+
+// read execs a read-only statement through ReadCommand.
+func (s Step) read(ctx context.Context, opts Options, tenant string, pod *corev1.Pod, sql string) (string, error) {
+	if len(s.Query.ReadCommand) == 0 {
+		return "", fmt.Errorf("prepare step %q has no read command", s.Name)
+	}
+	if opts.Execer == nil {
+		return "", fmt.Errorf("prepare step %q reads the database through a pod exec, and no exec is available", s.Name)
+	}
+	stdout, stderr, err := opts.Execer.Exec(ctx, pod.Namespace, pod.Name, s.Query.Container, s.Query.ReadCommand,
+		strings.NewReader(strings.ReplaceAll(sql, "<tenant>", tenant)))
+	if err != nil {
+		return "", fmt.Errorf("reading from pod %s/%s for prepare step %q (stderr: %s): %w", pod.Namespace, pod.Name, s.Name, strings.TrimSpace(stderr), err)
+	}
+	return stdout, nil
+}
+
+// rowsOf counts the rows t's Where selects, and whether t exists at all
+// (a table not Optional is taken to exist: reading it fails if it doesn't).
+func (s Step) rowsOf(ctx context.Context, opts Options, tenant string, pod *corev1.Pod, t TouchedTable) (int, error) {
+	if t.Optional {
+		out, err := s.read(ctx, opts, tenant, pod, fmt.Sprintf("SELECT to_regclass('%s') IS NOT NULL;", t.Table))
+		if err != nil {
+			return 0, err
+		}
+		if strings.TrimSpace(out) != "t" {
+			return 0, nil
+		}
+	}
+	out, err := s.read(ctx, opts, tenant, pod, fmt.Sprintf("SELECT count(*) FROM %s WHERE %s;", t.Table, t.Where))
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("prepare step %q: counting rows of %s: unexpected output %q", s.Name, t.Table, strings.TrimSpace(out))
+	}
+	return n, nil
+}
+
+// Pending is how many rows Query's SQL would still change, counted with
+// read-only SELECTs (also fine under --dry-run): zero means the rewrite
+// already happened.
+func (s Step) Pending(ctx context.Context, opts Options, tenant string, pod *corev1.Pod) (int, error) {
+	total := 0
+	for _, t := range s.Query.Touches {
+		n, err := s.rowsOf(ctx, opts, tenant, pod, t)
+		if err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// DumpRows copies, as a psql script that loads them back, the rows SQL
+// is about to change: the workload backup holds none of them, and an
+// UPDATE or DELETE has no undo. A table with no row to change has no copy.
+func (s Step) DumpRows(ctx context.Context, opts Options, tenant string, pod *corev1.Pod) ([]DataBackup, error) {
+	var out []DataBackup
+	for _, t := range s.Query.Touches {
+		n, err := s.rowsOf(ctx, opts, tenant, pod, t)
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			continue
+		}
+		copied, err := s.read(ctx, opts, tenant, pod, fmt.Sprintf("COPY (SELECT * FROM %s WHERE %s) TO STDOUT;", t.Table, t.Where))
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(copied) == "" {
+			return nil, fmt.Errorf("prepare step %q: copying the %d row(s) of %s returned nothing", s.Name, n, t.Table)
+		}
+		table := strings.ReplaceAll(t.Table, "<tenant>", tenant)
+		content := fmt.Sprintf("-- prepare step %q: the %d row(s) of %s it rewrites (WHERE %s), as they were.\n"+
+			"-- To put them back: delete the rewritten rows (same primary key), then run this file with psql against the same database.\n"+
+			"COPY %s FROM stdin;\n%s\\.\n", s.Name, n, table, strings.ReplaceAll(t.Where, "\n", " "), table, ensureNewline(copied))
+		out = append(out, DataBackup{File: strings.ReplaceAll(t.File, "<tenant>", tenant), Rows: n, Content: content})
+	}
+	return out, nil
+}
+
+func ensureNewline(s string) string {
+	if strings.HasSuffix(s, "\n") {
+		return s
+	}
+	return s + "\n"
 }
 
 // Operation is one change a step makes to one live object.

@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -229,7 +233,7 @@ func migrateOne(cmd *cobra.Command, app config.App, repos config.RepoPaths, clus
 	// re-running apps migrate finds it up to date and goes straight to the
 	// prepare step. backupFirst captures the live state before an
 	// automated prepare step changes any of it.
-	backupFirst := func() error {
+	backupFirst := func() (string, error) {
 		return backupBeforePrepare(cmd, app, repos, c, idx, logger, dirFlag)
 	}
 	prepared := func() error {
@@ -320,23 +324,25 @@ func saveThenPrepare(app config.App, save, prepared func() error) error {
 // would, into the backups root dirFlag names (default: next to the
 // catalog), before an automated prepare step deletes or changes any of
 // it: without one, a deleted legacy workload's values could only come
-// back from wherever the operator thought to save them.
-func backupBeforePrepare(cmd *cobra.Command, app config.App, repos config.RepoPaths, c client.Client, idx *discovery.Index, logger *log.Logger, dirFlag string) error {
+// back from wherever the operator thought to save them. It returns the
+// directory the backup went to, so a step can add what the workload backup
+// doesn't hold (prepare-genai's data rows) next to it.
+func backupBeforePrepare(cmd *cobra.Command, app config.App, repos config.RepoPaths, c client.Client, idx *discovery.Index, logger *log.Logger, dirFlag string) (string, error) {
 	backupsDir, err := resolveBackupsDir(dirFlag)
 	if err != nil {
-		return err
+		return "", err
 	}
 	result, err := backup.Run(cmd.Context(), backup.Options{
 		Repos: repos, App: app, Runner: runner.Exec{}, Client: c, Index: idx, Dir: backupsDir, Log: logger,
 	})
 	if err != nil {
-		return fmt.Errorf("backing up %q before its prepare step: %w", app.Name, err)
+		return "", fmt.Errorf("backing up %q before its prepare step: %w", app.Name, err)
 	}
 	if len(result.Files) == 0 {
-		return fmt.Errorf("backing up %q before its prepare step captured nothing; back it up by hand (apps backup) first", app.Name)
+		return "", fmt.Errorf("backing up %q before its prepare step captured nothing; back it up by hand (apps backup) first", app.Name)
 	}
 	logger.Successf("backed up %q to %s before its prepare step", app.Name, result.Dir)
-	return nil
+	return result.Dir, nil
 }
 
 // confirmWarnings stops on the warnings migrate printed before going
@@ -417,14 +423,14 @@ func reportSkippedPrepares(logger *log.Logger, apps []config.App) {
 // questions is errPrepareDeclined: the step is skipped, never the whole
 // migration (the one exception is the Query step's second question, asked
 // after the SQL already ran, whose no is a real failure).
-func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.Client, execer kubeclient.Execer, backupFirst func() error, logger *log.Logger, dryRun, yes bool) error {
+func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.Client, execer kubeclient.Execer, backupFirst func() (string, error), logger *log.Logger, dryRun, yes bool) error {
 	step := prepare.Find(app.Prepare)
 	if step == nil {
 		return fmt.Errorf("app %q declares unknown prepare step %q", app.ID, app.Prepare)
 	}
 
 	if step.Query != nil {
-		return ensurePreparedQuery(cmd, *step, app, tenant, c, execer, logger, dryRun)
+		return ensurePreparedQuery(cmd, *step, app, tenant, c, execer, backupFirst, logger, dryRun, yes)
 	}
 
 	if !step.Automated {
@@ -449,7 +455,7 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 		return fmt.Errorf("planning prepare step %q: %w", step.Name, err)
 	}
 	if len(ops) == 0 {
-		logger.Debugf("prepare step %q already satisfied", step.Name)
+		logger.Successf("prepare step %q already satisfied", step.Name)
 		return nil
 	}
 
@@ -470,7 +476,7 @@ func ensurePrepared(cmd *cobra.Command, app config.App, tenant string, c client.
 	if backupFirst == nil {
 		return fmt.Errorf("prepare step %q changes live objects, and no backup of %q could be taken first", step.Name, app.ID)
 	}
-	if err := backupFirst(); err != nil {
+	if _, err := backupFirst(); err != nil {
 		return err
 	}
 	for i, op := range ops {
@@ -494,56 +500,162 @@ func prepareOptions(app config.App, tenant string, c client.Client, execer kubec
 	}
 }
 
-// ensurePreparedQuery shows step's Query — the SQL, with the tenant
-// substituted, and the pod it will run against — and asks before running
-// it, then shows the real captured output and asks again whether it looks
-// right. Neither question is skipped by --yes: the query rewrites live
-// application data, which no Kubernetes API can verify or undo. The Python
-// client's own version of this same check exited 0 unconditionally,
-// marking the step migrated on faith whether or not the SQL was ever run.
-func ensurePreparedQuery(cmd *cobra.Command, step prepare.Step, app config.App, tenant string, c client.Client, execer kubeclient.Execer, logger *log.Logger, dryRun bool) error {
+// ensurePreparedQuery runs a Query step (prepare-genai). It counts, with
+// read-only SELECTs (also under --dry-run), the rows its SQL would still
+// change, and plans the Deployment deletes it carries (step.Plan); with
+// neither left, the step is satisfied and asks nothing. Otherwise it shows
+// the SQL — verbatim, with its target pod — and the operations, and asks
+// before running anything; --dry-run stops there.
+//
+// A run takes the app's backup and copies the rows the SQL changes (both
+// before the SQL, and a copy that fails or comes back empty stops before any
+// statement), runs the SQL, shows the real captured output and asks again
+// whether it looks right. Neither question is skipped by --yes: the query
+// rewrites live application data, which no Kubernetes API can verify or
+// undo. The Python client's own version of this same check exited 0
+// unconditionally, marking the step migrated on faith whether or not the
+// SQL was ever run. Last come the step's deletes, asked like any
+// automated step's (--yes answers it). They come after the SQL: the SQL is
+// one transaction, so a failure leaves the cluster as it was, while a
+// deleted Deployment is the less reversible part.
+func ensurePreparedQuery(cmd *cobra.Command, step prepare.Step, app config.App, tenant string, c client.Client, execer kubeclient.Execer, backupFirst func() (string, error), logger *log.Logger, dryRun, yes bool) error {
 	popts := prepareOptions(app, tenant, c, execer, logger)
 
 	pod, _, _, err := step.RunQuery(cmd.Context(), popts, tenant, true)
 	if err != nil {
 		return fmt.Errorf("resolving prepare step %q's target pod: %w", step.Name, err)
 	}
-	showSections(logger, prepareQuerySection(&step, app, tenant, pod.Namespace+"/"+pod.Name, dryRun))
-	if dryRun {
-		logger.Successf("dry run: would run prepare step %q against pod %s/%s", step.Name, pod.Namespace, pod.Name)
-		return nil
-	}
-	proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(),
-		fmt.Sprintf("Run prepare step %q against pod %s/%s now? [y/N] ", step.Name, pod.Namespace, pod.Name))
+	pending, err := step.Pending(cmd.Context(), popts, tenant, pod)
 	if err != nil {
 		return err
 	}
-	if !proceed {
-		return errPrepareDeclined
+	var ops []prepare.Operation
+	if step.Plan != nil {
+		if ops, err = step.Plan(cmd.Context(), popts); err != nil {
+			return fmt.Errorf("planning prepare step %q: %w", step.Name, err)
+		}
+	}
+	if pending == 0 && len(ops) == 0 {
+		logger.Successf("prepare step %q already satisfied", step.Name)
+		return nil
 	}
 
-	logger.Actionf("running prepare step %q", step.Name)
-	pod, stdout, stderr, err := step.RunQuery(cmd.Context(), popts, tenant, false)
-	if err != nil {
+	podName := pod.Namespace + "/" + pod.Name
+	var sections []reviewSection
+	if pending > 0 {
+		sections = append(sections, prepareQuerySection(&step, app, tenant, podName, pending, dryRun))
+	}
+	if len(ops) > 0 {
+		sections = append(sections, prepareOpsSection(&step, app, ops, dryRun, yes))
+	}
+	showSections(logger, sections...)
+	if dryRun {
+		logger.Successf("dry run: would run prepare step %q (%d row(s) to rewrite in pod %s, %d operation(s) above)", step.Name, pending, podName, len(ops))
+		return nil
+	}
+
+	backedUp := false
+	takeBackup := func() (string, error) {
+		if backupFirst == nil {
+			return "", fmt.Errorf("prepare step %q changes live objects, and no backup of %q could be taken first", step.Name, app.ID)
+		}
+		dir, err := backupFirst()
+		if err == nil {
+			backedUp = true
+		}
+		return dir, err
+	}
+
+	if pending > 0 {
+		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(),
+			fmt.Sprintf("Run prepare step %q against pod %s now? [y/N] ", step.Name, podName))
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return errPrepareDeclined
+		}
+		dir, err := takeBackup()
+		if err != nil {
+			return err
+		}
+		if err := backupRows(cmd.Context(), logger, step, popts, tenant, pod, dir); err != nil {
+			return err
+		}
+
+		logger.Actionf("running prepare step %q", step.Name)
+		pod, stdout, stderr, err := step.RunQuery(cmd.Context(), popts, tenant, false)
+		if err != nil {
+			if stderr != "" {
+				logger.Warningf("prepare step %q's stderr:\n%s", step.Name, stderr)
+			}
+			return fmt.Errorf("running prepare step %q: %w", step.Name, err)
+		}
+		if _, err := fmt.Fprint(cmd.OutOrStdout(), stdout); err != nil {
+			return err
+		}
 		if stderr != "" {
 			logger.Warningf("prepare step %q's stderr:\n%s", step.Name, stderr)
 		}
-		return fmt.Errorf("running prepare step %q: %w", step.Name, err)
-	}
-	if _, err := fmt.Fprint(cmd.OutOrStdout(), stdout); err != nil {
-		return err
-	}
-	if stderr != "" {
-		logger.Warningf("prepare step %q's stderr:\n%s", step.Name, stderr)
+
+		proceed, err = appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(),
+			fmt.Sprintf("prepare step %q ran against pod %s/%s; does the output above look correct? [y/N] ", step.Name, pod.Namespace, pod.Name))
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
+		}
 	}
 
-	proceed, err = appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(),
-		fmt.Sprintf("prepare step %q ran against pod %s/%s; does the output above look correct? [y/N] ", step.Name, pod.Namespace, pod.Name))
-	if err != nil {
-		return err
+	if len(ops) == 0 {
+		return nil
 	}
-	if !proceed {
-		return fmt.Errorf("prepare step %q not confirmed; %q not migrated", step.Name, app.ID)
+	if !yes {
+		proceed, err := appmigrate.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("Run these %d operation(s) of prepare step %q now? [y/N] ", len(ops), step.Name))
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return errPrepareDeclined
+		}
+	}
+	if !backedUp {
+		if _, err := takeBackup(); err != nil {
+			return err
+		}
+	}
+	for i, op := range ops {
+		logger.Waitingf("%d/%d %s", i+1, len(ops), op)
+		if err := op.Apply(cmd.Context(), c); err != nil {
+			return fmt.Errorf("running prepare step %q: %w", step.Name, err)
+		}
+	}
+	logger.Successf("prepare step %q complete", step.Name)
+	showSections(logger, preparedSection(&step))
+	return nil
+}
+
+// backupRows saves the rows a Query step's SQL is about to change under
+// <dir>/prepare/, next to the workload backup (which holds none of them).
+func backupRows(ctx context.Context, logger *log.Logger, step prepare.Step, popts prepare.Options, tenant string, pod *corev1.Pod, dir string) error {
+	copies, err := step.DumpRows(ctx, popts, tenant, pod)
+	if err != nil {
+		return fmt.Errorf("backing up the rows prepare step %q changes: %w", step.Name, err)
+	}
+	if len(copies) == 0 {
+		return nil
+	}
+	target := filepath.Join(dir, "prepare")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return fmt.Errorf("backing up the rows prepare step %q changes: %w", step.Name, err)
+	}
+	for _, d := range copies {
+		path := filepath.Join(target, d.File)
+		if err := os.WriteFile(path, []byte(d.Content), 0o600); err != nil {
+			return fmt.Errorf("backing up the rows prepare step %q changes: %w", step.Name, err)
+		}
+		logger.Successf("backed up %d row(s) prepare step %q changes to %s", d.Rows, step.Name, path)
 	}
 	return nil
 }

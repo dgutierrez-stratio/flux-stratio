@@ -40,14 +40,14 @@ func TestPlanVirtualizer_FirstMigrationDeletesTheWholeFamily(t *testing.T) {
 	)
 	opts := Options{TenantName: "stratio", LiveName: "virtualizer", LiveNamespace: virtualizerNS, IsLegacy: isVirtualizerFamily, Client: c}
 
-	ops, err := planVirtualizer(context.Background(), opts)
+	ops, err := planDeleteFamily(context.Background(), opts)
 	assertPlan(t, ops, err,
 		"delete Deployment stratio-apps/virtualizer",
 		"delete Deployment stratio-apps/virtualizer-monitor",
 		"delete Deployment stratio-apps/virtualizer-ui")
 
 	applyAll(t, c, ops)
-	ops, err = planVirtualizer(context.Background(), opts)
+	ops, err = planDeleteFamily(context.Background(), opts)
 	assertPlan(t, ops, err)
 }
 
@@ -71,7 +71,7 @@ func TestPlanVirtualizer_ServerAlreadyMigrated(t *testing.T) {
 	)
 	opts := Options{TenantName: "stratio", LiveName: "virtualizer", LiveNamespace: virtualizerNS, IsLegacy: isVirtualizerFamily, Client: c}
 
-	ops, err := planVirtualizer(context.Background(), opts)
+	ops, err := planDeleteFamily(context.Background(), opts)
 	assertPlan(t, ops, err,
 		"delete Deployment stratio-apps/virtualizer-monitor",
 		"delete Deployment stratio-apps/virtualizer-ui")
@@ -87,7 +87,7 @@ func TestPlanVirtualizer_AfterTheCutoverPlansNothing(t *testing.T) {
 		virtualizerDeployment("virtualizer-ui", "helm.toolkit.fluxcd.io/name", "virtualizer"),
 	)
 	opts := Options{TenantName: "stratio", LiveName: "virtualizer", LiveNamespace: virtualizerNS, IsLegacy: isVirtualizerFamily, Client: c}
-	ops, err := planVirtualizer(context.Background(), opts)
+	ops, err := planDeleteFamily(context.Background(), opts)
 	assertPlan(t, ops, err)
 }
 
@@ -105,7 +105,7 @@ func TestPlanVirtualizer_OnlyTheFamilyInTheAppsNamespace(t *testing.T) {
 		owned, other,
 	)
 	opts := Options{TenantName: "stratio", LiveName: "virtualizer", LiveNamespace: virtualizerNS, IsLegacy: isVirtualizerFamily, Client: c}
-	ops, err := planVirtualizer(context.Background(), opts)
+	ops, err := planDeleteFamily(context.Background(), opts)
 	assertPlan(t, ops, err, "delete Deployment stratio-apps/virtualizer-monitor")
 }
 
@@ -115,7 +115,7 @@ func TestPlanVirtualizer_NeedsASelectorAndANamespace(t *testing.T) {
 		"no selector":  {LiveNamespace: virtualizerNS, Client: c},
 		"no namespace": {IsLegacy: isVirtualizerFamily, Client: c},
 	} {
-		if _, err := planVirtualizer(context.Background(), opts); err == nil {
+		if _, err := planDeleteFamily(context.Background(), opts); err == nil {
 			t.Errorf("%s: got nil error, want one rather than a guess", name)
 		}
 	}

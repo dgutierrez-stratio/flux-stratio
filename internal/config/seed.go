@@ -304,7 +304,7 @@ func SeedCatalog() Catalog {
 				cctMatch(kindDeployment, "genai", "genai-developer-proxy"),
 			}},
 			Prepare: "prepare-genai",
-			Notes:   "prepare-genai is a Postgres data rewrite apps migrate cannot verify itself; it runs the SQL via pod exec and shows the result, but always asks its own confirmation before proceeding, never skipped by --yes.",
+			Notes:   "prepare-genai is a Postgres data rewrite apps migrate cannot verify itself: after a backup of the app's workloads and a copy of the rows it changes (<backup>/prepare/genai-<tenant>-chain.sql, -endpoint.sql), it runs the SQL via pod exec and shows the result, always asking its own confirmation before and after, never skipped by --yes. Then it deletes the legacy genai-api, genai-ui and genai-developer-proxy Deployments (the chart changed their immutable selectors; asked like any step, --yes answers it) and leaves their Ingresses and Services. A re-run with no row left to rewrite and no legacy Deployment reports it already satisfied.",
 			// Every workload's vault approlename is excluded, as for the
 			// other chart components: each uses the chart's own GitOps role
 			// (its SecretsIdentity), never the legacy CCT one.

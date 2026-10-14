@@ -16,10 +16,10 @@ var stepVirtualizer = Step{
 	Automated:   true,
 	// The legacy Deployments are deleted, so the GitOps ones are created anew.
 	ReplacesWorkloads: true,
-	Plan:              planVirtualizer,
+	Plan:              planDeleteFamily,
 }
 
-// planVirtualizer deletes the Deployments of every legacy workload of the
+// planDeleteFamily deletes the Deployments of every legacy workload of the
 // virtualizer family — the server and its monitor and ui siblings, which
 // CCT deployed as three apps and the chart renders as one release. The
 // chart gives each Deployment its own (immutable) selector under the same
@@ -39,7 +39,10 @@ var stepVirtualizer = Step{
 // patch uses the chart's hosts), the Services (CCT's, once Helm adopts
 // them) and the legacy virtualizer-loadbalancer Service, which carries no
 // CCT label. See docs/migration-runbook.md.
-func planVirtualizer(ctx context.Context, opts Options) ([]Operation, error) {
+//
+// prepare-genai shares it for genai-api, genai-ui and genai-developer-proxy
+// (the same family shape: CCT apps of their own, one chart).
+func planDeleteFamily(ctx context.Context, opts Options) ([]Operation, error) {
 	if opts.LiveNamespace == "" {
 		return nil, fmt.Errorf("no live object to identify the app's legacy objects by")
 	}

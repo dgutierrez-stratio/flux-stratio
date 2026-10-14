@@ -63,7 +63,7 @@ func TestPrepareOpsSection_HintFollowsHowTheStepRuns(t *testing.T) {
 // narrow the terminal.
 func TestPrepareQuerySection_ShowsTheSQLWhole(t *testing.T) {
 	step := prepare.Find("prepare-genai")
-	sec := prepareQuerySection(step, config.App{ID: "genai"}, "stratio", "stratio-datastores/psql-0", false)
+	sec := prepareQuerySection(step, config.App{ID: "genai"}, "stratio", "stratio-datastores/psql-0", 7, false)
 	lines := renderReview([]reviewSection{sec}, reviewStyle{Width: 60})
 	long := `    SET chain_params = replace(chain_params::text, 'dg-businessglossary-api', 'governance-businessglossary-api')::jsonb,`
 	found := false

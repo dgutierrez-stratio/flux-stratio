@@ -3,10 +3,12 @@ package prepare
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 )
@@ -129,5 +131,162 @@ func TestGenAISQL_UpdateOnlyRewritesRowsHoldingTheOldName(t *testing.T) {
 		if !strings.Contains(update, col+"::text LIKE '%dg-businessglossary-api%'") {
 			t.Errorf("UPDATE has no WHERE guard on %s:\n%s", col, update)
 		}
+	}
+}
+
+// genaiReader answers the step's read-only SELECTs and COPYs: how many rows
+// each table has left, and whether the endpoint table exists.
+func genaiReader(chainRows, endpointRows int, endpointExists bool) *kubeclient.FakeExecer {
+	return &kubeclient.FakeExecer{Handle: func(call kubeclient.FakeExecCall) kubeclient.FakeExecResponse {
+		isEndpoint := strings.Contains(call.Stdin, "endpoint")
+		switch {
+		case strings.Contains(call.Stdin, "to_regclass"):
+			if endpointExists {
+				return kubeclient.FakeExecResponse{Stdout: "t\n"}
+			}
+			return kubeclient.FakeExecResponse{Stdout: "f\n"}
+		case strings.Contains(call.Stdin, "SELECT count(*)"):
+			n := chainRows
+			if isEndpoint {
+				n = endpointRows
+			}
+			return kubeclient.FakeExecResponse{Stdout: strconv.Itoa(n) + "\n"}
+		case strings.Contains(call.Stdin, "COPY ("):
+			return kubeclient.FakeExecResponse{Stdout: "row-1\t{}\n"}
+		}
+		return kubeclient.FakeExecResponse{Err: errors.New("unexpected statement: " + call.Stdin)}
+	}}
+}
+
+func TestGenaiPending_CountsTheRowsStillToRewrite(t *testing.T) {
+	c := fakeClient(t, pgPod("psql-0", "master"))
+	for _, tt := range []struct {
+		name                  string
+		chain, endpoint, want int
+		endpointExists        bool
+	}{
+		{"rewrite pending", 7, 0, 7, false},
+		{"endpoint row pending too", 7, 1, 8, true},
+		{"all done", 0, 0, 0, false},
+		{"only the endpoint row left", 0, 1, 1, true},
+		// The endpoint table is gone (genai-gateway superseded by litellm):
+		// whatever a count would say, it counts for nothing.
+		{"endpoint table absent", 0, 5, 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			execer := genaiReader(tt.chain, tt.endpoint, tt.endpointExists)
+			pod, _, _, err := stepGenAI.RunQuery(context.Background(), Options{Client: c, Execer: execer}, "stratio", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := stepGenAI.Pending(context.Background(), Options{Client: c, Execer: execer}, "stratio", pod)
+			if err != nil || got != tt.want {
+				t.Errorf("Pending = %d, %v, want %d", got, err, tt.want)
+			}
+			for _, call := range execer.Calls {
+				if strings.Contains(call.Stdin, "UPDATE") || strings.Contains(call.Stdin, "DELETE") {
+					t.Errorf("Pending sent a statement that changes data: %q", call.Stdin)
+				}
+				if strings.Contains(strings.Join(call.Command, " "), "--single-transaction") {
+					t.Errorf("Pending ran the write command: %v", call.Command)
+				}
+			}
+		})
+	}
+}
+
+func TestGenaiPending_ReadErrorFails(t *testing.T) {
+	c := fakeClient(t, pgPod("psql-0", "master"))
+	execer := &kubeclient.FakeExecer{Response: kubeclient.FakeExecResponse{Err: errors.New("connection refused")}}
+	pod, _, _, _ := stepGenAI.RunQuery(context.Background(), Options{Client: c, Execer: execer}, "stratio", true)
+	if _, err := stepGenAI.Pending(context.Background(), Options{Client: c, Execer: execer}, "stratio", pod); err == nil {
+		t.Error("a failing read: got nil error, want it surfaced rather than read as nothing pending")
+	}
+	execer = &kubeclient.FakeExecer{Response: kubeclient.FakeExecResponse{Stdout: "garbage"}}
+	if _, err := stepGenAI.Pending(context.Background(), Options{Client: c, Execer: execer}, "stratio", pod); err == nil {
+		t.Error("an unreadable count: got nil error")
+	}
+}
+
+func TestGenaiDumpRows_CopiesTheRowsTheSQLChanges(t *testing.T) {
+	c := fakeClient(t, pgPod("psql-0", "master"))
+	execer := genaiReader(7, 1, true)
+	pod, _, _, _ := stepGenAI.RunQuery(context.Background(), Options{Client: c, Execer: execer}, "stratio", true)
+
+	copies, err := stepGenAI.DumpRows(context.Background(), Options{Client: c, Execer: execer}, "stratio", pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 2 || copies[0].File != "genai-stratio-chain.sql" || copies[1].File != "genai-stratio-endpoint.sql" {
+		t.Fatalf("copies = %+v, want the chain and endpoint files, in that order", copies)
+	}
+	chain := copies[0]
+	if chain.Rows != 7 {
+		t.Errorf("chain copy rows = %d, want 7", chain.Rows)
+	}
+	for _, want := range []string{`COPY "genai-api.stratio-genai".chain FROM stdin;`, "row-1\t{}\n", "\\.\n", "dg-businessglossary-api"} {
+		if !strings.Contains(chain.Content, want) {
+			t.Errorf("chain copy lacks %q:\n%s", want, chain.Content)
+		}
+	}
+	if strings.Contains(chain.Content, "<tenant>") {
+		t.Errorf("chain copy still carries the <tenant> placeholder:\n%s", chain.Content)
+	}
+}
+
+func TestGenaiDumpRows_NothingToChangeCopiesNothing(t *testing.T) {
+	c := fakeClient(t, pgPod("psql-0", "master"))
+	execer := genaiReader(0, 0, false)
+	pod, _, _, _ := stepGenAI.RunQuery(context.Background(), Options{Client: c, Execer: execer}, "stratio", true)
+	copies, err := stepGenAI.DumpRows(context.Background(), Options{Client: c, Execer: execer}, "stratio", pod)
+	if err != nil || len(copies) != 0 {
+		t.Errorf("copies = %+v, %v, want none", copies, err)
+	}
+}
+
+// genaiDeployment is a Deployment of the genai CCT service, a CCT app of its
+// own (as genai-ui is).
+func genaiDeployment(name string, extraLabels ...string) *unstructured.Unstructured {
+	u := legacyDeployment("stratio-genai", name, name+".stratio-genai", 1, extraLabels...)
+	u.SetAnnotations(map[string]string{"cct.stratio.com/application_service": "genai"})
+	return u
+}
+
+func isGenaiFamily(obj *unstructured.Unstructured) bool {
+	return obj.GetAnnotations()["cct.stratio.com/application_service"] == "genai"
+}
+
+// TestGenaiPlan_TheFamilysLegacyDeploymentsOnly: genai-api and its siblings
+// (each a CCT app of its own, so the app id lookup alone would find one),
+// never a Flux-managed one, another app's, or an Ingress or Service.
+func TestGenaiPlan_TheFamilysLegacyDeploymentsOnly(t *testing.T) {
+	other := legacyDeployment("stratio-genai", "genai-litellm", "genai-litellm.stratio-genai", 1)
+	other.SetAnnotations(map[string]string{"cct.stratio.com/application_service": "litellm"})
+	c := fakeClient(t,
+		genaiDeployment("genai-api"),
+		genaiDeployment("genai-ui"),
+		genaiDeployment("genai-developer-proxy", "helm.toolkit.fluxcd.io/name", "genai"),
+		other,
+		legacyDeployment("stratio-apps", "genai-api", "genai-api.stratio-apps", 1),
+		object(gvkIngress, "stratio-genai", "genai.eosdev.int", cctAppIDLabel, "genai-api.stratio-genai"),
+	)
+	opts := Options{TenantName: "stratio", LiveName: "genai-api", LiveNamespace: "stratio-genai", IsLegacy: isGenaiFamily, Client: c}
+
+	ops, err := stepGenAI.Plan(context.Background(), opts)
+	assertPlan(t, ops, err,
+		"delete Deployment stratio-genai/genai-api",
+		"delete Deployment stratio-genai/genai-ui")
+
+	applyAll(t, c, ops)
+	ops, err = stepGenAI.Plan(context.Background(), opts)
+	assertPlan(t, ops, err)
+}
+
+func TestGenaiStep_ShapeAndReplacesWorkloads(t *testing.T) {
+	if stepGenAI.Query == nil || stepGenAI.Plan == nil || stepGenAI.Automated {
+		t.Errorf("prepare-genai: Query=%v Plan=%v Automated=%v, want a Query step that also carries a Plan", stepGenAI.Query != nil, stepGenAI.Plan != nil, stepGenAI.Automated)
+	}
+	if !stepGenAI.ReplacesWorkloads {
+		t.Error("prepare-genai deletes the legacy Deployments: ReplacesWorkloads must be true")
 	}
 }

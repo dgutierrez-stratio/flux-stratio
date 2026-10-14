@@ -258,7 +258,7 @@ func TestWaitForNoPods_ListErrorFails(t *testing.T) {
 
 func TestOnlyTheStepsThatDeleteWorkloadsReplaceThem(t *testing.T) {
 	for _, s := range Steps {
-		if want := s.Name == "prepare-dlc" || s.Name == "prepare-virtualizer" || s.Name == "prepare-dg-agent" || s.Name == "prepare-discovery" || s.Name == "prepare-litellm"; s.ReplacesWorkloads != want {
+		if want := s.Name == "prepare-dlc" || s.Name == "prepare-genai" || s.Name == "prepare-virtualizer" || s.Name == "prepare-dg-agent" || s.Name == "prepare-discovery" || s.Name == "prepare-litellm"; s.ReplacesWorkloads != want {
 			t.Errorf("%s: ReplacesWorkloads = %v, want %v", s.Name, s.ReplacesWorkloads, want)
 		}
 	}

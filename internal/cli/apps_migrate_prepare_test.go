@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,6 +83,8 @@ type prepareRun struct {
 	// returns.
 	backups   int
 	backupErr error
+	// backupDir is where the last backupFirst call said it backed up to.
+	backupDir string
 }
 
 // runPrepare runs ensurePrepared for app against objs, answering prompts
@@ -104,9 +109,13 @@ func runPrepareWithBackup(t *testing.T, app config.App, stdin io.Reader, dryRun,
 	cmd.SetIn(stdin)
 	cmd.SetOut(&r.stdout)
 	cmd.SetErr(&r.stderr)
-	backupFirst := func() error {
+	backupFirst := func() (string, error) {
 		r.backups++
-		return r.backupErr
+		if r.backupErr != nil {
+			return "", r.backupErr
+		}
+		r.backupDir = t.TempDir()
+		return r.backupDir, nil
 	}
 	err = ensurePrepared(cmd, app, "stratio", r.c, execer, backupFirst, log.New(&r.stderr, true), dryRun, yes)
 	return r, err
@@ -256,53 +265,231 @@ func genaiMasterPod() *corev1.Pod {
 	return pod
 }
 
+// genaiDB is a fake PgCluster primary: how many rows the chain table (and the
+// endpoint one, when it exists) still has to rewrite, and what the SQL and
+// the row copy answer. Every call is told apart by what it carries.
+type genaiDB struct {
+	chainRows, endpointRows int
+	endpointExists          bool
+	copyOut                 string
+	// failCopy makes the row copy fail.
+	failCopy bool
+	*kubeclient.FakeExecer
+}
+
+func newGenaiDB(chainRows int) *genaiDB {
+	db := &genaiDB{chainRows: chainRows, copyOut: "chain-1\t{}\n"}
+	db.FakeExecer = &kubeclient.FakeExecer{Handle: func(call kubeclient.FakeExecCall) kubeclient.FakeExecResponse {
+		switch {
+		case strings.Contains(strings.Join(call.Command, " "), "--single-transaction"):
+			return kubeclient.FakeExecResponse{Stdout: "UPDATE 1\nDELETE 1\n"}
+		case strings.Contains(call.Stdin, "to_regclass"):
+			if db.endpointExists {
+				return kubeclient.FakeExecResponse{Stdout: "t\n"}
+			}
+			return kubeclient.FakeExecResponse{Stdout: "f\n"}
+		case strings.Contains(call.Stdin, "SELECT count(*)"):
+			n := db.chainRows
+			if strings.Contains(call.Stdin, "endpoint") {
+				n = db.endpointRows
+			}
+			return kubeclient.FakeExecResponse{Stdout: fmt.Sprintf("%d\n", n)}
+		case strings.Contains(call.Stdin, "COPY ("):
+			if db.failCopy {
+				return kubeclient.FakeExecResponse{Err: errors.New("copy failed")}
+			}
+			return kubeclient.FakeExecResponse{Stdout: db.copyOut}
+		}
+		return kubeclient.FakeExecResponse{Stdout: "UPDATE 1\nDELETE 1\n"}
+	}}
+	return db
+}
+
+// writes are the calls that ran the step's SQL (not a read-only SELECT/COPY).
+func (db *genaiDB) writes() int {
+	n := 0
+	for _, c := range db.Calls {
+		if strings.Contains(strings.Join(c.Command, " "), "--single-transaction") {
+			n++
+		}
+	}
+	return n
+}
+
+// genaiApp is `apps migrate genai`'s app: the seeded catalog's family (genai-api
+// and its genai-ui and genai-developer-proxy siblings) around the live
+// genai-api.
+var genaiApp = func() config.App {
+	typ := config.SeedCatalog().Find("genai")
+	return config.App{
+		ID: "genai", Name: "GenAI genai", Prepare: typ.Prepare,
+		Family: append([]config.Match{typ.Match}, typ.SiblingMatches()...),
+		Live:   []config.ObjectRef{{GVK: gvkDeployment, Namespace: "stratio-genai", Name: "genai-api"}},
+	}
+}()
+
 // TestEnsurePrepared_GenaiAlwaysAsks: apps migrate shows the SQL and its
 // target pod and asks before running anything, then shows the real output
 // and asks again; --yes answers neither, a no to either stops the
-// migration, and --dry-run resolves the pod and shows the SQL without
-// running anything.
+// migration, and --dry-run resolves the pod, counts the rows with a
+// read-only SELECT and shows the SQL without running anything.
 func TestEnsurePrepared_GenaiAlwaysAsks(t *testing.T) {
-	app := config.App{ID: "genai", Name: "GenAI genai", Prepare: "prepare-genai"}
-	newExecer := func() *kubeclient.FakeExecer {
-		return &kubeclient.FakeExecer{Response: kubeclient.FakeExecResponse{Stdout: "UPDATE 1\nDELETE 1\n"}}
-	}
+	app := genaiApp
 
-	execer := newExecer()
-	r, err := runPrepare(t, app, noRead{t}, true, false, nil, execer, genaiMasterPod())
+	db := newGenaiDB(7)
+	r, err := runPrepare(t, app, noRead{t}, true, false, nil, db, genaiMasterPod())
 	if err != nil || !strings.Contains(r.stderr.String(), `UPDATE "genai-api.stratio-genai".chain`) {
 		t.Errorf("dry run: err = %v, want the tenant's SQL shown and no question asked:\n%s", err, r.stderr.String())
 	}
-	if len(execer.Calls) != 0 {
-		t.Errorf("dry run: execer was called: %v", execer.Calls)
+	if db.writes() != 0 || r.backups != 0 {
+		t.Errorf("dry run: SQL runs = %d, backups = %d, want none", db.writes(), r.backups)
+	}
+	for _, c := range db.Calls {
+		if strings.Contains(c.Stdin, "UPDATE") || strings.Contains(c.Stdin, "DELETE") {
+			t.Errorf("dry run sent a statement that changes data: %q", c.Stdin)
+		}
 	}
 
-	execer = newExecer()
-	r, err = runPrepare(t, app, strings.NewReader("n\n"), false, true, nil, execer, genaiMasterPod())
+	db = newGenaiDB(7)
+	r, err = runPrepare(t, app, strings.NewReader("n\n"), false, true, nil, db, genaiMasterPod())
 	if !errors.Is(err, errPrepareDeclined) {
 		t.Errorf("--yes with a no before running: err = %v, want the step declined (--yes must not answer it)", err)
 	}
-	if len(execer.Calls) != 0 {
-		t.Errorf("declined before running: execer was called: %v", execer.Calls)
+	if db.writes() != 0 || r.backups != 0 {
+		t.Errorf("declined before running: SQL runs = %d, backups = %d, want none", db.writes(), r.backups)
 	}
 	if !strings.Contains(r.stderr.String(), `UPDATE "genai-api.stratio-genai".chain`) {
 		t.Errorf("the SQL wasn't shown before the question:\n%s", r.stderr.String())
 	}
 
-	execer = newExecer()
-	if _, err := runPrepare(t, app, strings.NewReader("y\nn\n"), false, true, nil, execer, genaiMasterPod()); err == nil || !strings.Contains(err.Error(), "not confirmed") {
+	db = newGenaiDB(7)
+	if _, err := runPrepare(t, app, strings.NewReader("y\nn\n"), false, true, nil, db, genaiMasterPod()); err == nil || !strings.Contains(err.Error(), "not confirmed") {
 		t.Errorf("no to the output: err = %v, want not confirmed", err)
 	}
-	if len(execer.Calls) != 1 {
-		t.Errorf("execer calls = %d, want 1", len(execer.Calls))
+	if db.writes() != 1 {
+		t.Errorf("SQL runs = %d, want 1", db.writes())
 	}
 
-	execer = newExecer()
-	r, err = runPrepare(t, app, strings.NewReader("y\ny\n"), false, true, nil, execer, genaiMasterPod())
+	db = newGenaiDB(7)
+	r, err = runPrepare(t, app, strings.NewReader("y\ny\n"), false, true, nil, db, genaiMasterPod())
 	if err != nil {
 		t.Errorf("confirmed: err = %v", err)
 	}
 	if !strings.Contains(r.stdout.String(), "UPDATE 1") {
 		t.Errorf("stdout lacks the real query output:\n%s", r.stdout.String())
+	}
+}
+
+// TestEnsurePrepared_GenaiBacksUpBeforeTheSQL is the regression for the
+// missing backup: the workload backup is taken, and the rows the SQL
+// rewrites are copied next to it, before the statement runs.
+func TestEnsurePrepared_GenaiBacksUpBeforeTheSQL(t *testing.T) {
+	db := newGenaiDB(7)
+	db.endpointExists, db.endpointRows = true, 1
+	order := []string{}
+	inner := db.Handle
+	db.Handle = func(c kubeclient.FakeExecCall) kubeclient.FakeExecResponse {
+		if strings.Contains(strings.Join(c.Command, " "), "--single-transaction") {
+			order = append(order, "sql")
+		}
+		return inner(c)
+	}
+	r, err := runPrepare(t, genaiApp, strings.NewReader("y\ny\n"), false, true, nil, db, genaiMasterPod())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if r.backups != 1 {
+		t.Errorf("backups = %d, want 1 (workloads, before the SQL)", r.backups)
+	}
+	for _, f := range []string{"genai-stratio-chain.sql", "genai-stratio-endpoint.sql"} {
+		b, err := os.ReadFile(filepath.Join(r.backupDir, "prepare", f))
+		if err != nil {
+			t.Errorf("data backup %s: %v", f, err)
+			continue
+		}
+		if !strings.Contains(string(b), "COPY ") || !strings.Contains(string(b), "FROM stdin;") {
+			t.Errorf("%s doesn't load the rows back:\n%s", f, b)
+		}
+	}
+	if got := strings.Join(order, ","); got != "sql" {
+		t.Errorf("SQL runs = %q, want one", got)
+	}
+}
+
+// TestEnsurePrepared_GenaiFailedDataBackupRunsNoSQL: with no copy of the
+// rows, no statement runs.
+func TestEnsurePrepared_GenaiFailedDataBackupRunsNoSQL(t *testing.T) {
+	db := newGenaiDB(7)
+	db.failCopy = true
+	_, err := runPrepare(t, genaiApp, strings.NewReader("y\ny\n"), false, true, nil, db, genaiMasterPod())
+	if err == nil || !strings.Contains(err.Error(), "backing up the rows") {
+		t.Errorf("err = %v, want the data backup failure", err)
+	}
+	if db.writes() != 0 {
+		t.Errorf("SQL ran %d time(s) with no data backup", db.writes())
+	}
+
+	db = newGenaiDB(7)
+	db.copyOut = ""
+	if _, err := runPrepare(t, genaiApp, strings.NewReader("y\ny\n"), false, true, nil, db, genaiMasterPod()); err == nil || db.writes() != 0 {
+		t.Errorf("an empty copy: err = %v, SQL runs = %d, want an error and none", err, db.writes())
+	}
+}
+
+func TestEnsurePrepared_GenaiFailedWorkloadBackupRunsNoSQL(t *testing.T) {
+	db := newGenaiDB(7)
+	_, err := runPrepareWithBackup(t, genaiApp, strings.NewReader("y\ny\n"), false, true, nil, errors.New("no backup"), db, genaiMasterPod())
+	if err == nil || db.writes() != 0 {
+		t.Errorf("err = %v, SQL runs = %d, want the error and no SQL", err, db.writes())
+	}
+}
+
+// TestEnsurePrepared_GenaiSatisfiedAsksNothing: no row left to rewrite and
+// no legacy Deployment left: the second run changes nothing, asks nothing and
+// says so at the normal log level.
+func TestEnsurePrepared_GenaiSatisfiedAsksNothing(t *testing.T) {
+	db := newGenaiDB(0)
+	r, err := runPrepare(t, genaiApp, noRead{t}, false, false, nil, db, genaiMasterPod())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(r.stderr.String(), "already satisfied") {
+		t.Errorf("no 'already satisfied' line:\n%s", r.stderr.String())
+	}
+	if db.writes() != 0 || r.backups != 0 || r.muts.deletes != 0 {
+		t.Errorf("changed something: SQL %d, backups %d, deletes %d", db.writes(), r.backups, r.muts.deletes)
+	}
+}
+
+// genaiLegacy is a legacy genai Deployment (a CCT app of its own).
+func genaiLegacy(name string) *unstructured.Unstructured {
+	u := cctDeployment(name, name, map[string]string{"cct.stratio.com/application_id": name + ".stratio-genai"})
+	u.SetAnnotations(map[string]string{
+		"cct.stratio.com/application_service": "genai",
+		"cct.stratio.com/application_model":   name,
+	})
+	u.SetNamespace("stratio-genai")
+	return u
+}
+
+// TestEnsurePrepared_GenaiDeletesTheLegacyDeploymentsAfterTheSQL: rows done,
+// Deployments left: only the family's legacy Deployments are planned, --yes
+// answers their question, and the run says it is deleting them.
+func TestEnsurePrepared_GenaiDeletesTheLegacyDeploymentsAfterTheSQL(t *testing.T) {
+	api, ui, other := genaiLegacy("genai-api"), genaiLegacy("genai-ui"), genaiLegacy("genai-other")
+	db := newGenaiDB(0)
+	r, err := runPrepare(t, genaiApp, noRead{t}, false, true, nil, db, genaiMasterPod(), api, ui, other)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if r.muts.deletes != 2 {
+		t.Errorf("deletes = %d, want 2 (genai-api, genai-ui; never genai-other)", r.muts.deletes)
+	}
+	if db.writes() != 0 {
+		t.Errorf("the SQL ran with no row left to rewrite")
+	}
+	if r.backups != 1 {
+		t.Errorf("backups = %d, want 1 before the deletes", r.backups)
 	}
 }
 
