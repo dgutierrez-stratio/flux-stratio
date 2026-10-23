@@ -1,0 +1,46 @@
+# This is the tenant's ResourceSetInputProvider — hand-authored, keep it tidy.
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: stratio
+  namespace: flux-system
+  labels:
+    keos.stratio.com/resourceset-type: tenant-config
+spec:
+  type: Static
+  defaultValues:
+    tenantName: stratio
+    size: S
+    # internal bucket used for backups
+    internalS3BucketName: ""
+    sopsSecretProvided: true
+    userEmail: dgutierrez@stratio.com
+    userId: dgutierrez
+    userName: dgutierrez
+    components:
+      connectors:
+      - name: connectors
+      postgres:
+      - name: psql
+        config:
+          dependencies:
+            pgbackuprepository:
+              name: pgbackuprepository
+          # gosec agent for psql is configured below
+          agent:
+            enabled: true
+      pgbouncer:
+      - name: pool-psql
+        config:
+          dependencies:
+            postgres:
+              name: psql
+      # rocket is not yet migrated
+      # rocket:
+      # - name: rocket
+      #   config:
+      #     dependencies:
+      #       genai:
+      #         name: genai
+      opensearch:
+      - name: opensearch1

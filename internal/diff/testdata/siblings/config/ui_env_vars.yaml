@@ -1,0 +1,3 @@
+VAULT_ROLE: {{ .Values.ui.identity.approlename | quote }}
+LOG_LEVEL: {{ .Values.ui.log.level | quote }}
+UI_THEME: {{ .Values.ui.theme | quote }}

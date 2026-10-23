@@ -1,0 +1,1 @@
+TENANT: {{ .Values.common.tenant | quote }}

@@ -1,0 +1,4 @@
+go test fuzz v1
+string("a: 1\n0: ")
+string("0: 0\xff0")
+byte('\x00')
