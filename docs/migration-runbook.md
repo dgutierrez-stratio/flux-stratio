@@ -163,6 +163,15 @@ also before the SQL, with the rows it changes in `<backup>/prepare/`), and to pu
 names the objects it deletes and the ones it leaves; none of them is a catalog-wide default. A re-run after the
 cutover says `already satisfied` and changes nothing.
 
+**Gosec agents** (`psql-agent`, `opensearch1-agent`) are not replaced by the chart's differently named
+`psql-gosec-agent` / `<entry>-gosec-agent`, so both run. They overwrite each other: the legacy OpenSearch agent
+(role `metrics` by default) and the new one (role `prometheus`, set by the chart) each delete the other's monitoring
+role on every pass, about 40 times per agent in 10 minutes, and the Postgres ones race on the same `REVOKE` sweeps.
+`prepare-gosec-agent` scales the legacy agent to 0 (the Deployment stays), with a backup first. Before the push this
+leaves the datastore without an agent for about a minute, harmless for a 15 to 30 s cycle. To roll back, `kubectl scale
+deploy <name> --replicas=<n>` with the count the plan printed (`was <n>`). The role that remains is `prometheus`. Only
+these two types have the step; the keos-core agents are Flux-managed and never touched.
+
 **Virtualizer** is three legacy Deployments (the server, `virtualizer-monitor`, `virtualizer-ui`) that the
 chart renders as one release, each under a new immutable selector. `tenant import` writes `uiEnabled: true`
 on the virtualizer entry while the monitor or ui run, which makes the chart render them; pushed before the

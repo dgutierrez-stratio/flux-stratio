@@ -263,6 +263,8 @@ For each app it (1) compares desired state and live exactly like "apps diff",
 
 Prepare steps change the live cluster (a backup is taken first). Today:
   datamarket-agent  suspend and scale down the legacy agent
+  postgres-gosec-agent, opensearch-gosec-agent
+                    scale the legacy agent Deployment to 0 (it would fight the new one)
   bdl-datarest      remove the legacy ingress that collides with the new one, and
                     the legacy Deployment (new immutable selector)
   dlc-entity        remove the legacy ingress and Deployment

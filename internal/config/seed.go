@@ -81,6 +81,8 @@ func SeedCatalog() Catalog {
 			Entry:     gosecAgentEntry,
 			Object:    "{{ .Entry }}-gosec-agent",
 			Chart:     &Chart{Path: "gosec-agent"},
+			Prepare:   "prepare-gosec-agent",
+			Notes:     "prepare-gosec-agent runs automatically before migrating: scales the legacy Postgres agent Deployment to 0 (kept, not deleted; roll back with kubectl scale), because it runs next to the new one and the two overwrite each other. Flux-managed keos-core agents are never touched.",
 			Exclude: []string{
 				"spec.values.gosecAgent.environment.domainsConfig.mappingUrl",
 				"spec.values.gosecAgent.environment.agent.agentServiceName",
@@ -118,6 +120,8 @@ func SeedCatalog() Catalog {
 			Entry:     gosecAgentEntry,
 			Object:    "{{ .Entry }}-gosec-agent",
 			Chart:     &Chart{Path: "gosec-agent"},
+			Prepare:   "prepare-gosec-agent",
+			Notes:     "prepare-gosec-agent runs automatically before migrating: scales the legacy OpenSearch agent Deployment to 0 (kept, not deleted; roll back with kubectl scale), because it runs next to the new one and the two overwrite each other. Flux-managed keos-core agents are never touched.",
 			Exclude: []string{
 				"spec.values.gosecAgent.environment.vault",
 				"spec.values.gosecAgent.environment.agent.agentServiceName",

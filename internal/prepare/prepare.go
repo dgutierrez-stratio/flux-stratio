@@ -313,6 +313,7 @@ func (o Operation) Apply(ctx context.Context, c client.Client) error {
 // names the one it needs via config.App.Prepare.
 var Steps = []Step{
 	stepDatamarketAgent,
+	stepGosecAgent,
 	stepDatarest,
 	stepDLC,
 	stepGenAI,

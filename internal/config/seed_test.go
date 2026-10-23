@@ -30,6 +30,8 @@ func TestSeedCatalog_GatedTypesDeclarePrepare(t *testing.T) {
 		{"dg-agent", "prepare-dg-agent"},
 		{"discovery", "prepare-discovery"},
 		{"litellm", "prepare-litellm"},
+		{"postgres-gosec-agent", "prepare-gosec-agent"},
+		{"opensearch-gosec-agent", "prepare-gosec-agent"},
 	}
 	for _, c := range cases {
 		typ := cat.Find(c.typ)

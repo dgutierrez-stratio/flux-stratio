@@ -92,7 +92,7 @@ func applyAll(t *testing.T, c client.Client, ops []Operation) {
 }
 
 func TestFind(t *testing.T) {
-	for _, name := range []string{"prepare-datamarket-agent", "prepare-datarest", "prepare-dlc", "prepare-genai", "prepare-virtualizer", "prepare-dg-agent", "prepare-discovery", "prepare-eureka-agent", "prepare-intelligence", "prepare-rocket", "prepare-litellm"} {
+	for _, name := range []string{"prepare-datamarket-agent", "prepare-gosec-agent", "prepare-datarest", "prepare-dlc", "prepare-genai", "prepare-virtualizer", "prepare-dg-agent", "prepare-discovery", "prepare-eureka-agent", "prepare-intelligence", "prepare-rocket", "prepare-litellm"} {
 		if Find(name) == nil {
 			t.Errorf("Find(%q) = nil, want a step", name)
 		}
@@ -105,6 +105,7 @@ func TestFind(t *testing.T) {
 func TestSteps_ExactlyOneShapePerStep(t *testing.T) {
 	want := map[string]string{
 		"prepare-datamarket-agent": "automated",
+		"prepare-gosec-agent":      "automated",
 		"prepare-datarest":         "automated",
 		"prepare-dlc":              "automated",
 		"prepare-genai":            "query",

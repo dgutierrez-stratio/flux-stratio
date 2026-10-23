@@ -2,6 +2,13 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`prepare-gosec-agent` scales the legacy gosec agents to 0, so they stop interfering with their replacements.** The
+  legacy `opensearch1-agent` and the new `opensearch1-gosec-agent` deleted each other's monitoring role every ~14.5 s
+  (the legacy image names it `metrics` unless `OPENSEARCH_METRICS_USER` is set, the chart sets `prometheus`; each agent
+  deletes every role it doesn't whitelist, and its own metrics role is the only one it does), and the Postgres pair raced
+  on the same `REVOKE` sweeps. Component-scoped (`postgres-gosec-agent` and `opensearch-gosec-agent` only, never a
+  catalog-wide default), scale only (the Deployment is kept, the plan shows the old replica count for the rollback),
+  keos-core agents untouched. Context: `docs/TASK-16-prepare-gosec-agent-scale-legacy-to-zero.md`.
 * **Prepare steps delete the legacy Deployment of the apps whose chart changes its immutable selector, and the `[ACTION]`
   that announced it stops misfiring.** On eosdev `dg-datarest-pgi`, `eureka-agent`, `genai-api`, `genai-ui`, `rocket` and
   `intelligence` each printed `[ACTION] 1 workload(s) can't be updated in place` and the operator deleted the Deployment
