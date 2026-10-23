@@ -72,7 +72,7 @@ placeholders from Step 0.
 | **Ownership / grouping** | Is it owned by something? Does the component deploy several anchor-like objects? | `ownerReferences`, and which objects share `application_service` / `application_model` | Owned objects are skipped automatically, so select the owner. For several workloads, pin the anchor by model, or group them with an `entry` template |
 | **Sibling workloads** (chart mode) | Does the chart render several workloads that CCT deployed as **separate apps** (one `application_model` each, no HelmRelease tying them together)? | Workloads the chart renders (`apps diff` names any not found live; or `helm template` the chart) vs. live objects sharing the anchor's `application_service` in its namespace, and their `application_model`s. Leave out models that are their own component (genai's `genai-litellm` → `litellm`), models the chart no longer renders (`genai-gateway`), and owned sub-workloads | `chart.siblings`, one selector per sibling model. Without it a CCT backup holds only the anchor, so `apps diff/migrate --baseline` can't patch the siblings and drift can't see them. Verify each sibling's live name equals its rendered name (pairing is by name) |
 | **Sibling switch** (chart mode, only with `chart.siblings`) | Which tenant-file config key turns the siblings' workloads on in the chart? Left at its default, the next release removes live siblings | The rset block: `grep -n 'componentConfig' <keos-use-cases>/apps/components/resourceset-apps-<x>.yaml`, then the `${...}` it feeds in `<keos-apps>/components/<dir>/app/base/helm.yaml` (virtualizer: `uiEnabled` → `STRATIO_VIRTUALIZER_UI_ENABLED` → `controllers.ui.enabled`/`controllers.monitor.enabled`). No key means the siblings are always rendered | `chart.enabledBy: <key>`. `tenant import` then writes it `true` when a sibling runs live (legacy or Helm-managed) and `false` otherwise; the immutable-selector collision it causes must be covered by a `prepare` step |
-| **Dependency switches** (chart mode) | Which dependencies does the ResourceSet gate on `enabled`, and what proves the app uses each one? A gated dependency left at its default (`false`) is dropped from `dependsOn` and the chart's prerequisites skip its setup (rocket without `genai.enabled` gets 403 from genai-api) | Gates: `grep -n '"enabled" \| default' <keos-use-cases>/apps/components/resourceset-apps-<x>.yaml`, and the `*_ENABLED` substitutions it feeds. Evidence: the chart value or `*_ENABLED` env that turns the integration on (`<charts>/<chart>/config/*env_vars.yaml`, `values.yaml`), a host/URL value pointing at the dependency, and their values in a live migrated HelmRelease (`kubectl get helmrelease <name> -n <ns> -o yaml`, `spec.values`: the migration patch keeps the legacy configuration there). Record each gate as `uses` or as "warn only" when no value proves it | `chart.uses: [{dependency, values: [<dotted path in spec.values>]}]`, one rule per gated dependency with evidence. A path counts when set to anything but null, `false`, `""`, `"false"` or zero. Without a live HelmRelease (app not migrated yet) `tenant import` can only warn, so say so in the type's comment |
+| **Dependency switches** (chart mode) | Does the ResourceSet gate any dependency on `enabled`? A gated dependency left at its default (`false`) is dropped from `dependsOn` and the chart's prerequisites skip its setup (rocket without `genai.enabled` gets 403 from genai-api) | Nothing to record: `tenant import` reads the gates from the keos-use-cases templates and asks about each gated dependency that runs on the cluster, for every type. Check what it will ask: `grep -n '"enabled" \| default' <keos-use-cases>/apps/components/resourceset-apps-<x>.yaml`, and that each gated dependency's component is one a catalog type produces (`flux stratio doctor` and `TestSeed_EveryGatedDependencyCanBeProposed` fail otherwise) | no catalog field: do **not** add `chart.uses`, it is deprecated and ignored |
 | **Tenant scope** | Does another tenant (e.g. the platform's `keos`) run a copy? | `cct.stratio.com/application_tenant` on each candidate | Handled automatically; mention it in the type's comment |
 | **Coordinates** | Which component key, rset file and Kustomization name? Is the patch anchor the default, nested (`config.agent`-style), or not patchable (`patches: []`)? | The template block (below) | `component`, `rset`, `kustomization`, `anchor` |
 | **Renames** | Does the GitOps entry/object name differ from the live name? | The template's `name:` and `postBuild.substitute` (e.g. `*_NAME: << get $component "name" >>`, `-gosec-agent` suffixes) vs. the live name. Also `flux stratio tenant import` output | `entry`, `object` templates |
@@ -139,7 +139,7 @@ anything that doesn't conform.
 | `chart.valuesRoot` | no | chart mode only: pins the `.Values` root when a chart has several flavors |
 | `chart.siblings` | no | chart mode only: a list of `match`-shaped selectors (`kinds` limited to `apps/v1` Deployment/StatefulSet/DaemonSet, plus `annotations`/`labels`) for the chart's other workloads CCT deployed as separate apps. A sibling joins the one instance of this type in its namespace, after the anchor; it never becomes an instance itself |
 | `chart.enabledBy` | no | chart mode only, needs `chart.siblings`: the tenant-file config key (e.g. `uiEnabled`) that switches the siblings' workloads on in the chart. `tenant import` writes it `true` when any sibling runs live (a legacy CCT Deployment or already Helm-managed, matched by the sibling selector's `application_model`) and `false` otherwise |
-| `chart.uses` | no | chart mode only: a list of `{dependency, values}`. `dependency` is the tenant-file dependency key (`config.dependencies.<key>`) whose `enabled` the ResourceSet reads; `values` are dotted paths into the live HelmRelease `spec.values` (at least one, no empty segments). The dependency is in use when any is set to something other than null, `false`, `""`, `"false"` or zero; `tenant import` then writes `enabled: true`. One entry per dependency |
+| `chart.uses` | no | **Deprecated, ignored**: dependencies' `enabled` is detected from the keos-use-cases templates for every type (see the runbook). Do not write it; a catalog that has it loads with a warning |
 | `match.kinds` | yes | list of `group/version/Kind` (`version/Kind` for the core group). The version isn't compared at match time |
 | `match.annotations` / `match.labels` | at least one | `matchLabels: {k: v}` and/or `matchExpressions: [{key, operator, values}]`. Operators: `In` or `NotIn` (with values), `Exists` or `DoesNotExist` (without) |
 | `configFromEnv` | no | list of `{key, env, values \| pattern}`: tenant-file config `tenant import` derives from a literal env var of the legacy workload, `key` being `type`, `dependencies.<key>.name` or a config field the rset reads (`postgresDatabase`). `values` maps the live value (a value it does not list means no GitOps equivalent: the app is not imported); `pattern` has one capture group. Use it when what the legacy app was configured with picks the GitOps flavor (a storage-type overlay) or names a dependency, e.g. `dg-agent` |
@@ -233,7 +233,7 @@ Invalid block, corrected:
 | One type, several flavors | `dg-agent` (`In` over `connectors-dfs`, `connectors-rdbms`) |
 | Model pins the anchor, siblings declared | `virtualizer` (`application_model: default`, `chart.siblings`: `virtualizer-monitor`, `virtualizer-ui`) |
 | Sibling switch | `virtualizer` (`chart.enabledBy: uiEnabled`; `prepare-virtualizer` clears the legacy siblings it switches on) |
-| Dependency switches | `rocket` (`chart.uses`: `genai`, `virtualizer`) and `intelligence` (`genai`, `virtualizer`, `opensearch`, `litellm`), each path read from the migrated HelmRelease values |
+| Dependency switches | none in the catalog: every gated dependency (rocket's `genai`/`virtualizer`, intelligence's four, genai's `discovery`/`opensearch`, discovery's `virtualizer`) is detected from the templates and asked about |
 | Model excludes owned sub-workloads | `rocket` (`application_model: default`; its sub-Deployments are owned, and the chart renders one workload) |
 
 ## Step 4 — Validate, then test against the live cluster
@@ -273,18 +273,17 @@ Invalid block, corrected:
    `genaiUi.*`), and must not report any live sibling as missing from the backup. A sibling that joins
    no instance is warned about during classification (no anchor, or several anchors, in its
    namespace).
-6. **Switches declared (`chart.enabledBy` / `chart.uses`)?** Run it against a scratch copy of the tenant
+6. **Switches (`chart.enabledBy`, and the gated dependencies the templates declare)?** Run it against a scratch copy of the tenant
    file, never the real one:
    ```shell
    cp <tenant-file> <scratch>/tenant.yaml
    flux stratio tenant import --dry-run --output <scratch>/tenant.yaml
    ```
-   The diff must add the sibling switch (`uiEnabled: true`) when siblings run, and
-   `dependencies.<dep>.enabled: true` for exactly the dependencies the evidence covers, each line saying
-   which `spec.values` path proved it. A dependency the ResourceSet gates but the type has no rule for must
-   be one you recorded as "warn only" in Step 2. An app with no HelmRelease yet warns "cannot tell
-   whether it uses dependency": expected before migration, and a reason to run `tenant import` again after
-   `apps migrate`. A second run must add nothing.
+   The diff must add the sibling switch (`uiEnabled: true`) when siblings run. Every gated dependency
+   that runs on the cluster is asked about (the question says what turning it on changes); with `--dry-run`
+   it is listed as undecided, so run it once without `--dry-run` on the scratch copy to answer, or with
+   `--yes`. A gated dependency that does not run is reported as "not running". A second run must add and ask
+   nothing.
 
 ## Step 5 — Review the patch with the operator (approval gate)
 
@@ -337,14 +336,13 @@ Everything here is in `<repo>`:
 3. Tests:
    - `internal/components/classify_test.go`: the expected instance list. Siblings appear after the
      anchor in the instance's live names, e.g. `virtualizer stratio-apps/virtualizer,virtualizer-monitor`;
-   - `internal/config/seed_test.go`: the type count, and for a type with `chart.uses` or `chart.enabledBy`
-     a test like `TestSeedCatalog_RocketAndIntelligenceDeclareTheirUses` naming its rules;
-   - `internal/tenantimport/uses_test.go`: the evidence for each rule (a value set, a value `false`/absent,
-     no HelmRelease);
+   - `internal/config/seed_test.go`: the type count, and for a type with `chart.enabledBy` a test naming it;
+   - nothing for dependency switches: `internal/tenantimport/deps_test.go` covers every component through one
+     path, and `TestSeed_EveryGatedDependencyCanBeProposed` checks the real templates against the seed;
    - `internal/components/resolve_test.go`: the instance counts.
 4. Docs:
-   - `docs/config-reference.md`: the "Seeded types" table and count (and `chart.enabledBy`/`chart.uses` rows if
-     the type introduces a new use of them);
+   - `docs/config-reference.md`: the "Seeded types" table and count (and the `chart.enabledBy` row if the type
+     introduces a new use of it);
    - README and CONTEXT.md: the type count;
    - CHANGELOG: one line with the decisions.
 5. Verify:
@@ -365,9 +363,9 @@ Stop and propose a plugin change (code, tests and docs, with the operator's go-a
 - a sibling workload's live name differs from its rendered name, or it lives in a different
   namespace than its anchor (siblings pair by name, and join an instance in their own namespace);
 - the patch shape isn't one `internal/catalog` recognizes;
-- a sibling or dependency switch whose evidence is not a HelmRelease value (a CCT Deployment env var, a
-  ConfigMap, a CR field), or a gated dependency that no value of a migrated app can prove: `chart.uses` only
-  reads `spec.values`, so the plugin needs a new evidence source before a rule can be written.
+- a sibling switch (`chart.enabledBy`) whose evidence is not the presence of a sibling workload, or a gated
+  dependency whose component no catalog type produces (`tenant import` could never find it running): the
+  plugin needs a new evidence source, or a catalog type, before it can be proposed.
 
 ## Worked example: opendashboards on eosdev
 

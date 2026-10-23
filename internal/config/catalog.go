@@ -151,24 +151,19 @@ type Chart struct {
 	// Helm-managed — and false otherwise, so a missing key can't make the
 	// next release remove them. Needs Siblings.
 	EnabledBy string `yaml:"enabledBy,omitempty"`
-	// Uses lists the dependencies whose tenant-file `enabled` switch the
-	// chart's own configuration decides. `tenant import` writes
-	// `dependencies.<dependency>.enabled: true` when the entry's live
-	// HelmRelease values show the integration in use, and warns when it
-	// cannot tell (no HelmRelease yet): left off, the ResourceSet drops the
-	// dependency and the chart's prerequisites skip its setup.
+	// Uses is deprecated and ignored. An earlier release listed here, per
+	// type, the dependencies whose `enabled` `tenant import` derives from the
+	// HelmRelease values; it now detects every dependency the keos-use-cases
+	// templates gate on `enabled`, for every type, and asks (see
+	// internal/tenantimport). The field stays so a catalog.yaml seeded by that
+	// release still loads; Catalog.Deprecated names it.
 	Uses []Use `yaml:"uses,omitempty"`
 }
 
-// Use is one dependency a chart may or may not use, with the HelmRelease
-// values that prove it does.
+// Use is a deprecated chart.uses entry (see Chart.Uses); nothing reads it.
 type Use struct {
-	// Dependency is the tenant-file dependency key (config.dependencies.<key>).
-	Dependency string `yaml:"dependency"`
-	// Values are dotted paths into the HelmRelease's spec.values. The
-	// dependency is in use when any of them is set to something other than
-	// false, an empty string, zero or null.
-	Values []string `yaml:"values"`
+	Dependency string   `yaml:"dependency"`
+	Values     []string `yaml:"values"`
 }
 
 // Match selects live objects: an object matches when its kind is one of
@@ -301,14 +296,6 @@ func (t ComponentType) EnabledBy() string {
 	return t.Chart.EnabledBy
 }
 
-// Uses is Chart.Uses, or nil for a manifest-mode type.
-func (t ComponentType) Uses() []Use {
-	if t.Chart == nil {
-		return nil
-	}
-	return t.Chart.Uses
-}
-
 // SiblingNames returns the workload name of every sibling: the
 // application_model annotation value its selector requires, which for CCT
 // is also the Deployment's name, and stays the name once Helm manages the
@@ -359,6 +346,19 @@ var TemplateFuncs = template.FuncMap{
 	"lower":      strings.ToLower,
 }
 
+// Deprecated lists what the catalog still carries that is no longer read, one
+// line each, for the commands that load it to print: nothing in it stops the
+// catalog from loading.
+func (c Catalog) Deprecated() []string {
+	var out []string
+	for _, t := range c.Types {
+		if t.Chart != nil && len(t.Chart.Uses) > 0 {
+			out = append(out, fmt.Sprintf("type %q: chart.uses is no longer used and is ignored: `tenant import` detects the dependencies to enable from the keos-use-cases templates, for every type (remove it from the catalog)", t.Type))
+		}
+	}
+	return out
+}
+
 func (c Catalog) validate() error {
 	var problems []string
 	if len(c.Types) == 0 {
@@ -401,25 +401,6 @@ func (c Catalog) validate() error {
 
 		if t.EnabledBy() != "" && len(t.SiblingMatches()) == 0 {
 			add("chart.enabledBy: %q needs chart.siblings — it names the key that switches the siblings on", t.EnabledBy())
-		}
-
-		seenUse := map[string]bool{}
-		for j, u := range t.Uses() {
-			switch {
-			case strings.TrimSpace(u.Dependency) == "":
-				add("chart.uses[%d].dependency is required", j)
-			case seenUse[u.Dependency]:
-				add("chart.uses[%d]: dependency %q is listed twice", j, u.Dependency)
-			}
-			seenUse[u.Dependency] = true
-			if len(u.Values) == 0 {
-				add("chart.uses[%d].values: at least one path into the HelmRelease values is required", j)
-			}
-			for _, v := range u.Values {
-				if strings.TrimSpace(v) == "" || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") || strings.Contains(v, "..") {
-					add("chart.uses[%d].values: %q is not a dotted path", j, v)
-				}
-			}
 		}
 
 		for j, c := range t.ConfigFromEnv {

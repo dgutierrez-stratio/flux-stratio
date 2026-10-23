@@ -98,10 +98,6 @@ func enrichEntry(schema catalog.Schema, entry *Entry, components Components, req
 		}
 	}
 
-	for _, dep := range undecidedUses(entry) {
-		warn(undecidedUseFormat, entry.Name, dep)
-	}
-
 	if entry.ExtraConfig == nil {
 		entry.ExtraConfig = map[string]any{}
 	}

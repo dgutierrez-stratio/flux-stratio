@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -402,51 +401,35 @@ func TestSeedCatalog_VirtualizerEnabledByNamesItsSiblings(t *testing.T) {
 	}
 }
 
-func TestLoad_ChartUses(t *testing.T) {
-	withChart := func(extra string) string {
-		return strings.Replace(validCatalogYAML, "    chart:\n      path: gosec-agent\n",
-			"    chart:\n      path: gosec-agent\n"+extra, 1)
+func TestLoad_DeprecatedChartUsesStillLoadsAndIsReported(t *testing.T) {
+	// A catalog.yaml seeded by an earlier release carries chart.uses; loading is
+	// strict, so the field must stay accepted. Nothing reads it any more.
+	old := strings.Replace(validCatalogYAML, "    chart:\n      path: gosec-agent\n",
+		"    chart:\n      path: gosec-agent\n      uses:\n        - dependency: genai\n          values: [a.b.enabled]\n", 1)
+	cat, err := Load(writeFile(t, "catalog.yaml", old))
+	if err != nil {
+		t.Fatalf("Load returned error for a catalog with chart.uses: %v", err)
+	}
+	got := cat.Deprecated()
+	if len(got) != 1 || !strings.Contains(got[0], "chart.uses") || !strings.Contains(got[0], cat.Types[1].Type) {
+		t.Errorf("Deprecated() = %q, want one line naming type %q and chart.uses", got, cat.Types[1].Type)
 	}
 
-	cat, err := Load(writeFile(t, "catalog.yaml", withChart("      uses:\n        - dependency: genai\n          values: [a.b.enabled]\n")))
+	clean, err := Load(writeFile(t, "catalog.yaml", validCatalogYAML))
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	got := cat.Types[1].Uses()
-	if len(got) != 1 || got[0].Dependency != "genai" || len(got[0].Values) != 1 || got[0].Values[0] != "a.b.enabled" {
-		t.Errorf("Uses = %+v, want genai/[a.b.enabled]", got)
-	}
-
-	for name, extra := range map[string]string{
-		"no dependency": "      uses:\n        - values: [a.b]\n",
-		"no values":     "      uses:\n        - dependency: genai\n",
-		"bad path":      "      uses:\n        - dependency: genai\n          values: [a..b]\n",
-		"duplicate":     "      uses:\n        - dependency: genai\n          values: [a]\n        - dependency: genai\n          values: [b]\n",
-	} {
-		_, err := Load(writeFile(t, "catalog.yaml", withChart(extra)))
-		if err == nil || !strings.Contains(err.Error(), "chart.uses") {
-			t.Errorf("%s: Load error = %v, want a chart.uses problem", name, err)
-		}
+	if got := clean.Deprecated(); len(got) != 0 {
+		t.Errorf("Deprecated() = %q on a catalog without chart.uses, want none", got)
 	}
 }
 
-func TestSeedCatalog_RocketAndIntelligenceDeclareTheirUses(t *testing.T) {
-	want := map[string][]string{
-		"rocket":       {"genai", "virtualizer"},
-		"intelligence": {"genai", "virtualizer", "opensearch", "litellm"},
-	}
-	for typeID, deps := range want {
-		typ := SeedCatalog().Find(typeID)
-		if typ == nil {
-			t.Fatalf("seed has no %s type", typeID)
-		}
-		var got []string
-		for _, u := range typ.Uses() {
-			got = append(got, u.Dependency)
-		}
-		if !slices.Equal(got, deps) {
-			t.Errorf("%s uses = %v, want %v", typeID, got, deps)
-		}
+func TestSeedCatalog_DeclaresNoChartUses(t *testing.T) {
+	// Dependencies are detected from the keos-use-cases templates for every
+	// type, so no type carries a per-type rule, rocket and intelligence included.
+	seed := SeedCatalog()
+	if got := seed.Deprecated(); len(got) != 0 {
+		t.Errorf("the seed carries deprecated settings: %q", got)
 	}
 }
 

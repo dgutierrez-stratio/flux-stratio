@@ -16,8 +16,6 @@
 // longer a component key of its own — see internal/catalog's package doc.
 package tenantimport
 
-import "fmt"
-
 // Entry is one discovered (or skeleton) component instance, threaded
 // through the scan -> expand -> enrich pipeline.
 type Entry struct {
@@ -35,13 +33,14 @@ type Entry struct {
 	// ExtraConfig holds extra scalar config fields resolved during
 	// enrichment (see internal/catalog.Schema.ExtraConfig).
 	ExtraConfig map[string]any
-	// DepEnabled maps a dependency key to the HelmRelease values path that
-	// shows this entry uses it (see scanUses): its `enabled: true` is written.
-	DepEnabled map[string]string
-	// DepAssumed marks the dependencies with a chart.uses rule that have no
-	// HelmRelease evidence either way but whose component runs on the cluster
-	// (see assumeLiveUses): `enabled: true` is written on that weaker ground.
-	DepAssumed map[string]bool
+	// DepGate holds, by dependency key, every gated dependency of this entry
+	// that runs on the cluster: the proposal to enable it (see markGates).
+	DepGate map[string]DepGate
+	// DepAbsent marks the gated dependencies that do not run on the cluster.
+	DepAbsent map[string]bool
+	// DepState is the answer to each proposal (see Decider.decide). Only an
+	// answered dependency has an entry.
+	DepState map[string]DepState
 	// FromEnv is the config the entry's legacy workload's env supplied (see
 	// config.EnvConfig), by config field: the cluster's own value, which wins
 	// over the template default.
@@ -49,9 +48,6 @@ type Entry struct {
 	// Ambiguous maps a dependency key to every entry it could have resolved to,
 	// when the scan had to choose among several (Deps holds the choice).
 	Ambiguous map[string][]string
-	// DepUnknown marks the dependencies with a chart.uses rule that could not
-	// be decided because the entry has no live HelmRelease yet.
-	DepUnknown map[string]bool
 }
 
 // Components is component key -> discovered entries, the working set
@@ -86,30 +82,20 @@ func (c Components) names(key string) []string {
 	return out
 }
 
-// depConfig is the config.dependencies.<key> block of e: its name, and
-// `enabled: true` when the entry's HelmRelease shows it uses the dependency
-// and the name is resolved.
+// depConfig is the config.dependencies.<key> block of e: its name, and its
+// `enabled` when the operator answered the proposal (true, or false when they
+// left it off) and the name is resolved.
 func (e *Entry) depConfig(key, name string) map[string]any {
 	dep := map[string]any{"name": name}
-	if name != "" && (e.DepEnabled[key] != "" || e.DepAssumed[key]) {
-		dep["enabled"] = true
+	if name != "" {
+		switch e.DepState[key] {
+		case DepOn:
+			dep["enabled"] = true
+		case DepOff:
+			dep["enabled"] = false
+		}
 	}
 	return dep
-}
-
-// enabledReason says why e's dependency key is written `enabled: true`: the
-// HelmRelease value that proves it, or the assumption that the component
-// running on the cluster is one it uses. "" when neither applies (e may be nil).
-func (e *Entry) enabledReason(key string) string {
-	switch {
-	case e == nil:
-		return ""
-	case e.DepEnabled[key] != "":
-		return fmt.Sprintf("spec.values.%s is set in its HelmRelease", e.DepEnabled[key])
-	case e.DepAssumed[key]:
-		return "assumed: it runs on the cluster and no HelmRelease says otherwise"
-	}
-	return ""
 }
 
 // fromEnv is the value e's legacy workload's env gave config field key (e may

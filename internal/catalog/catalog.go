@@ -29,6 +29,16 @@ type Dependency struct {
 	// dependency is referenced inside an `if eq $storageType "<type>"`
 	// block. Empty means the dependency is unconditional.
 	StorageTypes []string
+	// Gated is set when the template reads this dependency's `enabled`
+	// (`get $<key>Dependency "enabled"`): the tenant file's value is what
+	// wires the dependency in, and it defaults to off when absent. A dependency
+	// that is not gated is always wired in.
+	Gated bool
+	// Adds says, for a gated dependency, what turning it on changes besides the
+	// value itself: the variable it sets for the chart, a dependsOn it adds, a
+	// Kustomization it creates. Hints read from the template text to tell the
+	// operator what they are agreeing to; empty when the template shows none.
+	Adds []string
 }
 
 // ExtraConfigField is one scalar field a component's template reads via

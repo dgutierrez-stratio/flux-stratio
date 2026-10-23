@@ -124,6 +124,20 @@ hand (fields, comments, patches): use it only on a file you want replaced.
 (the keos-apps size overlays); it does not change what the legacy apps were
 given.
 
+Optional dependencies. Some dependencies are wired in only when the tenant
+file says "enabled: true" on them (genai's discovery and opensearch, rocket's
+genai, ...); left out, the app silently loses the integration. The
+keos-use-cases templates say which dependency of which app is switched that
+way, so every app is covered, with no list to maintain. When such a
+dependency runs on the cluster the command proposes enabling it and asks, in
+the terminal, saying what turning it on also changes; "leave it off" is
+written as "enabled: false" so it is not asked again. A value already in the
+file is never asked about or changed. With --yes every proposal is accepted
+without asking (and reported, to review); with no terminal to ask on, or
+--dry-run, a proposal is left undecided and reported, since silence never
+means yes. A switchable dependency that does not run on the cluster is left
+off and reported.
+
 Fields a template reads that have no default and can't be derived from the
 cluster (litellm's models, ...) are never dropped silently: each is reported
 as a warning to set by hand. A required block whose keys the template reads
@@ -147,7 +161,8 @@ const tenantImportExample = `  flux stratio tenant import                       
   flux stratio tenant import --output stratio.yaml --size M   # create it, default size M
   flux stratio tenant import --output stratio.yaml --dry-run  # file exists: show what would be added
   flux stratio tenant import --output stratio.yaml            # file exists: add what is missing
-  flux stratio tenant import --output stratio.yaml --force    # replace an existing file`
+  flux stratio tenant import --output stratio.yaml --force    # replace an existing file
+  flux stratio tenant import --output stratio.yaml --yes      # enable the dependencies that run, without asking`
 
 const appsLong = `Back up, compare and migrate the apps CCT installed on the cluster.
 <name> in these commands is the live object's name (psql, kafka1) or its

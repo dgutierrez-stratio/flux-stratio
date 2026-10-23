@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/Stratio/flux-stratio/internal/catalog"
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
@@ -607,6 +608,41 @@ func TestMissingSeedTypes(t *testing.T) {
 	got := missingSeedTypes(&old)
 	if len(got) != 1 || !strings.Contains(got[0], `"connectors"`) || !strings.Contains(got[0], "config init --force") {
 		t.Errorf("missingSeedTypes = %v, want one line naming connectors and how to re-seed", got)
+	}
+}
+
+func TestUnsuppliedGates(t *testing.T) {
+	templates := &catalog.Catalog{Schemas: map[string]catalog.Schema{
+		"genai": {Key: "genai", Dependencies: []catalog.Dependency{
+			{Key: "discovery", Gated: true},
+			{Key: "postgres"}, // not gated: always wired in
+		}},
+	}}
+	seed := config.SeedCatalog()
+	if got := unsuppliedGates(&seed, templates); len(got) != 0 {
+		t.Errorf("the seed reports %v, want a type producing discovery", got)
+	}
+
+	// Without a type producing discovery, genai's switch on it could never be
+	// proposed: nothing would be found running.
+	var kept []config.ComponentType
+	for _, ty := range seed.Types {
+		if ty.Component != "discovery" {
+			kept = append(kept, ty)
+		}
+	}
+	seed.Types = kept
+	got := unsuppliedGates(&seed, templates)
+	if len(got) != 1 || !strings.Contains(got[0], "components.genai") || !strings.Contains(got[0], `"discovery"`) {
+		t.Errorf("unsuppliedGates = %v, want one line naming genai and discovery", got)
+	}
+
+	// A component the catalog does not recognise is not its business.
+	only := &catalog.Catalog{Schemas: map[string]catalog.Schema{
+		"unknownapp": {Key: "unknownapp", Dependencies: []catalog.Dependency{{Key: "discovery", Gated: true}}},
+	}}
+	if got := unsuppliedGates(&seed, only); len(got) != 0 {
+		t.Errorf("unsuppliedGates = %v for a component no type produces, want none", got)
 	}
 }
 

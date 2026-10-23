@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -232,6 +233,9 @@ func checkCatalog(opts Options) (*config.Catalog, Check) {
 	for _, msg := range missingSeedTypes(cat) {
 		opts.Log.Warningf("%s", msg)
 	}
+	for _, msg := range cat.Deprecated() {
+		opts.Log.Warningf("%s", msg)
+	}
 	return cat, Check{Name: CheckCatalog, OK: true, Detail: fmt.Sprintf("%d type(s)", len(cat.Types))}
 }
 
@@ -380,7 +384,11 @@ func valuesPathExists(values map[string]any, path []string) bool {
 // outside the catalog file itself: its component key must be one
 // keos-use-cases's templates declare (else no tenant entry could ever
 // render it), and its prepare step, if any, must be one internal/prepare
-// knows — both otherwise only discovered mid-migration.
+// knows — both otherwise only discovered mid-migration. It also checks that
+// every dependency a template switches on `enabled` for a component the catalog
+// recognises is one a catalog type produces: `tenant import` proposes enabling
+// a dependency only when it finds it running, so one nothing can produce would
+// be reported as "not running" on every cluster.
 func checkTypes(cat *config.Catalog, templates *catalog.Catalog, loadErr error) Check {
 	if loadErr != nil {
 		return Check{Name: CheckTypes, OK: false, Detail: loadErr.Error()}
@@ -394,10 +402,33 @@ func checkTypes(cat *config.Catalog, templates *catalog.Catalog, loadErr error) 
 			problems = append(problems, fmt.Sprintf("%s: unknown prepare step %q", t.Type, t.Prepare))
 		}
 	}
+	problems = append(problems, unsuppliedGates(cat, templates)...)
 	if len(problems) > 0 {
 		return Check{Name: CheckTypes, OK: false, Detail: strings.Join(problems, "; ")}
 	}
 	return Check{Name: CheckTypes, OK: true, Detail: fmt.Sprintf("%d type(s)", len(cat.Types))}
+}
+
+// unsuppliedGates lists, sorted, the gated dependencies of recognised
+// components that no catalog type produces (see checkTypes).
+func unsuppliedGates(cat *config.Catalog, templates *catalog.Catalog) []string {
+	produced := map[string]bool{}
+	for _, t := range cat.Types {
+		produced[t.Component] = true
+	}
+	var out []string
+	for key, schema := range templates.Schemas {
+		if !produced[key] {
+			continue
+		}
+		for _, dep := range schema.Dependencies {
+			if dep.Gated && !produced[dep.Key] {
+				out = append(out, fmt.Sprintf("components.%s: dependency %q is switched on by `enabled` but no catalog type produces %q, so `tenant import` can never find it running", key, dep.Key, dep.Key))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // templateExprRe matches one << >> template expression in a Kustomization

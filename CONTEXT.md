@@ -378,10 +378,16 @@ convention, that repo is the reference:
   template, `configFromEnv` read off the legacy workload's env — → HelmReleases, three passes feeding one `Components`
   map), fixpoint-expanding mandatory
   dependencies, then rendering a tenant-file skeleton (`Run`, Create mode); `Scan` is the same pipeline
-  returning the `Components` + `Live` (config values derived from live siblings via `chart.enabledBy`; each entry also carries
-  `DepEnabled`/`DepUnknown`, from `chart.uses` evaluated over its live HelmRelease values in `uses.go`: the source of a dependency's
-  `enabled: true`, written on Create by `Entry.depConfig` and on Complete by `completeUses`/`AddToDependency`; with no
-  HelmRelease, `assumeLiveUses` takes a dependency whose component runs on the cluster as used — `DepAssumed`),
+  returning the `Components` + `Live` (config values derived from live siblings via `chart.enabledBy`; each entry also carries,
+  from `deps.go`, a proposal (`DepGate`) for every gated dependency that runs on the cluster and a note (`DepAbsent`)
+  for every one that does not. A dependency is gated when its ResourceSet reads `get $<dep>Dependency "enabled"`
+  (`catalog.Dependency.Gated`, with `Adds`: hints of what turning it on changes, read from the template), so no
+  component or dependency is named in Go. `Decider` answers each proposal — it asks (`components.Prompter`), or
+  accepts under `--yes`, or leaves it pending when it cannot ask — and `Entry.DepState` holds the answer, written
+  on Create by `Entry.depConfig` and on Complete by `completeUses`/`AddToDependency` (a declined proposal is
+  written as an explicit `enabled: false` so it is not asked again; a value already in the file is never asked
+  about). `TestSeed_EveryGatedDependencyCanBeProposed` fails when a template gates a dependency no catalog type
+  produces; `chart.uses` is deprecated and ignored),
   and `Complete` (`merge.go`) adds to an existing file only what it lacks — through `internal/tenantfile`'s
   textual `AddToEntry`/`AddTopLevel`/`AppendEntry` (insertions into the file's text, positions read off
   the yaml.Node tree; `Doc.Text()`), never a yaml.v3 re-encode, which would re-indent the file's

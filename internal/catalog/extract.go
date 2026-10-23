@@ -17,7 +17,18 @@ const defaultTail = `(?:\s*\|\s*default\s+(?:"([^"]*)"|(false|true|-?\d+(?:\.\d+
 var (
 	depRe         = regexp.MustCompile(`\$(\w+Dependency)\s*:=\s*get\s+\$dependencies\s+"([^"]+)"`)
 	depVarTokenRe = regexp.MustCompile(`\$(\w+Dependency)\b`)
-	storageIfRe   = regexp.MustCompile(`(?s)<<-?\s*if\s+eq\s+\$storageType\s+"([^"]+)"\s*>>(.*?)<<-?\s*end\s*>>`)
+	// gatedRe finds a read of a dependency's `enabled`; group 1 is the
+	// template variable depRe bound to the dependency key.
+	gatedRe = regexp.MustCompile(`\$(\w+Dependency)\s+"enabled"`)
+	// blockOpenRe and blockCloseRe count the template actions that open and
+	// close a block, to find where an `if ... "enabled"` ends.
+	blockOpenRe  = regexp.MustCompile(`<<-?\s*(?:if|range|with|define|block)\b`)
+	blockCloseRe = regexp.MustCompile(`<<-?\s*end\b`)
+	waitItemRe   = regexp.MustCompile(`^\s*-\s+name:\s+apps-`)
+	kindKsRe     = regexp.MustCompile(`^\s*kind:\s*Kustomization\s*$`)
+	nameLineRe   = regexp.MustCompile(`^\s*name:\s*(\S.*?)\s*$`)
+	actionRe     = regexp.MustCompile(`<<[^>]*>>`)
+	storageIfRe  = regexp.MustCompile(`(?s)<<-?\s*if\s+eq\s+\$storageType\s+"([^"]+)"\s*>>(.*?)<<-?\s*end\s*>>`)
 	// extraConfigRe finds a read of a config field and its `| default`
 	// (see defaultTail).
 	extraConfigRe = regexp.MustCompile(`get\s+\$componentConfig\s+"([^"]+)"` + defaultTail)
@@ -69,13 +80,28 @@ func extractSchema(key, block string) Schema {
 	s := Schema{Key: key}
 
 	seenDep := map[string]bool{}
+	varKey := map[string]string{} // template variable -> dependency key
 	for _, m := range depRe.FindAllStringSubmatch(block, -1) {
 		depKey := m[2]
+		varKey[m[1]] = depKey
 		if seenDep[depKey] {
 			continue
 		}
 		seenDep[depKey] = true
 		s.Dependencies = append(s.Dependencies, Dependency{Key: depKey})
+	}
+
+	gatedVars := map[string]bool{}
+	for _, m := range gatedRe.FindAllStringSubmatch(block, -1) {
+		if depKey, ok := varKey[m[1]]; ok && !gatedVars[m[1]] {
+			gatedVars[m[1]] = true
+			for i := range s.Dependencies {
+				if s.Dependencies[i].Key == depKey {
+					s.Dependencies[i].Gated = true
+					s.Dependencies[i].Adds = gateAdds(block, m[1])
+				}
+			}
+		}
 	}
 
 	for _, m := range storageIfRe.FindAllStringSubmatch(block, -1) {
@@ -350,4 +376,52 @@ func unquote(s string) (string, bool) {
 		return s[1 : len(s)-1], true
 	}
 	return s, false
+}
+
+// gateAdds reads what turning on the dependency bound to template variable
+// v changes, from the template text: the substitution variable that carries
+// its `enabled` into the chart (`DISCOVERY_ENABLED: "<< get $v "enabled" ... >>"`)
+// and, inside each `if get $v "enabled"` block, a dependsOn item and a
+// Kustomization it creates. They are hints for the operator, not a model of the
+// ResourceSet: a shape it does not recognise adds nothing.
+func gateAdds(block, v string) []string {
+	var adds []string
+	add := func(a string) {
+		if !slices.Contains(adds, a) {
+			adds = append(adds, a)
+		}
+	}
+
+	subst := regexp.MustCompile(`(?m)^\s*(\w+):\s*"?<<-?\s*get\s+\$` + regexp.QuoteMeta(v) + `\s+"enabled"`)
+	for _, m := range subst.FindAllStringSubmatch(block, -1) {
+		add("sets " + m[1] + " in the app's chart values")
+	}
+
+	open := regexp.MustCompile(`<<-?\s*if\s+get\s+\$` + regexp.QuoteMeta(v) + `\s+"enabled"`)
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		if !open.MatchString(line) {
+			continue
+		}
+		depth := 1
+		for j := i + 1; j < len(lines) && depth > 0; j++ {
+			l := lines[j]
+			depth += len(blockOpenRe.FindAllString(l, -1)) - len(blockCloseRe.FindAllString(l, -1))
+			if depth <= 0 {
+				break
+			}
+			switch {
+			case waitItemRe.MatchString(l):
+				add("makes the app wait for the dependency (dependsOn)")
+			case kindKsRe.MatchString(l):
+				for k := j + 1; k < len(lines) && k <= j+8; k++ {
+					if m := nameLineRe.FindStringSubmatch(lines[k]); m != nil && strings.HasPrefix(m[1], "apps-") {
+						add("creates the Kustomization " + actionRe.ReplaceAllString(m[1], "*"))
+						break
+					}
+				}
+			}
+		}
+	}
+	return adds
 }

@@ -198,7 +198,7 @@ func TestAddToDependency_AddsAfterTheDependencyAndBeforeANewOne(t *testing.T) {
 	if err := d.AddToDependency(entry, "pgbackuprepository", []Field{{"enabled", true}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.AddToEntry(entry, nil, []DependencyRef{{Key: "pgbouncer", Name: "pool", Enabled: true}}); err != nil {
+	if err := d.AddToEntry(entry, nil, []DependencyRef{{Key: "pgbouncer", Name: "pool", Enabled: Bool(true)}}); err != nil {
 		t.Fatal(err)
 	}
 	want := strings.Replace(editBase, "              name: backups\n",

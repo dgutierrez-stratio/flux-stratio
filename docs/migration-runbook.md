@@ -109,12 +109,19 @@ flux stratio tenant import \
   [`config-reference.md`](config-reference.md)); a catalog seeded before that field existed gets the
   seed's value for the same type, so it needs no re-seeding. If the catalog can't be loaded at all,
   the command warns that such keys are not set.
-- A dependency's `enabled` (what the ResourceSets read to wire it in: rocket's and intelligence's `genai`,
-  `virtualizer`, `opensearch`, `litellm`) is derived through `chart.uses`: `enabled: true` is written when the app's
-  live HelmRelease values show the integration in use, and the line says which value did. Without a HelmRelease
-  (the app is not migrated yet) the command cannot tell and warns instead: run it again after `apps migrate`, or
-  set `enabled` by hand. A value you wrote, `false` included, is never changed. Left off, the dependency is
-  dropped from the app's `dependsOn` and its prerequisites skip its setup (rocket then gets 403 from genai-api).
+- A dependency's `enabled` is what the ResourceSets read to wire it in (rocket's and intelligence's `genai`,
+  `virtualizer`, `opensearch`, `litellm`; genai's `discovery` and `opensearch`; discovery's `virtualizer`). Which
+  dependencies are switched that way is read from the keos-use-cases templates, so every component is covered and a
+  new one needs nothing here. When such a dependency **runs on the cluster**, the command proposes `enabled: true`
+  and asks, in the terminal, saying what turning it on also changes (the chart variable it sets, the `dependsOn` it
+  adds, a postrequisites Kustomization it creates). "Leave it off" is written as `enabled: false`, so it is not asked
+  again. A value already in the file, `false` included, is never asked about or changed. `--yes` accepts every
+  proposal without asking and reports each one to review. With no terminal to ask on, or with `--dry-run`, a
+  proposal is left undecided and reported (silence never means yes): run it again in a terminal, or with `--yes`. A
+  switchable dependency that does **not** run on the cluster is left off and reported. Left off when it should be
+  on, the dependency is dropped from the app's `dependsOn` and its prerequisites skip its setup (rocket then gets
+  403 from genai-api; genai's chat cannot list its data domains). Presence is weaker evidence than a value the app
+  was configured with, so read what each question says before answering.
 
 - The resulting file is validated every time (`tenantcheck`, also on `--dry-run`, against the proposed result): structure
   and label, entry names, dependencies pointing at declared entries, `enabled` being a boolean, and `flux-operator build

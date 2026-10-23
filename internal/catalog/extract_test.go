@@ -415,3 +415,77 @@ func TestExtractSchema_NestedConfigLeaves(t *testing.T) {
 		t.Error(`a read off a variable not assigned from $componentConfig is not a field`)
 	}
 }
+
+func TestExtractSchema_GatedDependencies(t *testing.T) {
+	block := `
+    <<- $dependencies := get $componentConfig "dependencies" | default dict >>
+    <<- $postgresDependency := get $dependencies "postgres" | default dict >>
+    <<- $opensearchDependency := get $dependencies "opensearch" | default dict >>
+    <<- $discoveryDependency := get $dependencies "discovery" | default dict >>
+    <<- $virtualizerDependency := get $dependencies "virtualizer" | default dict >>
+      dependsOn:
+        - name: apps-<< get $postgresDependency "name" >>
+        <<- if get $opensearchDependency "enabled" | default false >>
+        - name: apps-<< get $opensearchDependency "name" >>
+        <<- if $opensearchAgentEnabled >>
+        - name: apps-<< $opensearchAgentName >>
+        <<- end >>
+        <<- end >>
+        - name: apps-<< get $virtualizerDependency "name" >>
+    <<- if get $discoveryDependency "enabled" | default false >>
+    ---
+    kind: Kustomization
+    metadata:
+      name: apps-<< get $component "name" >>-postrequisites
+    <<- end >>
+      substitute:
+        DISCOVERY_ENABLED: "<< get $discoveryDependency "enabled" | default false >>"
+        DISCOVERY_NAME: << get $discoveryDependency "name" | default "" >>
+`
+	s := extractSchema("foo", block)
+	byKey := map[string]Dependency{}
+	for _, d := range s.Dependencies {
+		byKey[d.Key] = d
+	}
+
+	for _, key := range []string{"postgres", "virtualizer"} {
+		if d := byKey[key]; d.Gated || len(d.Adds) != 0 {
+			t.Errorf("%s: Gated=%v Adds=%v, want an ungated dependency (its `name` is read, never its `enabled`)", key, d.Gated, d.Adds)
+		}
+	}
+
+	os := byKey["opensearch"]
+	if !os.Gated {
+		t.Fatalf("opensearch: Gated = false, want true")
+	}
+	// The nested `if $opensearchAgentEnabled ... end` must not close the block early.
+	if want := []string{"makes the app wait for the dependency (dependsOn)"}; !reflect.DeepEqual(os.Adds, want) {
+		t.Errorf("opensearch.Adds = %q, want %q", os.Adds, want)
+	}
+
+	disc := byKey["discovery"]
+	if !disc.Gated {
+		t.Fatalf("discovery: Gated = false, want true")
+	}
+	want := []string{
+		"sets DISCOVERY_ENABLED in the app's chart values",
+		"creates the Kustomization apps-*-postrequisites",
+	}
+	if !reflect.DeepEqual(disc.Adds, want) {
+		t.Errorf("discovery.Adds = %q, want %q", disc.Adds, want)
+	}
+}
+
+func TestExtractSchema_ReadOfEnabledOnAnUnboundVariableIsIgnored(t *testing.T) {
+	// A variable no `get $dependencies` bound is not a dependency of the component.
+	block := `
+    <<- $dependencies := get $componentConfig "dependencies" | default dict >>
+    <<- $postgresDependency := get $dependencies "postgres" | default dict >>
+    <<- if get $strangerDependency "enabled" | default false >>
+    <<- end >>
+`
+	s := extractSchema("foo", block)
+	if len(s.Dependencies) != 1 || s.Dependencies[0].Gated {
+		t.Errorf("Dependencies = %+v, want only an ungated postgres", s.Dependencies)
+	}
+}

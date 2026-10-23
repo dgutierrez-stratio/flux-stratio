@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -44,12 +45,16 @@ type Field struct {
 	Value any
 }
 
-// DependencyRef is one config.dependencies.<Key> to add: its name, and
-// `enabled: true` when Enabled.
+// DependencyRef is one config.dependencies.<Key> to add: its name, and its
+// `enabled` when Enabled is set (true, or false for an operator's explicit
+// "leave it off"); nil writes no `enabled`, which the ResourceSets read as off.
 type DependencyRef struct {
 	Key, Name string
-	Enabled   bool
+	Enabled   *bool
 }
+
+// Bool is a pointer to b, for DependencyRef.Enabled.
+func Bool(b bool) *bool { return &b }
 
 // ActiveEntries returns every uncommented components entry that has a name,
 // in file order. A commented-out block is not an entry: see CommentedOut.
@@ -524,8 +529,8 @@ func writeFields(b *strings.Builder, pad int, fields []Field) {
 func writeDeps(b *strings.Builder, pad int, deps []DependencyRef) {
 	for _, dep := range deps {
 		b.WriteString(indent(pad) + dep.Key + ":\n")
-		if dep.Enabled {
-			b.WriteString(indent(pad+2) + "enabled: true\n")
+		if dep.Enabled != nil {
+			b.WriteString(indent(pad+2) + "enabled: " + strconv.FormatBool(*dep.Enabled) + "\n")
 		}
 		b.WriteString(indent(pad+2) + "name: " + scalar(dep.Name) + "\n")
 	}

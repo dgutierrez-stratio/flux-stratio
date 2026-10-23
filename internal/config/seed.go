@@ -251,8 +251,8 @@ func SeedCatalog() Catalog {
 			// that name), so the entry drops the legacy "-management" suffix.
 			// The rset names the Kustomization apps-<entry>.
 			//
-			// No siblings, no chart.uses/enabledBy (the ResourceSet gates nothing
-			// on it) and no prepare step: the chart's Deployment is named
+			// No siblings, no enabledBy (the ResourceSet gates nothing on it)
+			// and no prepare step: the chart's Deployment is named
 			// "connectors", the legacy one "connectors-management", so nothing
 			// clashes and the legacy one keeps running next to the new one (see
 			// Notes). The exclusions are not reviewed yet, so none are set.
@@ -388,14 +388,8 @@ func SeedCatalog() Catalog {
 			// Rocket's own sub-Deployments (rocket-catalog, -validator, ...)
 			// are owned by this one and skipped by classification anyway;
 			// model=default excludes rocket-catalog-standalone.
-			Match: cctMatch(kindDeployment, "rocket", "default"),
-			// The paths are legacy configuration the migration patch keeps in the
-			// HelmRelease values: the evidence that rocket uses the integration
-			// (see Chart.Uses).
-			Chart: &Chart{Path: "rocket", Uses: []Use{
-				{Dependency: "genai", Values: []string{"rocketCommon.general.genAI.genaiEnabled"}},
-				{Dependency: "virtualizer", Values: []string{"rocketCommon.general.catalog.virtualizerHost"}},
-			}},
+			Match:   cctMatch(kindDeployment, "rocket", "default"),
+			Chart:   &Chart{Path: "rocket"},
 			Prepare: "prepare-rocket",
 			Notes:   "prepare-rocket runs automatically before migrating: removes the legacy rocket Deployment and the Deployments its server created (rocket-catalog, -debug, -externalservice and -validator, owned by it; the new server recreates them), the chart having changed rocket's immutable selector. rocket-catalog-standalone, the Ingresses and the Services stay.",
 			Exclude: []string{
@@ -413,15 +407,9 @@ func SeedCatalog() Catalog {
 			Component: "intelligence",
 			Rset:      rsetIntelligence,
 			Match:     cctMatch(kindDeployment, "intelligence", ""),
-			// As rocket: legacy configuration kept in the HelmRelease values.
-			Chart: &Chart{Path: "intelligence", Uses: []Use{
-				{Dependency: "genai", Values: []string{"configuration.general.genaiSettings.genaiEnabled"}},
-				{Dependency: "virtualizer", Values: []string{"configuration.settings.AnalyticSettings.crossdataServer.CrossdataServerHost"}},
-				{Dependency: "opensearch", Values: []string{"configuration.general.genaiSettings.genaiLayerConf.genaiAPIIntegration.genaiChainsConf.sqlChainConf.sqlChainOpensearchEnabled"}},
-				{Dependency: "litellm", Values: []string{"configuration.general.genaiSettings.genaiLayerConf.litellmIntegration.litellmUrl"}},
-			}},
-			Prepare: "prepare-intelligence",
-			Notes:   "prepare-intelligence runs automatically before migrating: removes the legacy intelligence Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress intelligence-rocket.<domain> stays (the chart's admin ingress has another host).",
+			Chart:     &Chart{Path: "intelligence"},
+			Prepare:   "prepare-intelligence",
+			Notes:     "prepare-intelligence runs automatically before migrating: removes the legacy intelligence Deployment (the chart gives it a new, immutable selector under the same name); the legacy ingress intelligence-rocket.<domain> stays (the chart's admin ingress has another host).",
 			Exclude: []string{
 				"spec.values.configuration.security.vault.multiuser.approlename",
 				"spec.values.configuration.general.genaiSettings.genaiLayerConf.genaiAPIIntegration.genaiChainsConf.genaiChainsGovernanceUrl",

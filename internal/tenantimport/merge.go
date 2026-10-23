@@ -20,6 +20,10 @@ type CompleteOptions struct {
 	// Config is the component catalog, read for requiredConfig. Nil uses
 	// the seed's.
 	Config *config.Catalog
+	// Decider answers the proposals to enable a gated dependency that runs on
+	// the cluster and the file has no answer for. The zero value asks nobody:
+	// each stays pending and is reported.
+	Decider Decider
 }
 
 // Report is what a Complete run did, grouped the way it is printed.
@@ -36,6 +40,11 @@ type Report struct {
 
 // Empty reports whether the run changed nothing.
 func (r Report) Empty() bool { return len(r.Added) == 0 }
+
+// warnf appends a warning.
+func (r *Report) warnf(format string, a ...any) {
+	r.Warnings = append(r.Warnings, fmt.Sprintf(format, a...))
+}
 
 // Complete adds to doc what a tenant file for the scanned cluster needs and
 // lacks, and nothing else: never removes, reorders, uncomments or
@@ -71,7 +80,7 @@ func Complete(doc *tenantfile.Doc, scanned Components, live Live, cat *catalog.C
 		if !ok {
 			continue
 		}
-		if err := completeEntry(doc, e, schema, scanned, live, byKey, required[e.Key], &r); err != nil {
+		if err := completeEntry(doc, e, schema, scanned, live, byKey, required[e.Key], opts.Decider, &r); err != nil {
 			return r, err
 		}
 	}
@@ -80,7 +89,7 @@ func Complete(doc *tenantfile.Doc, scanned Components, live Live, cat *catalog.C
 	for key, names := range byKey {
 		declared[key] = slices.Clone(names)
 	}
-	if err := completeUndeclared(doc, scanned, byKey, declared, cat, required, &r); err != nil {
+	if err := completeUndeclared(doc, scanned, byKey, declared, cat, required, opts.Decider, &r); err != nil {
 		return r, err
 	}
 
@@ -245,7 +254,7 @@ func ambiguousDepWarning(label, key string, names []string, used string) string 
 		label, key, len(names), strings.Join(names, ", "), used)
 }
 
-func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, scanned Components, live Live, byKey map[string][]string, required map[string]bool, r *Report) error {
+func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, scanned Components, live Live, byKey map[string][]string, required map[string]bool, dec Decider, r *Report) error {
 	label := fmt.Sprintf("components.%s[%s]", e.Key, e.Name)
 	var fields []tenantfile.Field
 	var deps []tenantfile.DependencyRef
@@ -280,7 +289,9 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 		addField("type", "hdfs")
 	}
 	if used != nil {
-		completeUses(doc, e, schema, storageType, used, label, r)
+		if err := completeUses(doc, e, schema, storageType, used, label, dec, r); err != nil {
+			return err
+		}
 	}
 
 	// Config fields: the cluster's own value first, then the template
@@ -368,11 +379,19 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 		}
 		ref := tenantfile.DependencyRef{Key: dep.Key, Name: names[0]}
 		added := fmt.Sprintf("%s: config.dependencies.%s.name: %s", label, dep.Key, names[0])
-		if reason := used.enabledReason(dep.Key); reason != "" {
-			ref.Enabled = true
-			added += fmt.Sprintf(", enabled: true (%s)", reason)
-		} else if used != nil && used.DepUnknown[dep.Key] {
-			r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep.Key))
+		if used != nil {
+			state, err := decideDependency(dec, label, used, dep.Key, r)
+			if err != nil {
+				return err
+			}
+			switch state {
+			case DepOn:
+				ref.Enabled = tenantfile.Bool(true)
+				added += ", enabled: true"
+			case DepOff:
+				ref.Enabled = tenantfile.Bool(false)
+				added += ", enabled: false (left off)"
+			}
 		}
 		deps = append(deps, ref)
 		written = append(written, added)
@@ -387,45 +406,59 @@ func completeEntry(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema cata
 	return nil
 }
 
-// completeUses settles `enabled` for the dependencies e already declares,
-// from the HelmRelease evidence in used: a declared dependency without it
-// gets `enabled: true` when its values show the integration in use; one the
-// operator set to false stays, with a warning; and one the cluster cannot
-// vouch for (no HelmRelease yet) is warned about, never guessed. A new
-// dependency is handled where it is added.
-func completeUses(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, storageType string, used *Entry, label string, r *Report) {
-	for _, dep := range schema.Dependencies {
-		if len(dep.StorageTypes) > 0 && !containsStr(dep.StorageTypes, storageType) {
-			continue
-		}
-		if !tenantfile.HasDependency(e.Node, dep.Key) {
-			continue
-		}
-		current := tenantfile.DependencyField(e.Node, dep.Key, "enabled")
-		reason := used.enabledReason(dep.Key)
-		switch {
-		case reason != "" && current != nil:
-			// Only a HelmRelease value is worth contradicting the operator over;
-			// an assumption is not.
-			if current.Value == "false" && used.DepEnabled[dep.Key] != "" {
-				r.Warnings = append(r.Warnings, fmt.Sprintf(
-					"%s: config.dependencies.%s.enabled is false but %s; left as is — the integration stays off",
-					label, dep.Key, reason))
-			}
-		case reason != "":
-			if tenantfile.DependencyNames(e.Node)[dep.Key] == "" {
-				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: dependency %q has no name; not enabled, fill it in by hand first", label, dep.Key))
-				continue
-			}
-			if err := doc.AddToDependency(e.Node, dep.Key, []tenantfile.Field{{Key: "enabled", Value: true}}); err != nil {
-				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: %v", label, err))
-				continue
-			}
-			r.Added = append(r.Added, fmt.Sprintf("%s: config.dependencies.%s.enabled: true (%s)", label, dep.Key, reason))
-		case used.DepUnknown[dep.Key] && current == nil:
-			r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep.Key))
-		}
+// decideDependency settles `enabled` for dependency key of the scanned entry
+// used, when the tenant file has no answer for it: it asks about a gated
+// dependency that runs on the cluster, and warns about a gated one that does
+// not. The zero state means there is nothing to write (not gated, absent, or
+// still pending).
+func decideDependency(dec Decider, label string, used *Entry, key string, r *Report) (DepState, error) {
+	if used.DepAbsent[key] {
+		r.warnf(absentFormat, label, key)
+		return 0, nil
 	}
+	if _, proposed := used.DepGate[key]; !proposed {
+		return 0, nil
+	}
+	return dec.decide(label, used, key, r.warnf)
+}
+
+// completeUses settles `enabled` for the gated dependencies e already declares
+// without one: asks about each that runs on the cluster and writes the answer
+// (`true`, or an explicit `false` when declined, so it is not asked again);
+// warns about each that does not. A dependency whose `enabled` the file
+// already holds is never asked about or changed, `false` included. A new
+// dependency is handled where it is added.
+func completeUses(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catalog.Schema, storageType string, used *Entry, label string, dec Decider, r *Report) error {
+	for _, dep := range schema.Dependencies {
+		if !dep.Gated || (len(dep.StorageTypes) > 0 && !containsStr(dep.StorageTypes, storageType)) {
+			continue
+		}
+		if !tenantfile.HasDependency(e.Node, dep.Key) || tenantfile.DependencyField(e.Node, dep.Key, "enabled") != nil {
+			continue
+		}
+		if _, proposed := used.DepGate[dep.Key]; proposed && tenantfile.DependencyNames(e.Node)[dep.Key] == "" {
+			r.warnf("%s: dependency %q has no name; not asked about `enabled`, fill the name in by hand first", label, dep.Key)
+			continue
+		}
+		state, err := decideDependency(dec, label, used, dep.Key, r)
+		if err != nil {
+			return err
+		}
+		var value bool
+		switch state {
+		case DepOn:
+			value = true
+		case DepOff:
+		default:
+			continue
+		}
+		if err := doc.AddToDependency(e.Node, dep.Key, []tenantfile.Field{{Key: "enabled", Value: value}}); err != nil {
+			r.warnf("%s: %v", label, err)
+			continue
+		}
+		r.Added = append(r.Added, fmt.Sprintf("%s: config.dependencies.%s.enabled: %t", label, dep.Key, value))
+	}
+	return nil
 }
 
 // completeUndeclared handles the components the scan found live that the
@@ -433,7 +466,7 @@ func completeUses(doc *tenantfile.Doc, e tenantfile.ComponentEntry, schema catal
 // far; declared: only the file's own), appended as new entries — except under a
 // commented-out block, which is the operator's own switch-on-one-at-a-time
 // and never gets a duplicate.
-func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey, declared map[string][]string, cat *catalog.Catalog, required map[string]map[string]bool, r *Report) error {
+func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey, declared map[string][]string, cat *catalog.Catalog, required map[string]map[string]bool, dec Decider, r *Report) error {
 	keys := make([]string, 0, len(scanned))
 	for key := range scanned {
 		keys = append(keys, key)
@@ -459,6 +492,9 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey, declared
 				// What the scan could not resolve may be declared in the file (the
 				// operator added it, or it is appended in this very run).
 				deps := resolveUnresolved(s, label, scanned, byKey, r)
+				if err := dec.decideEntry(label, s, r.warnf); err != nil {
+					return err
+				}
 				if err := doc.AppendEntry(key, s.Name, entryConfig(s, deps)); err != nil {
 					return err
 				}
@@ -473,9 +509,6 @@ func completeUndeclared(doc *tenantfile.Doc, scanned Components, byKey, declared
 					case fieldScaffold:
 						r.Warnings = append(r.Warnings, scaffoldWarning(label, field))
 					}
-				}
-				for _, dep := range undecidedUses(s) {
-					r.Warnings = append(r.Warnings, fmt.Sprintf(undecidedUseFormat, label, dep))
 				}
 			}
 		}

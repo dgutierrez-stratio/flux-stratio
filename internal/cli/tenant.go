@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Stratio/flux-stratio/internal/catalog"
+	"github.com/Stratio/flux-stratio/internal/components"
 	"github.com/Stratio/flux-stratio/internal/config"
 	"github.com/Stratio/flux-stratio/internal/kubeclient"
 	"github.com/Stratio/flux-stratio/internal/log"
@@ -30,7 +31,7 @@ func newTenantCommand() *cobra.Command {
 func newTenantImportCommand() *cobra.Command {
 	var size string
 	var output string
-	var force, dryRun, noValidate bool
+	var force, dryRun, noValidate, yes bool
 
 	cmd := &cobra.Command{
 		Use:     "import",
@@ -39,7 +40,7 @@ func newTenantImportCommand() *cobra.Command {
 		Example: tenantImportExample,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTenantImport(cmd, tenantImportFlags{
-				size: size, output: output, force: force, dryRun: dryRun, noValidate: noValidate,
+				size: size, output: output, force: force, dryRun: dryRun, noValidate: noValidate, yes: yes,
 			})
 		},
 	}
@@ -47,6 +48,7 @@ func newTenantImportCommand() *cobra.Command {
 	cmd.Flags().StringVar(&output, "output", "", "tenant file to write (default: print to stdout); if it exists it is completed, not replaced")
 	cmd.Flags().BoolVar(&force, "force", false, "regenerate --output from scratch even if it exists (drops anything written by hand)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "when completing, print what would change as a diff and write nothing")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "enable every optional dependency that runs on the cluster without asking, reporting each to review (default: ask)")
 	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip validating the resulting tenant file (structure, dependencies, and rendering every ResourceSet against it)")
 	return cmd
 }
@@ -54,6 +56,8 @@ func newTenantImportCommand() *cobra.Command {
 type tenantImportFlags struct {
 	size, output              string
 	force, dryRun, noValidate bool
+	// yes answers every dependency proposal with "enable" instead of asking.
+	yes bool
 }
 
 func runTenantImport(cmd *cobra.Command, f tenantImportFlags) error {
@@ -79,14 +83,17 @@ func runTenantImport(cmd *cobra.Command, f tenantImportFlags) error {
 		return err
 	}
 	// The component catalog tells which config keys switch sibling
-	// workloads on (virtualizer's uiEnabled) and which dependencies an app
-	// uses (`enabled`). Without it those keys fall back to their template
-	// default, which is exactly how a live monitor/ui gets dropped or
-	// rocket loses its genai role, so say so rather than skip silently.
+	// workloads on (virtualizer's uiEnabled). Without it that key falls back
+	// to its template default, which is exactly how a live monitor/ui gets
+	// dropped, so say so rather than skip silently.
 	cfg, err := config.Load(configFlag)
 	if err != nil {
-		logger.Warningf("component catalog not loaded (%v): config keys derived from live sibling workloads (virtualizer's uiEnabled) and dependencies' `enabled` are not set", err)
+		logger.Warningf("component catalog not loaded (%v): config keys derived from live sibling workloads (virtualizer's uiEnabled) are not set", err)
 		cfg = nil
+	} else {
+		for _, d := range cfg.Deprecated() {
+			logger.Warningf("%s", d)
+		}
 	}
 	c, err := kubeclient.New(kubeconfigArgs)
 	if err != nil {
@@ -100,6 +107,7 @@ func runTenantImport(cmd *cobra.Command, f tenantImportFlags) error {
 		Config:     cfg,
 		Client:     c,
 		Log:        logger,
+		Decider:    tenantDecider(cmd, f),
 	}
 	validate := func([]byte, string) error { return nil }
 	if !f.noValidate {
@@ -128,6 +136,20 @@ func runTenantImport(cmd *cobra.Command, f tenantImportFlags) error {
 	}
 	logger.Successf("wrote %s", f.output)
 	return validate(nil, f.output)
+}
+
+// tenantDecider is who answers the proposals to enable a dependency that runs
+// on the cluster: --yes accepts them all, a dry run never asks, and anything
+// else asks on the terminal (stdin that runs out, or a blank answer, leaves the
+// proposal undecided and reported: silence never means yes).
+func tenantDecider(cmd *cobra.Command, f tenantImportFlags) tenantimport.Decider {
+	switch {
+	case f.yes:
+		return tenantimport.Decider{AssumeYes: true}
+	case f.dryRun:
+		return tenantimport.Decider{}
+	}
+	return tenantimport.Decider{Prompter: components.NewTerminal(cmd.InOrStdin(), cmd.ErrOrStderr())}
 }
 
 // validateTenantFile checks the tenant file the run produced (tenantcheck):
@@ -202,7 +224,7 @@ func completeTenantFile(cmd *cobra.Command, opts tenantimport.Options, f tenantI
 	logger.Successf("scan complete")
 
 	report, err := tenantimport.Complete(doc, scanned, live, opts.Catalog, tenantimport.CompleteOptions{
-		TenantName: opts.TenantName, Size: opts.Size, Config: opts.Config,
+		TenantName: opts.TenantName, Size: opts.Size, Config: opts.Config, Decider: opts.Decider,
 	})
 	if err != nil {
 		return err

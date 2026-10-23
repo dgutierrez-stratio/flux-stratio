@@ -2,6 +2,24 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`tenant import` decides `enabled` for every optional dependency of every component, and asks, instead of
+  doing it only for rocket and intelligence.** On eosdev the `genai` entry came out with
+  `dependencies.discovery: {name: discovery}` and no `enabled`: the ResourceSet defaults it to false, the chart
+  rendered `DISCOVERY_DATABASE: ""` and the GenAI chat could not list data domains, with nothing in the import
+  output. `enabled` was written only for the dependencies a hand-written `chart.uses` rule named, seeded for two
+  types. Now the keos-use-cases templates say which dependency of which component is switched by `enabled`
+  (`catalog.Dependency.Gated`, plus `Adds`: what turning it on also changes, read from the template), so every
+  component is covered and a new one or a new gate needs no code. When such a dependency runs on the cluster, the
+  command proposes `enabled: true` and asks, saying what it changes; "leave it off" is written as `enabled: false` so
+  it is not asked again; a value already in the file is never asked about or changed. `--yes`/`-y` accepts every
+  proposal and reports each; with no terminal, or `--dry-run`, a proposal is left undecided and reported; a gated
+  dependency that does not run is reported as not running. `flux stratio doctor` warns about a gated dependency no
+  catalog type produces, and a new test checks the real templates against the seed.
+  **Behaviour change:** `chart.uses` is deprecated and ignored (an old `catalog.yaml` still loads; `tenant import`
+  and `doctor` warn), and rocket and intelligence are asked like every other component instead of getting an
+  automatic `enabled: true` from their HelmRelease values; the old "the value says off" evidence is gone by design.
+  `tenantfile.DependencyRef.Enabled` is now a `*bool` so `false` can be written. The Discovery database id is still
+  not scaffolded (the ResourceSets have no input for it): the chart default `1` applies.
 * **`prepare-gosec-agent` scales the legacy gosec agents to 0, so they stop interfering with their replacements.** The
   legacy `opensearch1-agent` and the new `opensearch1-gosec-agent` deleted each other's monitoring role every ~14.5 s
   (the legacy image names it `metrics` unless `OPENSEARCH_METRICS_USER` is set, the chart sets `prometheus`; each agent

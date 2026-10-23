@@ -19,12 +19,14 @@ type Options struct {
 	Catalog *catalog.Catalog
 	// Config is the migration catalog: it classifies the live workloads into
 	// components (nil uses the seed's), and is read for Chart.EnabledBy to
-	// derive config fields from the live siblings (virtualizer's uiEnabled) and
-	// Chart.Uses to derive dependencies' `enabled` from the live HelmRelease
-	// values. Nil derives nothing of the latter two.
+	// derive config fields from the live siblings (virtualizer's uiEnabled).
 	Config *config.Catalog
 	Client client.Client
 	Log    *log.Logger
+	// Decider answers the proposals to enable a gated dependency that runs on
+	// the cluster (create mode, Run). The zero value asks nobody: each stays
+	// pending and is reported. Complete takes its own, in CompleteOptions.
+	Decider Decider
 }
 
 // Scan is the cluster half of an import: the tenant's components with their
@@ -54,8 +56,12 @@ func Scan(ctx context.Context, opts Options, expandSkeleton bool) (Components, L
 	if err := scanHelmReleases(ctx, opts.Client, opts.Catalog, opts.TenantName, components); err != nil {
 		return nil, Live{}, fmt.Errorf("scanning helmreleases: %w", err)
 	}
-	scanUses(opts, components)
-	assumeLiveUses(opts, components)
+	running := map[*Entry]bool{}
+	for _, entries := range components {
+		for _, e := range entries {
+			running[e] = true
+		}
+	}
 	live, err := scanEnabledBy(ctx, opts.Client, opts.Config, opts.TenantName)
 	if err != nil {
 		return nil, Live{}, fmt.Errorf("scanning sibling workloads: %w", err)
@@ -75,6 +81,7 @@ func Scan(ctx context.Context, opts Options, expandSkeleton bool) (Components, L
 		}
 	}
 	enrich(opts.Catalog, components, requiredConfig(opts.Config), warn)
+	markGates(opts.Catalog, components, running)
 	return components, live, nil
 }
 
@@ -94,19 +101,14 @@ func (o Options) warn(format string, a ...any) {
 	}
 }
 
-// note reports something the run decided from the cluster, as opposed to a
-// warning about something it could not decide.
-func (o Options) note(format string, a ...any) {
-	if o.Log != nil {
-		o.Log.Generatef(format, a...)
-	}
-}
-
 // Run scans a live, not-yet-migrated cluster for TenantName's components
 // and renders a ResourceSetInputProvider skeleton (Create mode).
 func Run(ctx context.Context, opts Options) ([]byte, error) {
 	components, _, err := Scan(ctx, opts, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := opts.Decider.decideAll(components, opts.warn); err != nil {
 		return nil, err
 	}
 	size := opts.Size
