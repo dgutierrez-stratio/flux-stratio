@@ -38,6 +38,7 @@ func legacyLB(name string) *unstructured.Unstructured {
 				"kubectl.kubernetes.io/last-applied-configuration": "{}",
 				"cct.stratio.com/whatever":                         "x",
 				"metallb.universe.tf/address-pool":                 "public",
+				"metallb.io/ip-allocated-from-pool":                "public",
 			},
 		},
 		"spec": map[string]any{

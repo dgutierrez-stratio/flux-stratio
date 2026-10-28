@@ -54,9 +54,14 @@ func (f ServiceFinding) Exposed() bool {
 }
 
 // droppedAnnotationPrefixes are the live annotations a carried Service
-// leaves behind: CCT's own, kubectl's record of its last apply, and Helm's
-// ownership (Helm writes its own on takeover).
-var droppedAnnotationPrefixes = []string{"cct.stratio.com/", "kubectl.kubernetes.io/last-applied-configuration", "meta.helm.sh/"}
+// leaves behind: CCT's own, kubectl's record of its last apply, Helm's
+// ownership (Helm writes its own on takeover) and the pool MetalLB records
+// the address came from (its output, set again by MetalLB; the annotation
+// that asks for a pool, metallb.io/address-pool, is carried).
+var droppedAnnotationPrefixes = []string{
+	"cct.stratio.com/", "kubectl.kubernetes.io/last-applied-configuration", "meta.helm.sh/",
+	"metallb.io/ip-allocated-from-pool", "metallb.universe.tf/ip-allocated-from-pool",
+}
 
 // serviceEdits builds the patch values that carry each exposed legacy
 // Service under service.<key>, where <key> is its name without the
