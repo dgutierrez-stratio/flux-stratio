@@ -189,8 +189,12 @@ Deployments of the whole family, and re-running it after the cutover plans nothi
 It leaves the legacy ingresses, Services and the `virtualizer-loadbalancer` Service alone: if the patch
 carries the legacy `virtualizerUi.general.monitorAPI`/`logoutAPI` (hosts `virtualizer.stratio.<domain>`) the
 UI depends on those ingresses; delete them by hand once the patch uses the chart's `admin.` hosts. The
-legacy `virtualizer-loadbalancer` Service selects the old CCT label and has no endpoints after the
-cutover, and the chart has no LoadBalancer: decide what replaces it.
+legacy `virtualizer-loadbalancer` Service (CCT's `createLoadBalancer`) selects the old CCT label, so the
+cutover would leave it with no endpoints: `apps diff`/`apps migrate` carry it into the patch as
+`service.loadbalancer`, and on push Helm takes it over with its address and the chart's selector (TASK-17;
+a `[NOTE]` says so). Any Service the cutover leaves selecting nothing is reported the same way: an exposed
+one the patch can't carry, or a ClusterIP one no chart Service replaces, is an `[ACTION]`; a legacy metrics
+Service the chart replaces under another name is a `[REVIEW]` leftover to delete by hand when nothing uses it.
 
 ## 5. Back up before touching anything
 

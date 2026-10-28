@@ -2,6 +2,20 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-SNAPSHOT
 
+* **`apps diff` and `apps migrate` look at Services: a legacy LoadBalancer is carried into the patch instead of losing
+  its endpoints at the cutover (TASK-17, eosdev I33).** After virtualizer migrated, the LoadBalancer
+  `virtualizer-loadbalancer` (CCT's `createLoadBalancer`, external 10.202.18.2:13422) kept selecting the CCT label and
+  had no endpoints, and nothing announced it: the diff compared workloads only. Now every live Service that selects
+  only the app's legacy pods is found, before the cutover and after it. An exposed one (LoadBalancer, NodePort) is
+  written into the patch as a `service.<key>` entry rendering its own name, so on push Helm takes the live Service over:
+  same object and address (pinned with `loadBalancerIP`), the chart's selector, owned by Git; a `[NOTE]` says so. One
+  that can't be carried (a name the chart can't render, a controller that can't be told, a named target port the new pod
+  lacks) is an `[ACTION]`. A ClusterIP leftover (the legacy metrics Services of the agents) is a `[REVIEW]` naming the
+  chart Service that replaces it and the commands to save and delete it, or an `[ACTION]` when nothing replaces it.
+  Nothing is deleted. `apps backup` also saves the Services that reach the captured workloads (`service.<name>.yaml`),
+  which `apps diff --baseline` reads.
+  **Behaviour change:** an exposed legacy Service the patch can't carry, or a ClusterIP one no chart Service replaces,
+  now stops `apps migrate --yes`.
 * **`tenant import` decides `enabled` for every optional dependency of every component, and asks, instead of
   doing it only for rocket and intelligence.** On eosdev the `genai` entry came out with
   `dependencies.discovery: {name: discovery}` and no `enabled`: the ResourceSet defaults it to false, the chart

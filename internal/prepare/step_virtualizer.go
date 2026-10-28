@@ -38,7 +38,8 @@ var stepVirtualizer = Step{
 // monitorAPI/logoutAPI URLs depends on them — delete them by hand once the
 // patch uses the chart's hosts), the Services (CCT's, once Helm adopts
 // them) and the legacy virtualizer-loadbalancer Service, which carries no
-// CCT label. See docs/migration-runbook.md.
+// CCT label: the migration patch carries that one, so Helm takes it over on
+// push (internal/diff serviceEdits). See docs/migration-runbook.md.
 //
 // prepare-genai shares it for genai-api, genai-ui and genai-developer-proxy
 // (the same family shape: CCT apps of their own, one chart).

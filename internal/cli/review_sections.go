@@ -104,6 +104,7 @@ func (r chartReview) sections(st reviewStyle) []reviewSection {
 	}
 
 	out = append(out, r.carriedSections()...)
+	out = append(out, r.serviceSections()...)
 	out = append(out, r.specSections(st)...)
 
 	if len(r.Excluded) > 0 {
@@ -224,6 +225,92 @@ func (r chartReview) carriedSections() []reviewSection {
 		Hint:   "So the patch doesn't change them silently. " + label + strings.Join(paths, "; "),
 		Header: []string{"CONTAINER", "SETTING", "LIVE", "GITOPS"}, Rows: rows,
 	}}
+}
+
+// serviceSections reports the live Services that select only the legacy
+// pods, so the cutover leaves them with no endpoints, split by what becomes
+// of them: an exposed one the patch carries (Helm takes it over, same
+// object and address), an exposed one it can't carry, a ClusterIP leftover
+// the chart replaces under another name, and one nothing replaces. Nothing
+// is ever removed: a leftover is the operator's to delete.
+func (r chartReview) serviceSections() []reviewSection {
+	var carried, uncarried, replaced, lost []diff.ServiceFinding
+	for _, f := range r.Services {
+		switch {
+		case f.Exposed() && f.Path != "":
+			carried = append(carried, f)
+		case f.Exposed():
+			uncarried = append(uncarried, f)
+		case f.Replacement != "":
+			replaced = append(replaced, f)
+		default:
+			lost = append(lost, f)
+		}
+	}
+	ref := func(f diff.ServiceFinding) string { return f.Namespace + "/" + f.Name }
+	var out []reviewSection
+	if len(carried) > 0 {
+		rows := make([][]string, len(carried))
+		paths := make([]string, len(carried))
+		for i, f := range carried {
+			rows[i] = []string{ref(f), f.Type, orNone(f.Address), f.Ports, f.Workload}
+			paths[i] = f.Path
+		}
+		out = append(out, reviewSection{
+			Level: levelNote, Title: fmt.Sprintf("%d exposed legacy Service(s) carried into the patch", len(carried)),
+			Hint: "They select only the legacy pods and the chart doesn't render them: the patch declares each one under its own name, " +
+				"so Helm takes it over on push, the same object and address, selecting the new pods. Patch path(s): " + strings.Join(paths, "; "),
+			Header: []string{"SERVICE", "TYPE", "ADDRESS", "PORTS", "WORKLOAD"}, Rows: rows,
+		})
+	}
+	if len(uncarried) > 0 {
+		rows := make([][]string, len(uncarried))
+		for i, f := range uncarried {
+			rows[i] = []string{ref(f), f.Type, orNone(f.Address), f.Ports, f.Reason}
+		}
+		out = append(out, reviewSection{
+			Level: levelAction, Title: fmt.Sprintf("%d exposed legacy Service(s) will lose their endpoints at the cutover", len(uncarried)),
+			Hint: "They select only the legacy pods and the patch can't carry them: their address stops answering. " +
+				"Declare them in the tenant patch by hand, or decide what replaces them, before migrating.",
+			Header: []string{"SERVICE", "TYPE", "ADDRESS", "PORTS", "WHY"}, Rows: rows,
+		})
+	}
+	if len(replaced) > 0 {
+		rows := make([][]string, len(replaced))
+		for i, f := range replaced {
+			scraped := "no"
+			if f.Monitored {
+				scraped = "yes"
+			}
+			rows[i] = []string{ref(f), f.Ports, f.Replacement, scraped}
+		}
+		out = append(out, reviewSection{
+			Level: levelReview, Title: fmt.Sprintf("%d legacy Service(s) left behind, replaced by the chart's", len(replaced)),
+			Hint: "They select only the legacy pods and have no endpoints after the cutover; the chart serves the same port through the Service shown " +
+				"(SCRAPED: a ServiceMonitor of the chart selects it). Nothing removes them: once nothing uses one, save it " +
+				"(kubectl -n <ns> get service <name> -o yaml > <name>.yaml) and delete it (kubectl -n <ns> delete service <name>).",
+			Header: []string{"SERVICE", "PORTS", "REPLACED BY", "SCRAPED"}, Rows: rows,
+		})
+	}
+	if len(lost) > 0 {
+		rows := make([][]string, len(lost))
+		for i, f := range lost {
+			rows[i] = []string{ref(f), f.Ports, f.Workload}
+		}
+		out = append(out, reviewSection{
+			Level: levelAction, Title: fmt.Sprintf("%d legacy Service(s) will lose their endpoints and the chart serves none of their ports", len(lost)),
+			Hint:   "They select only the legacy pods. Find what uses them before the cutover.",
+			Header: []string{"SERVICE", "PORTS", "WORKLOAD"}, Rows: rows,
+		})
+	}
+	return out
+}
+
+func orNone(v string) string {
+	if v == "" {
+		return "none"
+	}
+	return v
 }
 
 func orUnset(v string) string {

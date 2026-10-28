@@ -152,7 +152,7 @@ func runAppsDesiredDiff(cmd *cobra.Command, app config.App, env config.Environme
 
 	review := chartReview{
 		Unmapped: result.UnmappedDiffs, Missing: result.MissingWorkloads, LiveOnly: result.LiveOnly, Native: result.Native,
-		SpecDiffs: result.SpecDiffs, Carried: result.CarriedResources, Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
+		SpecDiffs: result.SpecDiffs, Carried: result.CarriedResources, Services: result.Services, Excluded: result.Excluded, Source: liveSource(resolvedBaseline),
 		Prepare: app.Prepare,
 	}
 	review.Extra = slices.Concat(
@@ -279,6 +279,11 @@ type chartReview struct {
 	// Carried are the containers whose live resources the patch carries:
 	// information, so the patch doesn't change them silently.
 	Carried []diff.ResourceEdit
+	// Services are the live Services the cutover would leave selecting
+	// nothing: one exposed and not carried into the patch, or a ClusterIP
+	// one the chart serves none of the ports of, is a warning (see
+	// hasWarnings); a carried one or a replaced leftover is not.
+	Services []diff.ServiceFinding
 	// Excluded are the differences the catalog's exclude list kept out of
 	// the patch: reported, but not a warning (see hasWarnings).
 	Excluded []diff.ExcludedDiff
@@ -296,7 +301,18 @@ type chartReview struct {
 // hasWarnings reports whether reportChartReview warns about anything for r:
 // Excluded and the informational SpecDiffs never count.
 func (r chartReview) hasWarnings() bool {
-	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || len(r.LiveOnly) > 0 || len(specDiffsOf(r.SpecDiffs, diff.SpecRisk)) > 0
+	return len(r.Missing) > 0 || len(r.Unmapped) > 0 || len(r.LiveOnly) > 0 || len(specDiffsOf(r.SpecDiffs, diff.SpecRisk)) > 0 ||
+		slices.ContainsFunc(r.Services, serviceLost)
+}
+
+// serviceLost reports whether the cutover leaves f's Service unreachable
+// with nothing taking its place: exposed and not carried into the patch,
+// or a ClusterIP one no rendered Service replaces.
+func serviceLost(f diff.ServiceFinding) bool {
+	if f.Exposed() {
+		return f.Path == ""
+	}
+	return f.Replacement == ""
 }
 
 // specDiffsOf are the diffs of one severity, in order.

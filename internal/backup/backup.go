@@ -517,6 +517,11 @@ func captureChartFromHelmRelease(ctx context.Context, opts Options, dir string, 
 	if err != nil {
 		return nil, err
 	}
+	services, err := writeServiceManifests(ctx, opts, dir, liveWorkloads)
+	if err != nil {
+		return nil, err
+	}
+	manifests = append(manifests, services...)
 	envs, err := appdiff.LiveWorkloadEnvs(ctx, aopts, liveWorkloads)
 	if err != nil {
 		return nil, err
@@ -561,6 +566,30 @@ func writeWorkloadManifests(dir string, wls []*unstructured.Unstructured) ([]str
 	for _, w := range wls[1:] {
 		name := WorkloadManifestFile(w.GetKind(), w.GetName())
 		if err := writeYAMLFile(dir, name, w.Object); err != nil {
+			return nil, err
+		}
+		files = append(files, name)
+	}
+	return files, nil
+}
+
+// writeServiceManifests saves every Service that selects one of wls' pods
+// as its appdiff.ServiceManifestFile: how clients reach the app, kept for an
+// undo and for apps diff --baseline, which finds the legacy ones among them.
+// A cluster that refuses the Service list costs a warning, not the backup.
+func writeServiceManifests(ctx context.Context, opts Options, dir string, wls []*unstructured.Unstructured) ([]string, error) {
+	if opts.Client == nil {
+		return nil, nil
+	}
+	services, err := appdiff.ServicesSelecting(ctx, opts.Client, wls)
+	if err != nil {
+		opts.Log.Warningf("listing the Services of %q (%v): none saved with its workloads", opts.App.ID, err)
+		return nil, nil
+	}
+	var files []string
+	for _, svc := range services {
+		name := appdiff.ServiceManifestFile(svc.GetName())
+		if err := writeYAMLFile(dir, name, svc.Object); err != nil {
 			return nil, err
 		}
 		files = append(files, name)
@@ -671,6 +700,11 @@ func writeWorkloads(ctx context.Context, opts Options, dir string, wls []*unstru
 	if err != nil {
 		return nil, err
 	}
+	services, err := writeServiceManifests(ctx, opts, dir, wls)
+	if err != nil {
+		return nil, err
+	}
+	manifests = append(manifests, services...)
 	getter := envvars.ClientGetter{Client: opts.Client}
 	envs := make([]map[string]string, 0, len(wls))
 	for _, wl := range wls {

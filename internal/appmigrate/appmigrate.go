@@ -68,6 +68,8 @@ type Result struct {
 	// appdiff.Result.
 	SpecDiffs        []diff.SpecDiff
 	CarriedResources []diff.ResourceEdit
+	// Services — see appdiff.Result.
+	Services []diff.ServiceFinding
 	// LiveSize — see appdiff.Result.
 	LiveSize string
 	// Excluded are the differences the app's exclude list kept out of the
@@ -151,7 +153,7 @@ func plan(ctx context.Context, opts Options) (*Result, *tenantfile.Doc, string, 
 		DroppedFromExisting: diffResult.DroppedFromExisting,
 		Before:              string(before), After: string(before),
 		UnmappedDiffs: diffResult.UnmappedDiffs, LiveOnly: diffResult.LiveOnly, Native: diffResult.Native, MissingWorkloads: diffResult.MissingWorkloads,
-		SpecDiffs: diffResult.SpecDiffs, CarriedResources: diffResult.CarriedResources, LiveSize: diffResult.LiveSize,
+		SpecDiffs: diffResult.SpecDiffs, CarriedResources: diffResult.CarriedResources, Services: diffResult.Services, LiveSize: diffResult.LiveSize,
 		Excluded: diffResult.Excluded,
 	}
 	if result.UnresolvedDeps, err = unresolvedDeps(doc, opts.Catalog, opts.App); err != nil {

@@ -128,6 +128,10 @@ type Result struct {
 	// (diff.ResourceEdit), so SpecDiffs no longer lists them: reported so
 	// the patch doesn't change them silently.
 	CarriedResources []diff.ResourceEdit
+	// Services are the live Services the cutover would leave selecting
+	// nothing (diff.ServiceFinding): the exposed ones Patch carries, so Helm
+	// takes them over, and those it can't or doesn't carry.
+	Services []diff.ServiceFinding
 	// Excluded are the differences the app's exclude list kept out of the
 	// patch — informational, not something left to review.
 	Excluded          []diff.ExcludedDiff

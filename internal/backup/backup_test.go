@@ -313,3 +313,40 @@ func TestRun_UsesRealClockByDefault(t *testing.T) {
 		t.Errorf("Dir = %q, want it to contain the current year %q (default clock should be time.Now)", result.Dir, nowYear)
 	}
 }
+
+// The Services that reach a captured workload's pods are saved beside it,
+// each as service.<name>.yaml: an undo copy, and what apps diff --baseline
+// finds the legacy ones in. Others are not.
+func TestWriteServiceManifests(t *testing.T) {
+	wl := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{"name": "virtualizer", "namespace": "stratio-apps"},
+		"spec":     map[string]any{"template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"cct.stratio.com/application_id": "virtualizer.stratio-apps"}}}},
+	}}
+	svc := func(name string, selector map[string]any) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Service",
+			"metadata": map[string]any{"name": name, "namespace": "stratio-apps"},
+			"spec":     map[string]any{"type": "LoadBalancer", "selector": selector, "ports": []any{map[string]any{"port": int64(13422)}}},
+		}}
+	}
+	c := fake.NewClientBuilder().WithObjects(
+		svc("virtualizer-loadbalancer", map[string]any{"cct.stratio.com/application_id": "virtualizer.stratio-apps"}),
+		svc("rocket", map[string]any{"cct.stratio.com/application_id": "rocket.stratio-apps"}),
+	).Build()
+	dir := t.TempDir()
+	files, err := writeServiceManifests(context.Background(), Options{Client: c, Log: log.New(io.Discard, false)}, dir, []*unstructured.Unstructured{wl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != "service.virtualizer-loadbalancer.yaml" {
+		t.Fatalf("files = %v", files)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, files[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "type: LoadBalancer") {
+		t.Errorf("saved:\n%s", data)
+	}
+}

@@ -147,6 +147,13 @@ type ChartDiffInput struct {
 	// NoResourceCarry leaves the containers' live resources out of the
 	// patch: they stay in the comparison as differences (CompareLiveSpecs).
 	NoResourceCarry bool
+	// LegacyServices are the live Services that reach the legacy pods and
+	// no rendered one: the exposed ones are carried into the patch (see
+	// serviceEdits), every one is reported (ChartDiffResult.Services).
+	LegacyServices []LegacyService
+	// Release is the Helm release name, the prefix of every Service name
+	// the chart renders.
+	Release string
 	// Defines are the chart's named templates (ScanChartDefines): what a
 	// helper an env line includes reads, to say why a variable has no path.
 	Defines map[string]string
@@ -193,6 +200,9 @@ type ChartDiffResult struct {
 	// ResourceEdits are the containers whose live resources Patch carries,
 	// for VerifyResources to check against a render of the patched chart.
 	ResourceEdits []ResourceEdit
+	// Services are what became of each LegacyServices entry: carried into
+	// Patch (for VerifyServices to check), or reported.
+	Services []ServiceFinding
 	// Workloads are the compared sides, one per Live entry in order —
 	// exposed so a caller can present a full before/after view (e.g.
 	// internal/appdiff builds a unified diff from it), not just the
@@ -408,6 +418,13 @@ func ChartDiff(in ChartDiffInput) *ChartDiffResult {
 		}
 		result.ResourceEdits = carried
 	}
+	serviceValues, services := serviceEdits(in.Values, in)
+	if serviceValues != nil {
+		for k, v := range MergeValues(values, serviceValues) {
+			values[k] = v
+		}
+	}
+	result.Services = services
 	sortUnmapped(result.UnmappedDiffs)
 	sort.SliceStable(result.Excluded, func(i, j int) bool {
 		a, b := result.Excluded[i], result.Excluded[j]

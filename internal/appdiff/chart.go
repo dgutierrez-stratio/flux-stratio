@@ -59,6 +59,10 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 	if err != nil {
 		return nil, err
 	}
+	legacy, err := legacyServices(ctx, opts, hrNamespace, renderedDocs, live)
+	if err != nil {
+		return nil, err
+	}
 	result := diff.ChartDiff(diff.ChartDiffInput{
 		Rendered: renderedDocs, Live: live, Files: files,
 		ValuesRoot: opts.App.ValuesRoot, HRName: opts.App.Object, Exclude: opts.App.Exclude,
@@ -67,6 +71,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		// hiding what the patch leaves different: apps migrate (which strips
 		// the patch) is the one that carries.
 		NoResourceCarry: !opts.StripTenantPatch && len(rendered.TenantPatches) > 0,
+		LegacyServices:  legacy, Release: diff.ReleaseName(rendered.Object, opts.App.Object),
 	})
 	patched, err := verifyPatch(ctx, opts, rendered, renderedDocs, live, result)
 	if err != nil {
@@ -83,6 +88,7 @@ func chartDiff(ctx context.Context, opts Options, rendered *render.Result) (*Res
 		Native:            result.Native,
 		SpecDiffs:         specDiffs(opts, hrNamespace, live, patched),
 		CarriedResources:  result.ResourceEdits,
+		Services:          result.Services,
 		LiveSize:          liveSize(live),
 		Excluded:          result.Excluded,
 		RenderedOnlyCount: result.RenderedOnlyCount,
@@ -238,10 +244,11 @@ func verifyPatch(ctx context.Context, opts Options, rendered *render.Result, ren
 	mapped, carried := len(result.Mapped), len(result.ResourceEdits)
 	diff.VerifyMapped(result, patched)
 	diff.VerifyResources(result, patched, live)
+	failedServices := diff.VerifyServices(result, patched)
 	if result.Patch == nil {
 		return renderedDocs, nil
 	}
-	if len(result.Mapped) != mapped || len(result.ResourceEdits) != carried {
+	if len(result.Mapped) != mapped || len(result.ResourceEdits) != carried || len(failedServices) > 0 {
 		if patched, _, err = renderChartWith(ctx, opts, rendered, diff.PatchValues(result.Patch)); err != nil {
 			return nil, fmt.Errorf("rendering %s with its patch applied: %w", opts.App.Object, err)
 		}

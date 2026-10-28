@@ -473,3 +473,42 @@ func TestLiveSource_NamesTheSideAfterWhatItIs(t *testing.T) {
 		}
 	}
 }
+
+// The Services the cutover leaves selecting nothing: a carried one is a note,
+// an exposed one the patch can't carry and a ClusterIP one nothing replaces
+// are actions that stop --yes, a replaced leftover is a review that doesn't.
+func TestReportChartReview_LegacyServices(t *testing.T) {
+	carried := diff.ServiceFinding{Namespace: "stratio-apps", Name: "virtualizer-loadbalancer", Type: "LoadBalancer",
+		Address: "10.202.18.2", Ports: "13422/TCP", Workload: "virtualizer", Path: "service.loadbalancer"}
+	uncarried := diff.ServiceFinding{Namespace: "stratio-apps", Name: "sql-lb", Type: "LoadBalancer", Ports: "13422/TCP",
+		Workload: "virtualizer", Reason: "the chart names its Services virtualizer-<name>"}
+	replaced := diff.ServiceFinding{Namespace: "stratio-datastores", Name: "dg-hdfs-agent", Type: "ClusterIP", Ports: "13421/TCP",
+		Workload: "dg-hdfs-agent", Replacement: "dg-hdfs-agent-metrics", Monitored: true}
+	lost := diff.ServiceFinding{Namespace: "stratio-datastores", Name: "old", Type: "ClusterIP", Ports: "80/TCP", Workload: "dg-hdfs-agent"}
+
+	out := reviewOutput(chartReview{Services: []diff.ServiceFinding{carried, uncarried, replaced, lost}, Source: "live cluster"})
+	for _, want := range []string{
+		"1 exposed legacy Service(s) carried into the patch",
+		"[ACTION] 1 exposed legacy Service(s) will lose their endpoints at the cutover", "stratio-apps/sql-lb", "virtualizer-<name>",
+		"[REVIEW] 1 legacy Service(s) left behind, replaced by the chart's", "dg-hdfs-agent-metrics", "kubectl -n <ns> delete service <name>",
+		"[ACTION] 1 legacy Service(s) will lose their endpoints and the chart serves none of their ports", "stratio-datastores/old",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	for name, tt := range map[string]struct {
+		services []diff.ServiceFinding
+		warns    bool
+	}{
+		"carried":   {[]diff.ServiceFinding{carried}, false},
+		"replaced":  {[]diff.ServiceFinding{replaced}, false},
+		"uncarried": {[]diff.ServiceFinding{uncarried}, true},
+		"lost":      {[]diff.ServiceFinding{lost}, true},
+	} {
+		if got := (chartReview{Services: tt.services}).hasWarnings(); got != tt.warns {
+			t.Errorf("%s: hasWarnings() = %v, want %v", name, got, tt.warns)
+		}
+	}
+}

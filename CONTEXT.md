@@ -272,6 +272,18 @@ convention, that repo is the reference:
   `connectors-management`) gets a `LegacyRunsField` `info` note instead (`[NOTE]` "keeps running next to the new one"),
   and a clash's `[ACTION]` (`review_sections.go`, `selectorHint`) names the legacy `namespace/name` and says what to do
   by the app's prepare step (none, or one that doesn't delete it; one with `ReplacesWorkloads` downgrades it to info).
+  Chart mode also looks at the Services the cutover leaves selecting nothing (`appdiff/services.go`,
+  `diff/servicepatch.go`, TASK-17): `findLegacyServices` keeps the live (or, with `--baseline`, backed-up
+  `service.<name>.yaml`) Services of the release's and the app's live namespaces that no Flux/Helm owns, that select no
+  rendered pod, whose name the chart doesn't render (Helm takes that one over itself), and that select a workload's
+  legacy pods (its live pod labels while it is the legacy one, else CCT's `cct.stratio.com/application_id=<name>.<ns>`).
+  `serviceEdits` carries each exposed one (LoadBalancer, NodePort) into the patch as `service.<name minus "<release>-">`
+  (`nameOverride` renders the same name, `controller` the paired workload's, ports, `loadBalancerIP` pinned from the
+  status, non-CCT annotations; only what differs when the chart declares the entry), so Helm takes the live Service over
+  on push with its address; `VerifyServices` takes it back out when the patched render doesn't produce it. ClusterIP
+  ones are never carried: reported with the chart Service that replaces them (and whether a ServiceMonitor scrapes it).
+  An exposed one not carried, or a ClusterIP one nothing replaces, is an `[ACTION]` that stops `--yes`. Nothing is ever
+  deleted; `apps backup` saves the Services that select the captured workloads (`ServicesSelecting`).
   `CoerceValue` handles the
   octal-looking-string/float/`yes`-`null` typed-value edge cases the Python client got wrong.
 - **`internal/appdiff`** — orchestrates `internal/render` + `internal/diff` for `apps diff`'s
