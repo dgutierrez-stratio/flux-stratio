@@ -230,6 +230,10 @@ func SeedCatalog() Catalog {
 				"spec.values.virtualizerMonitor.general.approlename",
 				"spec.values.virtualizerServer.general.governanceRegistration.governanceDeployment",
 				"spec.values.virtualizerServer.general.governanceRegistration.governanceBaseUri",
+				// The legacy value is "s3-secret"; the chart's SecretsBundle declares
+				// internal-s3-secret and prunes every other name from the app's Vault
+				// folder, so carrying it over leaves the app without credentials.
+				"spec.values.server.storage.s3.credentials",
 			},
 		},
 		{
@@ -399,6 +403,9 @@ func SeedCatalog() Catalog {
 				"spec.values.rocketCommon.general.genAI.genaiLayerConf.chainsGovernanceUrl",
 				"spec.values.rocketCommon.general.governanceRegistration.governanceDeployment",
 				"spec.values.rocketCommon.general.governanceRegistration.governanceBaseUri",
+				// Same as virtualizer: the legacy "s3-secret" is pruned from Vault by the
+				// chart's SecretsBundle; the chart default (internal-s3-secret) is the right one.
+				"spec.values.server.storage.s3.credentials",
 			},
 		},
 		{
