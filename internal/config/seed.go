@@ -175,6 +175,10 @@ func SeedCatalog() Catalog {
 				{Key: "dependencies.governancePostgres.name", Env: "DATASTORE_DATABASE"},
 			},
 			Prepare: "prepare-dg-agent",
+			// The s3 overlay of keos-apps sets customer-s3-secret (and declares it in
+			// the SecretsBundle); the legacy value "s3-secret" is pruned from Vault by
+			// that bundle, so carrying it over leaves the agent without credentials.
+			Exclude: []string{"spec.values.agent.config.s3.customStratioCredentialsDefinition"},
 			Notes:   "prepare-dg-agent runs automatically before migrating: removes the legacy agent Deployment (the chart gives it a new, immutable selector under the same name).",
 		},
 		{
