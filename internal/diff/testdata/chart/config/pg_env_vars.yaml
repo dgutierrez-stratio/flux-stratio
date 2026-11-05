@@ -1,0 +1,2 @@
+DATASTORE_TYPE: {{ .Values.datarestPgInternal.general.datastore.datastoreType | quote }}
+DATASTORE_TYPE_MD5: {{ .Values.datarestPgmd5.general.datastore.datastoreType | quote }}
